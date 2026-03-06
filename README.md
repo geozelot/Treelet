@@ -1,10 +1,13 @@
+[![npm](https://img.shields.io/npm/v/@geozelot/treelet)](https://www.npmjs.com/package/@geozelot/treelet)
+[![CI](https://github.com/geozelot/treelet/actions/workflows/ci.yml/badge.svg)](https://github.com/geozelot/treelet/actions/workflows/ci.yml)
+[![license](https://img.shields.io/npm/l/@geozelot/treelet)](./LICENSE)
+[![gzip](https://img.shields.io/bundlephobia/minzip/@geozelot/treelet)](https://bundlephobia.com/package/@geozelot/treelet)
+
 # <img src="assets/treelet_logo.svg?sanitize=true" width="27"/> Treelet
 
 #### A lightweight 3D terrain & overlay map library for the web - inspired by [Leaflet](https://leafletjs.com/) and powered by [Three.js](https://threejs.org/).
 
 Treelet renders tiled elevation data as 3D terrain with drape overlays, LOD scheduling, and shader-based visualization - in the spirit of Leaflet's simple high-level API, solid low-level access, and zero bloat.
-
-### [Live Demo](https://geozelot.github.io/treelet/)
 
 ### Features
 
@@ -21,6 +24,9 @@ Treelet renders tiled elevation data as 3D terrain with drape overlays, LOD sche
 _This had been a project related to my PHD and that I needed to keep private until now - thoroughly overhauled and elevated to current tech standards. 3D terrain rendering has become more commonly supported, but this library still shines with simplicity, ease-of-use and performance. It's especially useful for self-hosted elevation and overlay data._
 
 ##
+
+### [Live Demo](https://geozelot.github.io/treelet/)
+
 
 ## Quick Start
 
@@ -454,6 +460,13 @@ Both bundles require the `tileWorker` asset file (`dist/assets/tileWorker-*.js`)
 ## Browser Support
 
 Modern browsers with **WebGL2** and **Web Workers**. Requires ES2020+.
+
+
+## What's next
+- compositional overlay blend modes
+- additional elevation-derived visualization modes
+- support for more sources and formats
+
 
 ## License
 

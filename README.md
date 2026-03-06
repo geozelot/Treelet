@@ -468,4 +468,4 @@ Modern browsers with **WebGL2** and **Web Workers**. Requires ES2020+.
 
 ## License
 
-MIT
+[MIT](LICENSE)

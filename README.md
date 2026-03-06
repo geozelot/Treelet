@@ -464,6 +464,7 @@ Modern browsers with **WebGL2** and **Web Workers**. Requires ES2020+.
 - compositional overlay blend modes
 - additional elevation-derived visualization modes
 - support for more sources and formats
+- responsive UI
 
 
 ## License

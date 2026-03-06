@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "treelet-demo",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["vite", "--config", "demo/vite.config.ts", "--host"],
+      "port": 3000
+    }
+  ]
+}

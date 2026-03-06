@@ -1,0 +1,62 @@
+{
+  "name": "@geozelot/treelet",
+  "version": "0.1.0",
+  "description": "A lightweight 3D terrain and overlay map library using Three.js - this is Leaflet for 3D terrain",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/geozelot/treelet.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "main": "./dist/treelet.es.js",
+  "module": "./dist/treelet.es.js",
+  "types": "./dist/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/types/index.d.ts",
+      "import": "./dist/treelet.es.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "dev": "vite --config demo/vite.config.ts",
+    "build": "vite build && vite build --config vite.config.standalone.ts",
+    "build:slim": "vite build",
+    "build:standalone": "vite build --config vite.config.standalone.ts",
+    "build:demo": "vite build --config demo/vite.config.ts",
+    "test": "vitest",
+    "typecheck": "tsc --noEmit",
+    "preview": "vite preview"
+  },
+  "peerDependencies": {
+    "three": ">=0.171.0"
+  },
+  "dependencies": {
+    "comlink": "^4.4.2"
+  },
+  "devDependencies": {
+    "@types/three": "^0.173.0",
+    "three": "^0.173.0",
+    "typescript": "^5.7.0",
+    "vite": "^6.4.1",
+    "vite-plugin-dts": "^4.5.0",
+    "vitest": "^3.0.0"
+  },
+  "keywords": [
+    "3d",
+    "terrain",
+    "tiles",
+    "threejs",
+    "webgl",
+    "dem",
+    "elevation",
+    "gis",
+    "mapping",
+    "leaflet"
+  ],
+  "license": "MIT"
+}

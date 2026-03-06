@@ -9,6 +9,8 @@
 
 Treelet renders tiled elevation data as 3D terrain with drape overlays, LOD scheduling, and shader-based visualization - in the spirit of Leaflet's simple high-level API, solid low-level access, and zero bloat.
 
+### [Live Demo](https://geozelot.github.io/treelet/)
+
 ### Features
 
 - **Tile sources** — XYZ, OGC WMS, OGC WMTS (RESTful + KVP)
@@ -22,10 +24,6 @@ Treelet renders tiled elevation data as 3D terrain with drape overlays, LOD sche
 ##
 
 _This had been a project related to my PHD and that I needed to keep private until now - thoroughly overhauled and elevated to current tech standards. 3D terrain rendering has become more commonly supported, but this library still shines with simplicity, ease-of-use and performance. It's especially useful for self-hosted elevation and overlay data._
-
-##
-
-### [Live Demo](https://geozelot.github.io/treelet/)
 
 
 ## Quick Start

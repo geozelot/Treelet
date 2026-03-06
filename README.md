@@ -3,7 +3,7 @@
 [![license](https://img.shields.io/npm/l/@geozelot/treelet)](./LICENSE)
 [![gzip](https://img.shields.io/bundlephobia/minzip/@geozelot/treelet)](https://bundlephobia.com/package/@geozelot/treelet)
 
-# <img src="assets/treelet_logo.svg?sanitize=true" width="27"/> Treelet
+# <img src="assets/treelet_logo.svg?sanitize=true" width="33"/> Treelet
 
 #### A lightweight 3D terrain & overlay map library for the web - inspired by [Leaflet](https://leafletjs.com/) and powered by [Three.js](https://threejs.org/).
 

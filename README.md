@@ -9,7 +9,7 @@
 
 Treelet renders tiled elevation data as 3D terrain with drape overlays, LOD scheduling, and shader-based visualization - in the spirit of Leaflet's simple high-level API, solid low-level access, and zero bloat.
 
-### [Live Demo](https://geozelot.github.io/treelet/)
+### [Live Demo](https://geozelot.github.io/Treelet/)
 
 ### Features
 

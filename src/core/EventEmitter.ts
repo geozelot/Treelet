@@ -54,9 +54,7 @@ export class EventEmitter<TMap extends {}> {
   protected emit<K extends keyof TMap>(event: K, data: TMap[K]): void {
     const handlers = this.listeners.get(event);
     if (handlers) {
-      for (const handler of handlers) {
-        handler(data);
-      }
+      for (const handler of handlers) handler(data);
     }
   }
 

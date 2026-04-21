@@ -1,7 +1,8 @@
 // ============================================================================
 // treelet.js - Main Orchestrator
 // The central class that wires together scene, tiles, layers, workers, UI,
-// shaders, seam resolution, and drape compositing.
+// and rendering. Delegates display mutations to DisplayController and layer
+// lifecycle to LayerController.
 //
 // Layer architecture:
 //   Base layer  = geometry source (elevation data)
@@ -10,53 +11,83 @@
 //   Only one drape active at a time (no blending).
 // ============================================================================
 
-import type { ShaderMaterial } from 'three';
 import { EventEmitter } from './EventEmitter';
-import { DEFAULT_OPTIONS, WEB_MERCATOR_FULL_EXTENT } from './constants';
+import { DEFAULT_OPTIONS, WEB_MERCATOR_FULL_EXTENT, validateAtlasConfig } from './constants';
 import type {
   TreeletOptions,
   ResolvedTreeletOptions,
   TreeletEventMap,
-  BaseLayerOptions,
-  DrapeLayerOptions,
   LngLat,
-  TileCoord,
   BaseDrapeMode,
-  ShaderMode,
+  BlendMode,
   ColorRamp,
   VisibleExtent,
 } from './types';
 import { SceneManager } from '../scene/SceneManager';
 import type { CameraController } from '../scene/CameraController';
-import type { BaseLayer } from '../layers/base/BaseLayer';
-import type { DrapeLayer } from '../layers/drape/DrapeLayer';
+import type { BaseLayer } from '../layers/BaseLayer';
+import type { DrapeLayer } from '../layers/DrapeLayer';
+import type {
+  BaseLayerOptions,
+  DrapeLayerOptions,
+  OverlayLayerOptions,
+  LayerHandle,
+} from '../layers/types';
 import { TileGrid } from '../tiles/TileGrid';
-import { TileScheduler, type LODContext } from '../tiles/TileScheduler';
-import { TileCache, type CacheEntry } from '../tiles/TileCache';
-import { tileKey } from '../tiles/TileIndex';
-import { createTileMesh, createElevationMesh } from '../tiles/TileMesh';
 import { WebMercator } from '../crs/WebMercator';
 import { WorkerPool } from '../workers/WorkerPool';
 import { LayerRegistry } from '../layers/LayerRegistry';
-import { SeamResolver } from '../layers/base/SeamResolver';
-import { DrapeCompositor } from '../layers/drape/DrapeCompositor';
-import {
-  createTerrainMaterial,
-  setMaterialMode,
-  setMaterialColorRamp,
-  setMaterialContourEnabled,
-  setMaterialContourSettings,
-  setMaterialWireframe,
-  setMaterialBaseWhite,
-  setMaterialContourColor,
-  setMaterialDrape,
-  isTerrainMaterial,
-} from '../shaders/TerrainMaterial';
+import { TerrainRenderer } from '../terrain/TerrainRenderer';
+import { DisplayController } from './DisplayController';
+import { LayerController } from './LayerController';
 import { TreeletCompass } from '../ui/TreeletCompass';
 import { TreeletAttribution } from '../ui/TreeletAttribution';
 
-/** Special ID for the virtual BaseDrape layer. */
-const BASE_DRAPE_ID = '__base_drape__';
+/** @deprecated Import from DisplayController instead. */
+export { BASE_DRAPE_ID } from './DisplayController';
+
+/** Exponential smoothing alpha for orbit-target elevation tracking.
+ *  0.08 ≈ 13 frames at 60fps to reach ~63% of the target - fast enough
+ *  to follow terrain, slow enough to avoid per-frame jitter. */
+const ELEVATION_SMOOTH_ALPHA = 0.08;
+
+/**
+ * Resolve user-provided TreeletOptions into fully-resolved form.
+ */
+function resolveOptions(user: TreeletOptions): ResolvedTreeletOptions {
+  const gui = user.guiDisplay ?? {};
+  const map = user.mapDisplay ?? {};
+
+  const atlasSize = map.atlasSize ?? DEFAULT_OPTIONS.mapDisplay.atlasSize;
+  const slotSize = map.slotSize ?? DEFAULT_OPTIONS.mapDisplay.slotSize;
+  const maxInstances = map.maxInstances ?? DEFAULT_OPTIONS.mapDisplay.maxInstances;
+  const maxConcurrentFetches = map.maxConcurrentFetches ?? DEFAULT_OPTIONS.mapDisplay.maxConcurrentFetches;
+  validateAtlasConfig(atlasSize, slotSize, maxInstances, maxConcurrentFetches);
+
+  return {
+    initCenter: user.initCenter,
+    initZoom: user.initZoom,
+    minZoom: user.minZoom ?? DEFAULT_OPTIONS.minZoom,
+    maxZoom: user.maxZoom ?? DEFAULT_OPTIONS.maxZoom,
+    guiDisplay: {
+      enabled: gui.enabled ?? DEFAULT_OPTIONS.guiDisplay.enabled,
+      compassPosition: gui.compassPosition ?? DEFAULT_OPTIONS.guiDisplay.compassPosition,
+      layerPosition: gui.layerPosition ?? DEFAULT_OPTIONS.guiDisplay.layerPosition,
+    },
+    mapDisplay: {
+      atlasSegments: map.atlasSegments ?? DEFAULT_OPTIONS.mapDisplay.atlasSegments,
+      antialias: map.antialias ?? DEFAULT_OPTIONS.mapDisplay.antialias,
+      worldScale: map.worldScale ?? DEFAULT_OPTIONS.mapDisplay.worldScale,
+      minPitch: map.minPitch ?? DEFAULT_OPTIONS.mapDisplay.minPitch,
+      maxPitch: map.maxPitch ?? DEFAULT_OPTIONS.mapDisplay.maxPitch,
+      atlasSize,
+      slotSize,
+      maxInstances,
+      maxConcurrentFetches,
+    },
+    workerCount: user.workerCount ?? DEFAULT_OPTIONS.workerCount,
+  };
+}
 
 export class Treelet extends EventEmitter<TreeletEventMap> {
   /** Library version. */
@@ -76,48 +107,17 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
   private readonly options: ResolvedTreeletOptions;
   private readonly sceneManager: SceneManager;
   private readonly tileGrid: TileGrid;
-  private readonly scheduler: TileScheduler;
-  private readonly cache: TileCache;
   private readonly workerPool: WorkerPool;
   private readonly layerRegistry: LayerRegistry;
-  private readonly seamResolver: SeamResolver;
-  private readonly drapeCompositor: DrapeCompositor;
+  private readonly terrainRenderer: TerrainRenderer;
+  private readonly displayController: DisplayController;
+  private readonly layerController: LayerController;
 
   /** Meters → scene-units conversion factor. */
   private readonly metersToScene: number;
 
-  /** Track in-flight tile loads to prevent duplicates. */
-  private readonly loadingTiles = new Set<string>();
-
-  /** Currently active drape: BASE_DRAPE_ID=BaseDrape, or external drape ID. */
-  private activeDrapeId: string | null = BASE_DRAPE_ID;
-
-  /** BaseDrape sub-mode: wireframe, elevation, slope, aspect, or contours. */
-  private baseDrapeMode: BaseDrapeMode = 'elevation';
-
-  /** Color ramp saved per BaseDrape mode. */
-  private colorRampByMode: Record<BaseDrapeMode, ColorRamp> = {
-    wireframe: 'hypsometric',
-    elevation: 'hypsometric',
-    slope: 'viridis',
-    aspect: 'inferno',
-    contours: 'hypsometric',
-  };
-
-  /** Whether wireframe renders flat white (true) or normals coloring (false). */
-  private wireframeWhite = false;
-
-  /** Contour line color as [r, g, b] in 0–1 range. */
-  private contourColorRGB: [number, number, number] = [0.12, 0.08, 0.04];
-
-  /** Contour line thickness (shader-space). */
-  private contourThickness = 1.5;
-
-  /** Current derived camera zoom (updated each scheduleTiles cycle). */
-  private currentZoom = 0;
-
-  /** Prototype material for cloning - shares compiled shader program across tiles. */
-  private prototypeMaterial: ShaderMaterial | null = null;
+  /** Smoothed terrain elevation at the orbit target, in scene units. */
+  private _smoothedTargetZ = 0;
 
   private isRunning = false;
   private resizeObserver: ResizeObserver | null = null;
@@ -136,54 +136,96 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
       this.container = container;
     }
 
-    // Merge options with defaults
-    this.options = { ...DEFAULT_OPTIONS, ...userOptions };
+    // Resolve options with defaults
+    this.options = resolveOptions(userOptions);
+    const md = this.options.mapDisplay;
+    const gd = this.options.guiDisplay;
 
     // Compute meters → scene conversion factor
-    this.metersToScene = this.options.worldScale / WEB_MERCATOR_FULL_EXTENT;
+    this.metersToScene = md.worldScale / WEB_MERCATOR_FULL_EXTENT;
 
     // Initialize subsystems
-    this.tileGrid = new TileGrid(this.options.worldScale, 30);
-
+    this.tileGrid = new TileGrid(md.worldScale, 30);
     this.sceneManager = new SceneManager(this.container, this.options);
-
-    this.scheduler = new TileScheduler({
-      tileGrid: this.tileGrid,
-      minZoom: this.options.minZoom,
-      maxZoom: this.options.maxZoom,
-      lodEnabled: true,
-    });
-
-    this.cache = new TileCache();
-    this.cache.onEvict = (entry: CacheEntry) => {
-      this.sceneManager.removeTileMesh(entry.mesh);
-      this.emit('tileunload', { coord: entry.coord });
-    };
-
-    // Worker pool for off-thread tile processing
     this.workerPool = new WorkerPool(this.options.workerCount);
-
-    // Layer registry
     this.layerRegistry = new LayerRegistry();
 
-    // Seam resolver for gapless tile edges
-    this.seamResolver = new SeamResolver(this.options.tileSegments);
+    // Terrain renderer: instanced single draw call with quadtree LOD + geomorphing
+    this.terrainRenderer = new TerrainRenderer(
+      this.tileGrid,
+      this.workerPool,
+      this.sceneManager,
+      this.layerRegistry,
+      this.metersToScene,
+      this.options.minZoom,
+      this.options.maxZoom,
+      md.atlasSegments,
+      md.atlasSize,
+      md.slotSize,
+      md.maxInstances,
+      md.maxConcurrentFetches,
+    );
 
-    // Drape compositor for imagery overlay
-    this.drapeCompositor = new DrapeCompositor();
+    // Controllers: delegate display mutations and layer lifecycle
+    this.displayController = new DisplayController(
+      this.terrainRenderer,
+      this.layerRegistry,
+      this.sceneManager,
+      this.options,
+    );
 
-    // Wire camera change → tile scheduling
+    this.layerController = new LayerController(
+      this.layerRegistry,
+      this.terrainRenderer,
+      this.displayController,
+      (event, data) => this.emit(event, data),
+      () => this.scheduleTiles(),
+      () => this.isRunning,
+    );
+
+    // Per-frame render callback
+    this.sceneManager.onRender(() => {
+      if (!this.isRunning) return;
+      const cc = this.sceneManager.cameraController;
+      const target = cc.controls.target;
+      const zoom = cc.deriveZoom();
+      const baseLayer = this.layerRegistry.getActiveBaseLayer();
+      const combinedExag = baseLayer?.display.exaggeration ?? 1.0;
+
+      // Shift LOD anchor toward camera footprint when tilted past 20° polar
+      const polarDeg = cc.controls.getPolarAngle() * (180 / Math.PI);
+      const t = Math.min(Math.max((polarDeg - 20) / 10, 0), 1);
+      const cam = cc.camera.position;
+      const lodX = target.x + t * (cam.x - target.x);
+      const lodY = target.y + t * (cam.y - target.y);
+
+      this.terrainRenderer.updateFrame(lodX, lodY, zoom, combinedExag);
+
+      // ==== Camera target elevation tracking ====
+      const rawElev = this.terrainRenderer.sampleElevationAtWorld(target.x, target.y, zoom);
+      if (rawElev !== null) {
+        const targetZ = rawElev * combinedExag * this.metersToScene;
+        this._smoothedTargetZ += (targetZ - this._smoothedTargetZ) * ELEVATION_SMOOTH_ALPHA;
+      }
+      const deltaZ = this._smoothedTargetZ - target.z;
+      if (Math.abs(deltaZ) > 0.0001) {
+        target.z = this._smoothedTargetZ;
+        cam.z += deltaZ;
+      }
+    });
+
+    // Debounced camera change → tile fetching + event emission
     this.sceneManager.cameraController.onChange(() => {
       this.scheduleTiles();
     });
 
     // Set initial view
-    const centerMerc = WebMercator.project(this.options.center);
-    const centerWorld = WebMercator.toWorldPlane(centerMerc, this.options.worldScale);
+    const centerMerc = WebMercator.project(this.options.initCenter);
+    const centerWorld = WebMercator.toWorldPlane(centerMerc, md.worldScale);
     this.sceneManager.cameraController.setView(
       centerWorld.x,
       centerWorld.y,
-      this.options.zoom,
+      this.options.initZoom,
     );
 
     // Watch for container resize
@@ -198,29 +240,26 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
     this.resizeObserver.observe(this.container);
 
     // Create UI compass + panel if gui is enabled
-    if (this.options.gui) {
+    if (gd.enabled) {
       this.compass = document.createElement('treelet-compass') as TreeletCompass;
       this.container.style.position = this.container.style.position || 'relative';
       this.container.appendChild(this.compass);
       this.compass.attach(this, {
-        compassPosition: this.options.compassPosition,
-        layerPosition: this.options.layerPosition,
+        compassPosition: gd.compassPosition,
+        layerPosition: gd.layerPosition,
       });
 
-      // Wire raw camera updates for smooth compass rotation
       this.sceneManager.cameraController.onRawChange((state) => {
         this.compass?.updateCamera(state);
       });
 
-      // Push initial camera state so info panel is populated from the start
       this.compass.updateCamera(this.sceneManager.cameraController.getState());
     }
 
-    // Attribution bar — always shown (legal requirement from tile providers).
-    // Placed at the opposite bottom corner to the layer panel so they never overlap.
+    // Attribution bar
     {
-      const lp = this.options.layerPosition;
-      const cp = this.options.compassPosition;
+      const lp = gd.layerPosition;
+      const cp = gd.compassPosition;
       let attrSide: 'left' | 'right' = 'right';
       if (lp.startsWith('bottom-')) {
         attrSide = lp.endsWith('left') ? 'right' : 'left';
@@ -240,8 +279,9 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
   // =========================================================================
 
   setView(center: LngLat, zoom: number): this {
+    this._smoothedTargetZ = 0;
     const merc = WebMercator.project(center);
-    const world = WebMercator.toWorldPlane(merc, this.options.worldScale);
+    const world = WebMercator.toWorldPlane(merc, this.options.mapDisplay.worldScale);
     this.sceneManager.cameraController.setView(world.x, world.y, zoom);
     this.scheduleTiles();
     return this;
@@ -249,408 +289,109 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
 
   getCenter(): LngLat {
     const extent = this.sceneManager.getVisibleExtent();
-    if (!extent) return this.options.center;
-    const merc = WebMercator.fromWorldPlane(extent.center, this.options.worldScale);
+    if (!extent) return this.options.initCenter;
+    const merc = WebMercator.fromWorldPlane(extent.center, this.options.mapDisplay.worldScale);
     return WebMercator.unproject(merc);
   }
 
-  /**
-   * Compute center from a pre-computed extent (avoids redundant raycasting).
-   */
   private getCenterFromExtent(extent: VisibleExtent): LngLat {
-    const merc = WebMercator.fromWorldPlane(extent.center, this.options.worldScale);
+    const merc = WebMercator.fromWorldPlane(extent.center, this.options.mapDisplay.worldScale);
     return WebMercator.unproject(merc);
   }
 
-  getZoom(): number {
-    return this.sceneManager.cameraController.deriveZoom();
-  }
-
-  getTileCount(): number {
-    return this.cache.size;
-  }
+  getZoom(): number { return this.sceneManager.cameraController.deriveZoom(); }
+  getTileCount(): number { return this.terrainRenderer.getDrawCallCount(); }
 
   getBounds(): { sw: LngLat; ne: LngLat } | null {
     const extent = this.sceneManager.getVisibleExtent();
     if (!extent) return null;
     const bounds = this.sceneManager.getExtentBounds(extent);
     const sw = WebMercator.unproject(
-      WebMercator.fromWorldPlane(bounds.min, this.options.worldScale),
+      WebMercator.fromWorldPlane(bounds.min, this.options.mapDisplay.worldScale),
     );
     const ne = WebMercator.unproject(
-      WebMercator.fromWorldPlane(bounds.max, this.options.worldScale),
+      WebMercator.fromWorldPlane(bounds.max, this.options.mapDisplay.worldScale),
     );
     return { sw, ne };
   }
 
   // =========================================================================
-  // Base Layer API
+  // Base Layer API (→ LayerController)
   // =========================================================================
 
-  addBaseLayer(options: BaseLayerOptions): this {
-    this.layerRegistry.addBaseLayer(options);
-    this.emit('layeradd', { id: options.id });
-
-    if (this.isRunning) {
-      this.reloadAllTiles();
-    }
-
-    this.emit('layerchange', {});
-    return this;
-  }
-
-  removeBaseLayer(id: string): this {
-    if (this.layerRegistry.removeBaseLayer(id)) {
-      this.emit('layerremove', { id });
-
-      if (this.isRunning) {
-        this.reloadAllTiles();
-      }
-
-      this.emit('layerchange', {});
-    }
-    return this;
-  }
-
-  setActiveBaseLayer(id: string): this {
-    this.layerRegistry.setActiveBaseLayer(id);
-
-    if (this.isRunning) {
-      this.reloadAllTiles();
-    }
-
-    this.emit('layerchange', {});
-    return this;
-  }
+  addBaseLayer(options: BaseLayerOptions): LayerHandle { return this.layerController.addBaseLayer(options); }
+  removeBaseLayer(handle: LayerHandle | string): this { this.layerController.removeBaseLayer(handle); return this; }
+  setActiveBaseLayer(handle: LayerHandle | string): this { this.layerController.setActiveBaseLayer(handle); return this; }
 
   // =========================================================================
-  // Drape API (single-drape exclusivity)
+  // Drape API (→ LayerController)
   // =========================================================================
 
-  /**
-   * Add a drape layer (imagery overlay).
-   */
-  addDrapeLayer(options: DrapeLayerOptions): this {
-    this.layerRegistry.addDrapeLayer({ ...options, active: false });
-    this.emit('layeradd', { id: options.id });
-    this.emit('layerchange', {});
-    return this;
-  }
+  addDrapeLayer(options: DrapeLayerOptions): LayerHandle { return this.layerController.addDrapeLayer(options); }
+  removeDrapeLayer(handle: LayerHandle | string): this { this.layerController.removeDrapeLayer(handle); return this; }
+  activateDrapeLayer(handle: LayerHandle | string): this { this.layerController.activateDrapeLayer(handle); return this; }
+  activateBaseDrape(mode?: BaseDrapeMode): this { this.layerController.activateBaseDrape(mode); return this; }
 
-  /**
-   * Remove a drape layer.
-   */
-  removeDrapeLayer(id: string): this {
-    if (this.layerRegistry.removeDrapeLayer(id)) {
-      if (this.activeDrapeId === id) {
-        this.activeDrapeId = null;
-        this.clearAllDrapeTextures();
-        this.applyMaterialState();
-      }
-      this.emit('layerremove', { id });
-      this.emit('layerchange', {});
-    }
-    return this;
-  }
+  // =========================================================================
+  // Overlay Layer API (→ LayerController)
+  // =========================================================================
 
-  /**
-   * Activate a specific external drape layer (deactivates all others including BaseDrape).
-   */
-  activateDrapeLayer(id: string): this {
-    // Deactivate all external drapes first
-    for (const drape of this.layerRegistry.getAllDrapeLayers()) {
-      drape.active = false;
-    }
+  addOverlayLayer(options: OverlayLayerOptions): LayerHandle { return this.layerController.addOverlayLayer(options); }
+  removeOverlayLayer(handle: LayerHandle | string): this { this.layerController.removeOverlayLayer(handle); return this; }
 
-    // Activate the requested one
-    this.layerRegistry.setDrapeLayerActive(id, true);
-    this.activeDrapeId = id;
+  // =========================================================================
+  // Display API (→ DisplayController)
+  // =========================================================================
 
-    // Sync compositor and apply drape textures
-    this.syncDrapes();
-    this.applyMaterialState();
-    this.emit('layerchange', {});
-    return this;
-  }
-
-  /**
-   * Activate the virtual BaseDrape (elevation/slope/aspect coloring).
-   */
-  activateBaseDrape(mode?: BaseDrapeMode): this {
-    if (mode) this.baseDrapeMode = mode;
-
-    // Deactivate all external drapes
-    for (const drape of this.layerRegistry.getAllDrapeLayers()) {
-      drape.active = false;
-    }
-
-    this.activeDrapeId = BASE_DRAPE_ID;
-
-    // Clear external drape textures
-    this.clearAllDrapeTextures();
-    this.drapeCompositor.setActiveDrapes([]);
-    this.applyMaterialState();
-    this.emit('layerchange', {});
-    return this;
-  }
-
-  /**
-   * Set the BaseDrape sub-mode (wireframe, elevation, slope, aspect, contours).
-   * If an external drape is active, switches back to BaseDrape first.
-   */
   setBaseDrapeMode(mode: BaseDrapeMode): this {
-    this.baseDrapeMode = mode;
-
-    // If an external drape was active, switch to BaseDrape
-    if (this.activeDrapeId !== BASE_DRAPE_ID) {
-      for (const drape of this.layerRegistry.getAllDrapeLayers()) {
-        drape.active = false;
-      }
-      this.activeDrapeId = BASE_DRAPE_ID;
-      this.clearAllDrapeTextures();
-      this.drapeCompositor.setActiveDrapes([]);
-    }
-
-    this.applyMaterialState();
+    this.displayController.setBaseDrapeMode(mode, () => this.layerController.deactivateAllDrapes());
     this.emit('layerchange', {});
     return this;
   }
 
-  /**
-   * Get the current BaseDrape mode.
-   */
-  getBaseDrapeMode(): BaseDrapeMode {
-    return this.baseDrapeMode;
-  }
+  getBaseDrapeMode(): BaseDrapeMode { return this.displayController.getBaseDrapeMode(); }
+  getActiveDrapeId(): string | null { return this.displayController.getActiveDrapeId(); }
+  isBaseDrapeActive(): boolean { return this.displayController.isBaseDrapeActive(); }
 
-  /**
-   * Get the currently active drape ID (null = none, '__base_drape__' = BaseDrape).
-   */
-  getActiveDrapeId(): string | null {
-    return this.activeDrapeId;
-  }
+  setDrapeOpacity(handle: LayerHandle | string, opacity: number): this { this.displayController.setDrapeOpacity(handle, opacity); return this; }
+  getDrapeOpacity(handle: LayerHandle | string): number { return this.displayController.getDrapeOpacity(handle); }
+  setDrapeBlendMode(mode: BlendMode): this { this.displayController.setDrapeBlendMode(mode); return this; }
+  getDrapeBlendMode(): BlendMode { return this.displayController.getDrapeBlendMode(); }
+  setHillshadeStrength(strength: number): this { this.displayController.setHillshadeStrength(strength); return this; }
+  getHillshadeStrength(): number { return this.displayController.getHillshadeStrength(); }
 
-  /**
-   * Check if the BaseDrape is the active drape.
-   */
-  isBaseDrapeActive(): boolean {
-    return this.activeDrapeId === BASE_DRAPE_ID;
-  }
+  setExaggeration(handleOrValue: LayerHandle | string | number, value?: number): this { this.displayController.setExaggeration(handleOrValue, value); return this; }
+  getExaggeration(): number { return this.displayController.getExaggeration(); }
 
-  /**
-   * Set the opacity for an external drape layer.
-   * Triggers recomposite so the change is immediately visible.
-   */
-  setDrapeOpacity(id: string, opacity: number): this {
-    const drape = this.layerRegistry.getDrapeLayer(id);
-    if (drape) {
-      drape.opacity = Math.max(0, Math.min(1, opacity));
-      if (this.activeDrapeId === id) {
-        this.syncDrapes();
-      }
-    }
-    return this;
-  }
+  setIsolineInterval(interval: number): this { this.displayController.setIsolineInterval(interval); return this; }
+  getIsolineInterval(): number { return this.displayController.getIsolineInterval(); }
+  setIsolineThickness(thickness: number): this { this.displayController.setIsolineThickness(thickness); return this; }
+  getIsolineThickness(): number { return this.displayController.getIsolineThickness(); }
+  setIsolineColor(r: number, g: number, b: number): this { this.displayController.setIsolineColor(r, g, b); return this; }
+  getIsolineColor(): [number, number, number] { return this.displayController.getIsolineColor(); }
 
-  /**
-   * Get the opacity for a drape layer.
-   */
-  getDrapeOpacity(id: string): number {
-    const drape = this.layerRegistry.getDrapeLayer(id);
-    return drape?.opacity ?? 1.0;
-  }
+  setSunAzimuth(degrees: number): this { this.displayController.setSunAzimuth(degrees); return this; }
+  getSunAzimuth(): number { return this.displayController.getSunAzimuth(); }
+  setSunAltitude(degrees: number): this { this.displayController.setSunAltitude(degrees); return this; }
+  getSunAltitude(): number { return this.displayController.getSunAltitude(); }
+
+  setColorRamp(ramp: ColorRamp): this { this.displayController.setColorRamp(ramp); return this; }
+  getColorRamp(): ColorRamp { return this.displayController.getColorRamp(); }
+  setWireframeWhite(white: boolean): this { this.displayController.setWireframeWhite(white); return this; }
+  getWireframeWhite(): boolean { return this.displayController.getWireframeWhite(); }
 
   // =========================================================================
-  // Color Ramp + Exaggeration
+  // UI accessor methods
   // =========================================================================
 
-  /**
-   * Set the color ramp for the current BaseDrape mode.
-   * Saved per-mode so switching modes restores the previous selection.
-   */
-  setColorRamp(ramp: ColorRamp): this {
-    this.colorRampByMode[this.baseDrapeMode] = ramp;
+  getBaseLayers(): BaseLayer[] { return this.layerController.getBaseLayers(); }
+  getDrapeLayers(): DrapeLayer[] { return this.layerController.getDrapeLayers(); }
+  getCameraController(): CameraController { return this.sceneManager.cameraController; }
 
-    // Invalidate prototype so new tiles pick up the change
-    this.prototypeMaterial?.dispose();
-    this.prototypeMaterial = null;
-
-    for (const entry of this.cache.iterateEntries()) {
-      const mat = entry.mesh.material;
-      if (isTerrainMaterial(mat)) {
-        setMaterialColorRamp(mat as ShaderMaterial, ramp);
-      }
-    }
-    return this;
-  }
-
-  /**
-   * Get the color ramp for the current BaseDrape mode.
-   */
-  getColorRamp(): ColorRamp {
-    return this.colorRampByMode[this.baseDrapeMode];
-  }
-
-  /**
-   * Set the contour interval in meters for the contour line overlay.
-   */
-  setContourInterval(interval: number): this {
-    this.options.contourInterval = interval;
-
-    for (const entry of this.cache.iterateEntries()) {
-      const mat = entry.mesh.material;
-      if (isTerrainMaterial(mat)) {
-        setMaterialContourSettings(mat as ShaderMaterial, interval);
-      }
-    }
-
-    return this;
-  }
-
-  /**
-   * Get the current contour interval in meters.
-   */
-  getContourInterval(): number {
-    return this.options.contourInterval;
-  }
-
-  /**
-   * Set contour line thickness.
-   */
-  setContourThickness(thickness: number): this {
-    this.contourThickness = thickness;
-    for (const entry of this.cache.iterateEntries()) {
-      const mat = entry.mesh.material;
-      if (isTerrainMaterial(mat)) {
-        setMaterialContourSettings(
-          mat as ShaderMaterial,
-          this.options.contourInterval,
-          thickness,
-        );
-      }
-    }
-    return this;
-  }
-
-  /**
-   * Get the current contour line thickness.
-   */
-  getContourThickness(): number {
-    return this.contourThickness;
-  }
-
-  /**
-   * Set contour line color (RGB, each 0–1).
-   */
-  setContourColor(r: number, g: number, b: number): this {
-    this.contourColorRGB = [r, g, b];
-    for (const entry of this.cache.iterateEntries()) {
-      const mat = entry.mesh.material;
-      if (isTerrainMaterial(mat)) {
-        setMaterialContourColor(mat as ShaderMaterial, r, g, b);
-      }
-    }
-    return this;
-  }
-
-  /**
-   * Get the current contour line color as [r, g, b].
-   */
-  getContourColor(): [number, number, number] {
-    return [...this.contourColorRGB] as [number, number, number];
-  }
-
-  /**
-   * Set wireframe base-white mode (flat white vs normals coloring).
-   */
-  setWireframeWhite(white: boolean): this {
-    this.wireframeWhite = white;
-    for (const entry of this.cache.iterateEntries()) {
-      const mat = entry.mesh.material;
-      if (isTerrainMaterial(mat)) {
-        setMaterialBaseWhite(mat as ShaderMaterial, white);
-      }
-    }
-    return this;
-  }
-
-  /**
-   * Get whether wireframe renders flat white.
-   */
-  getWireframeWhite(): boolean {
-    return this.wireframeWhite;
-  }
-
-  /**
-   * Set the global exaggeration factor.
-   * Updates mesh.scale.z on all cached tiles for real vertex displacement.
-   */
-  setExaggeration(value: number): this {
-    this.options.exaggeration = value;
-
-    const baseLayer = this.layerRegistry.getActiveBaseLayer();
-    const combinedExag = value * (baseLayer?.exaggeration ?? 1.0);
-
-    for (const entry of this.cache.iterateEntries()) {
-      entry.mesh.scale.z = combinedExag;
-    }
-
-    return this;
-  }
-
-  // =========================================================================
-  // UI accessor methods (clean public API for UI components)
-  // =========================================================================
-
-  /** Get all registered base layers. */
-  getBaseLayers(): BaseLayer[] {
-    return this.layerRegistry.getAllBaseLayers();
-  }
-
-  /** Get all registered drape layers. */
-  getDrapeLayers(): DrapeLayer[] {
-    return this.layerRegistry.getAllDrapeLayers();
-  }
-
-  /** Get the current elevation exaggeration factor. */
-  getExaggeration(): number {
-    return this.options.exaggeration;
-  }
-
-  /** Get the camera controller for navigation controls. */
-  getCameraController(): CameraController {
-    return this.sceneManager.cameraController;
-  }
-
-  /**
-   * Set the minimum pitch (most tilted allowed) in elevation degrees.
-   * 0 = horizontal, 90 = top-down.
-   */
-  setMinPitch(degrees: number): this {
-    this.options.minPitch = degrees;
-    this.sceneManager.cameraController.setMinPitch(degrees);
-    return this;
-  }
-
-  /** Get the minimum pitch in elevation degrees. */
-  getMinPitch(): number {
-    return this.options.minPitch;
-  }
-
-  /**
-   * Set the maximum pitch (least tilted / top-down) in elevation degrees.
-   * 0 = horizontal, 90 = top-down.
-   */
-  setMaxPitch(degrees: number): this {
-    this.options.maxPitch = degrees;
-    this.sceneManager.cameraController.setMaxPitch(degrees);
-    return this;
-  }
-
-  /** Get the maximum pitch in elevation degrees. */
-  getMaxPitch(): number {
-    return this.options.maxPitch;
-  }
+  setMinPitch(degrees: number): this { this.displayController.setMinPitch(degrees); return this; }
+  getMinPitch(): number { return this.displayController.getMinPitch(); }
+  setMaxPitch(degrees: number): this { this.displayController.setMaxPitch(degrees); return this; }
+  getMaxPitch(): number { return this.displayController.getMaxPitch(); }
 
   // =========================================================================
   // Lifecycle
@@ -659,10 +400,13 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
   start(): this {
     if (this.isRunning) return this;
     this.isRunning = true;
+
+    this.displayController.applyMaterialState();
+    this.displayController.updateSunDirection();
+
     this.sceneManager.startRenderLoop();
     this.sceneManager.cameraController.enable();
 
-    // Initial tile load
     setTimeout(() => {
       this.scheduleTiles();
       this.emit('ready', {});
@@ -680,100 +424,18 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
 
   destroy(): void {
     this.stop();
-    this.loadingTiles.clear();
-    this.cache.clear();
+    this.terrainRenderer.dispose();
     this.workerPool.dispose();
-
-    // Dispose prototype material to avoid GPU shader program leak
-    this.prototypeMaterial?.dispose();
-    this.prototypeMaterial = null;
-
     this.sceneManager.dispose();
     this.resizeObserver?.disconnect();
     this.removeAllListeners();
 
-    // Dispose drape layers
     for (const drape of this.layerRegistry.getAllDrapeLayers()) {
       drape.dispose();
     }
 
-    // Remove UI elements
-    if (this.compass) {
-      this.compass.remove();
-      this.compass = null;
-    }
-    if (this.attribution) {
-      this.attribution.remove();
-      this.attribution = null;
-    }
-  }
-
-  // =========================================================================
-  // Internal: Material State Management
-  // =========================================================================
-
-  /**
-   * Resolve material configuration from the current drape state.
-   *
-   * State table:
-   *   BaseDrape 'wireframe'  → shaderMode='base', wireframe=true, contour=off
-   *   BaseDrape 'elevation'  → shaderMode='elevation', wireframe=false, contour=off
-   *   BaseDrape 'slope'      → shaderMode='slope', wireframe=false, contour=off
-   *   BaseDrape 'aspect'     → shaderMode='aspect', wireframe=false, contour=off
-   *   BaseDrape 'contours'   → shaderMode='elevation', wireframe=false, contour=on
-   *   External drape          → shaderMode='texture', wireframe=false, contour=off
-   */
-  private resolveMaterialConfig(): { shaderMode: ShaderMode; wireframe: boolean; contourEnabled: boolean } {
-    if (this.activeDrapeId === BASE_DRAPE_ID || this.activeDrapeId === null) {
-      const mode = this.baseDrapeMode;
-      if (mode === 'wireframe') {
-        return { shaderMode: 'base', wireframe: true, contourEnabled: false };
-      } else if (mode === 'contours') {
-        return { shaderMode: 'elevation', wireframe: false, contourEnabled: true };
-      } else {
-        return { shaderMode: mode, wireframe: false, contourEnabled: false };
-      }
-    } else {
-      return { shaderMode: 'texture', wireframe: false, contourEnabled: false };
-    }
-  }
-
-  /**
-   * Apply the correct material state to all cached tiles based on
-   * the active drape mode.
-   */
-  private applyMaterialState(): void {
-    // Dispose old prototype material to avoid GPU shader program leak
-    this.prototypeMaterial?.dispose();
-    this.prototypeMaterial = null;
-
-    const { shaderMode, wireframe, contourEnabled } = this.resolveMaterialConfig();
-
-    for (const entry of this.cache.iterateEntries()) {
-      const mat = entry.mesh.material;
-      if (isTerrainMaterial(mat)) {
-        const sm = mat as ShaderMaterial;
-        setMaterialMode(sm, shaderMode);
-        setMaterialWireframe(sm, wireframe);
-        setMaterialContourEnabled(sm, contourEnabled);
-        setMaterialColorRamp(sm, this.colorRampByMode[this.baseDrapeMode]);
-        setMaterialBaseWhite(sm, this.wireframeWhite);
-        setMaterialContourColor(sm, ...this.contourColorRGB);
-        setMaterialContourSettings(sm, this.options.contourInterval, this.contourThickness);
-      }
-    }
-  }
-
-  /**
-   * Clear drape textures from all cached tile materials.
-   */
-  private clearAllDrapeTextures(): void {
-    for (const entry of this.cache.iterateEntries()) {
-      const mat = entry.mesh.material;
-      if (isTerrainMaterial(mat)) {
-        setMaterialDrape(mat as ShaderMaterial, null);
-      }
-    }
+    if (this.compass) { this.compass.remove(); this.compass = null; }
+    if (this.attribution) { this.attribution.remove(); this.attribution = null; }
   }
 
   // =========================================================================
@@ -787,216 +449,10 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
     if (!extent) return;
 
     const zoom = this.sceneManager.cameraController.deriveZoom();
-    this.currentZoom = zoom;
+    this.terrainRenderer.fetchTiles();
 
-    // Compute nadir-based LOD context:
-    // - cameraNadir: ground point directly below the camera
-    // - topDownRadius: half-diagonal of the area a top-down view would cover
-    const camera = this.sceneManager.cameraController.camera;
-    const h = camera.position.z;
-    const fovRad = (camera.fov * Math.PI) / 360; // half-fov
-    const halfHeight = h * Math.tan(fovRad);
-    const halfWidth = halfHeight * camera.aspect;
-    const lodContext: LODContext = {
-      cameraNadir: { x: camera.position.x, y: camera.position.y },
-      topDownRadius: Math.sqrt(halfWidth * halfWidth + halfHeight * halfHeight),
-    };
-
-    const result = this.scheduler.update(extent, zoom, this.cache, lodContext);
-
-    // Unload tiles no longer needed
-    for (const coord of result.unload) {
-      const key = tileKey(coord);
-      this.loadingTiles.delete(key);
-      const entry = this.cache.delete(coord);
-      if (entry) {
-        this.sceneManager.removeTileMesh(entry.mesh);
-        this.drapeCompositor.evictCompositesForTile(coord);
-        this.emit('tileunload', { coord });
-      }
-    }
-
-    // Cancel in-flight loads that are no longer needed.
-    // Build a set of all keys that are still relevant (keep + load).
-    const neededKeys = new Set<string>();
-    for (const coord of result.keep) {
-      neededKeys.add(tileKey(coord));
-    }
-    for (const coord of result.load) {
-      neededKeys.add(tileKey(coord));
-    }
-    for (const key of this.loadingTiles) {
-      if (!neededKeys.has(key)) {
-        this.loadingTiles.delete(key);
-      }
-    }
-
-    // Load new tiles
-    for (const coord of result.load) {
-      this.loadTile(coord);
-    }
-
-    // Emit move event - reuse the already-computed extent instead of re-raycasting
     const center = this.getCenterFromExtent(extent);
     this.emit('move', { center });
     this.emit('moveend', { center, zoom });
-  }
-
-  /**
-   * Create a TerrainMaterial configured with the current state.
-   *
-   * Uses material cloning: the first call creates a prototype material
-   * (which triggers shader compilation), subsequent calls clone it
-   * (sharing the compiled GPU program, deep-copying only uniforms).
-   */
-  private createTileMaterial(): ShaderMaterial {
-    if (this.prototypeMaterial) {
-      return this.prototypeMaterial.clone();
-    }
-
-    const { shaderMode, wireframe, contourEnabled } = this.resolveMaterialConfig();
-
-    const mat = createTerrainMaterial({
-      mode: shaderMode,
-      colorRamp: this.colorRampByMode[this.baseDrapeMode],
-      minElevation: this.options.elevationRange[0],
-      maxElevation: this.options.elevationRange[1],
-      metersToScene: this.metersToScene,
-      contourEnabled,
-      contourInterval: this.options.contourInterval,
-      contourThickness: this.contourThickness,
-      baseWhite: this.wireframeWhite,
-      wireframe,
-    });
-
-    // Apply contour color (avoids importing Vector3 just for construction)
-    setMaterialContourColor(mat, ...this.contourColorRGB);
-
-    this.prototypeMaterial = mat;
-    return mat.clone();
-  }
-
-  /**
-   * Load a single tile.
-   */
-  private loadTile(coord: TileCoord): void {
-    const key = tileKey(coord);
-    if (this.cache.has(coord) || this.loadingTiles.has(key)) return;
-
-    const center = this.tileGrid.tileToWorldCenter(coord);
-    const tileWorldSize = this.tileGrid.getTileSize(coord.z);
-    const baseLayer = this.layerRegistry.getActiveBaseLayer();
-
-    if (!baseLayer) {
-      const mesh = createTileMesh(coord, center, tileWorldSize, key);
-      this.sceneManager.addTileMesh(mesh);
-      this.cache.set(coord, { coord, mesh });
-      this.emit('tileload', { coord });
-      return;
-    }
-
-    this.loadingTiles.add(key);
-
-    const url = baseLayer.getTileUrl(coord);
-    const proxy = this.workerPool.getProxy();
-
-    // Build mesh at exaggeration=1.0; actual exaggeration applied via mesh.scale.z
-    proxy
-      .fetchDecodeAndBuild(
-        url,
-        baseLayer.decoderType,
-        this.options.tileSegments,
-        tileWorldSize,
-        1.0,
-        this.metersToScene,
-      )
-      .then((result) => {
-        // If this tile was cancelled by a subsequent scheduleTiles() call
-        // (viewport changed while loading), skip adding it to the scene.
-        if (!this.loadingTiles.has(key)) return;
-        this.loadingTiles.delete(key);
-
-        if (!this.isRunning) return;
-
-        const material = this.createTileMaterial();
-
-        const mesh = createElevationMesh(
-          result.positions,
-          result.normals,
-          result.uvs,
-          result.indices,
-          center,
-          coord,
-          key,
-          material,
-        );
-
-        // Apply exaggeration via mesh scale
-        const combinedExag = this.options.exaggeration * baseLayer.exaggeration;
-        mesh.scale.z = combinedExag;
-
-        this.sceneManager.addTileMesh(mesh);
-        this.cache.set(coord, {
-          coord,
-          mesh,
-          elevations: result.elevations,
-        });
-
-        // Resolve seams with neighboring tiles
-        this.seamResolver.resolve(coord, this.cache);
-
-        // Apply external drape texture if an external drape is active
-        if (this.activeDrapeId !== null && this.activeDrapeId !== BASE_DRAPE_ID) {
-          this.drapeCompositor.applyDrape(coord, mesh, this.currentZoom);
-        }
-
-        this.emit('tileload', { coord });
-      })
-      .catch((err) => {
-        // If this tile was cancelled, silently drop the error
-        if (!this.loadingTiles.has(key)) return;
-        this.loadingTiles.delete(key);
-        console.warn(`treelet: failed to load tile ${key}:`, err);
-
-        if (this.isRunning && !this.cache.has(coord)) {
-          const mesh = createTileMesh(coord, center, tileWorldSize, key);
-          this.sceneManager.addTileMesh(mesh);
-          this.cache.set(coord, { coord, mesh });
-          this.emit('tileload', { coord });
-        }
-      });
-  }
-
-  private reloadAllTiles(): void {
-    this.loadingTiles.clear();
-    this.cache.clear();
-
-    // Dispose old prototype material to avoid GPU shader program leak
-    this.prototypeMaterial?.dispose();
-    this.prototypeMaterial = null;
-
-    this.drapeCompositor.clearCompositeCache();
-    this.sceneManager.clearTiles();
-    this.scheduleTiles();
-  }
-
-  /**
-   * Sync the drape compositor with the currently active external drape,
-   * then reapply drape textures to all cached tile meshes.
-   */
-  private syncDrapes(): void {
-    const activeDrapes = this.layerRegistry.getActiveDrapeLayers();
-    this.drapeCompositor.setActiveDrapes(activeDrapes);
-
-    // Clear old composite textures when switching drape layers
-    this.drapeCompositor.clearCompositeCache();
-
-    if (!this.isRunning) return;
-
-    const meshPairs: Array<{ coord: TileCoord; mesh: import('three').Mesh }> = [];
-    for (const e of this.cache.iterateEntries()) {
-      meshPairs.push({ coord: e.coord, mesh: e.mesh });
-    }
-    this.drapeCompositor.reapplyAll(meshPairs, this.currentZoom);
   }
 }

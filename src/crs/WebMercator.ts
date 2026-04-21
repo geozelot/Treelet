@@ -67,7 +67,7 @@ export const WebMercator = {
    * Get bounding box of a tile in Web Mercator meters.
    */
   tileBounds(coord: TileCoord): TileBounds {
-    const tileCount = Math.pow(2, coord.z);
+    const tileCount = 1 << coord.z;
     const tileSize = (WEB_MERCATOR_EXTENT * 2) / tileCount;
     const west = coord.x * tileSize - WEB_MERCATOR_EXTENT;
     const east = (coord.x + 1) * tileSize - WEB_MERCATOR_EXTENT;
@@ -93,7 +93,7 @@ export const WebMercator = {
    * Get the size of a single tile in world-plane units at a given zoom.
    */
   tileWorldSize(zoom: number, worldScale: number): number {
-    const tileCount = Math.pow(2, zoom);
+    const tileCount = 1 << zoom;
     return worldScale / tileCount;
   },
 } as const;

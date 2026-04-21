@@ -11,7 +11,6 @@ import {
   Mesh,
   PlaneGeometry,
   MeshBasicMaterial,
-  ShaderMaterial,
   Group,
   DoubleSide,
   Color,
@@ -36,10 +35,11 @@ export class SceneManager {
   private readonly themeListener: () => void;
 
   constructor(container: HTMLElement, options: ResolvedTreeletOptions) {
-    this.worldScale = options.worldScale;
+    const md = options.mapDisplay;
+    this.worldScale = md.worldScale;
 
     // Renderer
-    this.renderer = new WebGLRenderer({ antialias: options.antialias });
+    this.renderer = new WebGLRenderer({ antialias: md.antialias });
     this.renderer.setSize(container.clientWidth, container.clientHeight);
     this.renderer.setPixelRatio(window.devicePixelRatio);
     container.appendChild(this.renderer.domElement);
@@ -47,20 +47,26 @@ export class SceneManager {
     // Scene
     this.scene = new Scene();
 
-    // Theme-aware background + horizon fog
-    const BG_DARK = new Color(0x1c1c1c);
-    const BG_LIGHT = new Color(0xebebeb);
+    // Theme-aware sky background + atmospheric haze fog
+    // Background = deep sky color; fog = lighter horizon glow color.
+    // Distant terrain fades into the lighter fog color, creating a subtle
+    // atmospheric shine band before the deeper sky behind it.
+    const BG_DARK = new Color(0x0a1628);    // deep navy night sky
+    const BG_LIGHT = new Color(0xb8d4e8);   // soft powder blue sky
+    const FOG_DARK = new Color(0x1a2e48);   // lighter navy - horizon glow
+    const FOG_LIGHT = new Color(0xd4e4f0);  // very light blue - horizon glow
 
     const darkMq = window.matchMedia('(prefers-color-scheme: dark)');
     const applyTheme = (dark: boolean) => {
       const bg = dark ? BG_DARK : BG_LIGHT;
+      const fog = dark ? FOG_DARK : FOG_LIGHT;
       this.renderer.setClearColor(bg);
       this.scene.background = bg;
-      if (this.scene.fog) (this.scene.fog as Fog).color.copy(bg);
+      if (this.scene.fog) (this.scene.fog as Fog).color.copy(fog);
     };
 
     applyTheme(darkMq.matches);
-    this.scene.fog = new Fog(darkMq.matches ? BG_DARK : BG_LIGHT, 1, 1);
+    this.scene.fog = new Fog(darkMq.matches ? FOG_DARK : FOG_LIGHT, 1, 1);
 
     this.themeListener = () => applyTheme(darkMq.matches);
     darkMq.addEventListener('change', this.themeListener);
@@ -70,12 +76,12 @@ export class SceneManager {
       70,
       container.clientWidth / container.clientHeight,
       1,
-      options.worldScale * 10,
+      md.worldScale * 10,
     );
     this.camera.up.set(0, 0, 1);
 
     // World plane (invisible, used for raycasting)
-    const planeGeo = new PlaneGeometry(options.worldScale, options.worldScale, 1, 1);
+    const planeGeo = new PlaneGeometry(md.worldScale, md.worldScale, 1, 1);
     const planeMat = new MeshBasicMaterial({
       visible: false,
       side: DoubleSide,
@@ -91,11 +97,11 @@ export class SceneManager {
     this.cameraController = new CameraController(
       this.camera,
       this.renderer.domElement,
-      options.worldScale,
+      md.worldScale,
       options.minZoom,
       options.maxZoom,
-      options.minPitch,
-      options.maxPitch,
+      md.minPitch,
+      md.maxPitch,
     );
 
     // Frustum calculator
@@ -110,6 +116,18 @@ export class SceneManager {
   }
 
   /**
+   * Compute 2D frustum half-planes for tight trapezoid culling.
+   * Returns a Float32Array(12) with 4 planes (nx, ny, d) each, or null
+   * when the camera is nearly top-down (AABB is sufficient).
+   *
+   * Must be called AFTER getVisibleExtent() in the same frame — reuses
+   * the same pre-allocated extent data.
+   */
+  getVisibleFrustumPlanes(extent: VisibleExtent): Float32Array | null {
+    return this.frustumCalc.computeFrustumPlanes(extent);
+  }
+
+  /**
    * Get extent bounds (axis-aligned bounding box).
    */
   getExtentBounds(extent: VisibleExtent): { min: WorldPoint; max: WorldPoint } {
@@ -117,14 +135,14 @@ export class SceneManager {
   }
 
   /**
-   * Add a tile mesh to the scene.
+   * Add a mesh to the tile group (the single instanced terrain mesh).
    */
   addTileMesh(mesh: Mesh): void {
     this.tileGroup.add(mesh);
   }
 
   /**
-   * Remove a tile mesh from the scene and dispose its resources.
+   * Remove a mesh from the tile group and dispose its geometry and material.
    */
   removeTileMesh(mesh: Mesh): void {
     this.tileGroup.remove(mesh);
@@ -136,14 +154,6 @@ export class SceneManager {
     const material = mesh.material;
     const materials = Array.isArray(material) ? material : [material];
     for (const mat of materials) {
-      // Dispose drape texture from ShaderMaterial uniforms
-      if (mat instanceof ShaderMaterial && mat.uniforms?.uDrapeMap?.value) {
-        mat.uniforms.uDrapeMap.value.dispose();
-      }
-      // Dispose map from basic materials
-      if ('map' in mat && (mat as MeshBasicMaterial).map) {
-        (mat as MeshBasicMaterial).map!.dispose();
-      }
       mat.dispose();
     }
   }
@@ -152,8 +162,12 @@ export class SceneManager {
    * Remove all tile meshes.
    */
   clearTiles(): void {
-    while (this.tileGroup.children.length > 0) {
-      this.removeTileMesh(this.tileGroup.children[0] as Mesh);
+    const toRemove: Mesh[] = [];
+    for (const child of this.tileGroup.children) {
+      toRemove.push(child as Mesh);
+    }
+    for (const mesh of toRemove) {
+      this.removeTileMesh(mesh);
     }
   }
 
@@ -175,10 +189,10 @@ export class SceneManager {
       this.animationFrameId = requestAnimationFrame(animate);
       this.cameraController.update();
 
-      // Scale fog with camera distance so horizon tiles always fade out
+      // Scale fog with camera distance for atmospheric haze on distant terrain
       const d = this.camera.position.z;
-      fog.near = d * 5;
-      fog.far = d * 9;
+      fog.near = d * 4;
+      fog.far = d * 8;
 
       this.renderCallback?.();
       this.renderer.render(this.scene, this.camera);

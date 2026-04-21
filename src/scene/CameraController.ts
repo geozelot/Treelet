@@ -4,7 +4,7 @@
 // and debounces view-change callbacks.
 // ============================================================================
 
-import { PerspectiveCamera, MOUSE } from 'three';
+import { PerspectiveCamera, Vector3, MOUSE } from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { CAMERA_DEBOUNCE_MS } from '../core/constants';
 
@@ -33,6 +33,20 @@ export class CameraController {
 
   /** Cached base distance - depends only on camera.fov and worldDimension (both constant). */
   private readonly baseDist: number;
+
+  /** Scratch vector reused for camera offset computations (avoids per-call allocation). */
+  private readonly _offset = new Vector3();
+
+  /** Smooth orientation-reset animation state (spherical interpolation). */
+  private _animActive = false;
+  private _animStartTime = 0;
+  /** Start polar angle (radians from zenith: 0 = top-down). */
+  private _animFromPhi = 0;
+  /** Start azimuthal angle (radians: 0 = north, positive = clockwise). */
+  private _animFromTheta = 0;
+  /** Orbit distance (constant during animation). */
+  private _animDist = 0;
+  private static readonly RESET_DURATION_MS = 400;
 
   constructor(
     readonly camera: PerspectiveCamera,
@@ -63,6 +77,12 @@ export class CameraController {
     // Pan along the world ground plane (compass directions) instead of screen space
     this.controls.screenSpacePanning = false;
 
+    // Enforce zoom bounds via orbit distance limits.
+    // Distance decreases as zoom increases (closer = more zoomed in).
+    // The +1 compensates for the -1 offset in deriveZoom() (see setZoomLevel).
+    this.controls.minDistance = this.getDistanceForZoom(maxZoom + 1);
+    this.controls.maxDistance = this.getDistanceForZoom(minZoom + 1);
+
     // Apply pitch limits to OrbitControls polar angle range
     this.applyPitchLimits();
 
@@ -85,22 +105,26 @@ export class CameraController {
   }
 
   /**
-   * Derive integer zoom level from camera height above world plane.
+   * Derive integer zoom level from camera orbit distance.
    *
    * Uses the inverse of the original TLet.js formula:
    *   distance = baseDist * e^(ln(0.56) * zoom)
    *   => zoom = ln(distance / baseDist) / ln(0.56)
    *
    * where baseDist = worldDimension / (2 * tan(fov/2))
+   *
+   * Uses orbit distance (camera-to-target) instead of camera.position.z
+   * so that tilting the camera doesn't change the zoom level. Only
+   * dollying in/out (which changes the orbit radius) affects zoom.
    */
   deriveZoom(): number {
-    const height = this.camera.position.z;
+    const distance = this.camera.position.distanceTo(this.controls.target);
 
-    if (height <= 0) return this.maxZoom;
+    if (distance <= 0) return this.maxZoom;
 
-    // Subtract 1 to load coarser tiles than raw camera height implies,
+    // Subtract 1 to load coarser tiles than raw camera distance implies,
     // reducing tile count and bandwidth while maintaining visual quality.
-    const zoom = Math.log(height / this.baseDist) / Math.log(0.56) - 1;
+    const zoom = Math.log(distance / this.baseDist) / Math.log(0.56) - 1;
     return Math.round(Math.min(Math.max(zoom, this.minZoom), this.maxZoom));
   }
 
@@ -119,7 +143,7 @@ export class CameraController {
       zoom: this.deriveZoom(),
       pitch: this.controls.getPolarAngle() * (180 / Math.PI),
       rotation: this.controls.getAzimuthalAngle() * (180 / Math.PI),
-      distance: this.camera.position.z,
+      distance: this.camera.position.distanceTo(this.controls.target),
     };
   }
 
@@ -137,6 +161,52 @@ export class CameraController {
    * Must be called each animation frame.
    */
   update(): void {
+    if (this._animActive) {
+      const elapsed = performance.now() - this._animStartTime;
+      const rawT = Math.min(elapsed / CameraController.RESET_DURATION_MS, 1.0);
+      // Ease-out cubic: fast start, gentle deceleration
+      const t = 1 - Math.pow(1 - rawT, 3);
+
+      // Interpolate both angles independently in spherical coordinates.
+      // This ensures rotation animates visibly even as the camera approaches
+      // the zenith where Cartesian lerp would erase horizontal displacement.
+      const phi = this._animFromPhi * (1 - t);
+      const theta = this._animFromTheta * (1 - t);
+      const r = this._animDist;
+
+      this.camera.position.set(
+        this.controls.target.x + r * Math.sin(phi) * Math.sin(theta),
+        this.controls.target.y - r * Math.sin(phi) * Math.cos(theta),
+        this.controls.target.z + r * Math.cos(phi),
+      );
+      this.camera.lookAt(this.controls.target);
+
+      if (rawT >= 1.0) {
+        // Snap to exact final position (straight above target)
+        this.camera.position.set(
+          this.controls.target.x,
+          this.controls.target.y,
+          this.controls.target.z + r,
+        );
+        this._animActive = false;
+        this.controls.enabled = true;
+        // Sync OrbitControls' internal spherical state with final camera position
+        this.controls.update();
+      }
+
+      // Report animated state directly — bypasses OrbitControls' azimuthal
+      // angle extraction which is numerically unstable near the zenith.
+      const RAD2DEG = 180 / Math.PI;
+      this.onRawChangeCallback?.({
+        zoom: this.deriveZoom(),
+        pitch: phi * RAD2DEG,
+        rotation: theta * RAD2DEG,
+        distance: r,
+      });
+      this.scheduleDebounced();
+      return;
+    }
+
     this.controls.update();
   }
 
@@ -158,7 +228,7 @@ export class CameraController {
    * Reset azimuth (rotation) to north-up while preserving tilt and distance.
    */
   resetAzimuth(): void {
-    const offset = this.camera.position.clone().sub(this.controls.target);
+    const offset = this._offset.copy(this.camera.position).sub(this.controls.target);
     const r = offset.length();
     const phi = Math.acos(Math.min(1, offset.z / r));
     this.camera.position.set(
@@ -173,7 +243,7 @@ export class CameraController {
    * Reset tilt (pitch) to top-down while preserving azimuth and distance.
    */
   resetTilt(): void {
-    const offset = this.camera.position.clone().sub(this.controls.target);
+    const offset = this._offset.copy(this.camera.position).sub(this.controls.target);
     const r = offset.length();
     this.camera.position.set(
       this.controls.target.x,
@@ -184,32 +254,47 @@ export class CameraController {
   }
 
   /**
-   * Reset both azimuth and tilt - camera straight above target looking down.
+   * Smoothly animate both azimuth and tilt back to top-down, north-facing.
+   * Uses ease-out cubic interpolation of spherical coordinates (phi → 0,
+   * theta → 0) over RESET_DURATION_MS, so both pitch and rotation are
+   * animated simultaneously and independently visible.
+   * Disables OrbitControls during the animation to prevent input conflicts.
    */
   resetOrientation(): void {
-    const r = this.camera.position.distanceTo(this.controls.target);
-    this.camera.position.set(
-      this.controls.target.x,
-      this.controls.target.y,
-      this.controls.target.z + r,
-    );
-    this.controls.update();
+    const offset = this._offset.copy(this.camera.position).sub(this.controls.target);
+    const r = offset.length();
+    if (r < 0.001) return;
+
+    // Current spherical coordinates (Z-up convention matching setAzimuth/setPitch)
+    const phi = Math.acos(Math.min(1, offset.z / r));
+    const theta = Math.atan2(offset.x, -offset.y);
+
+    // Skip animation if already at (or very close to) the target orientation
+    if (Math.abs(phi) < 1e-4 && Math.abs(theta) < 1e-4) return;
+
+    this._animFromPhi = phi;
+    this._animFromTheta = theta;
+    this._animDist = r;
+    this._animActive = true;
+    this._animStartTime = performance.now();
+    this.controls.enabled = false;
   }
 
   /**
    * Set zoom level while preserving camera orientation.
-   * Scales the camera offset vector so z-component matches target zoom height.
+   * Scales the camera offset vector so orbit distance matches the target zoom.
    */
   setZoomLevel(zoom: number): void {
     const clamped = Math.round(Math.min(Math.max(zoom, this.minZoom), this.maxZoom));
     // deriveZoom() subtracts 1 from the raw formula, so the reported zoom is
     // always 1 less than the "distance zoom".  Add 1 here to compensate.
-    const targetZ = this.getDistanceForZoom(clamped + 1);
-    const offset = this.camera.position.clone().sub(this.controls.target);
-    if (offset.z > 0.001) {
-      offset.multiplyScalar(targetZ / offset.z);
+    const targetDist = this.getDistanceForZoom(clamped + 1);
+    const offset = this._offset.copy(this.camera.position).sub(this.controls.target);
+    const currentDist = offset.length();
+    if (currentDist > 0.001) {
+      offset.multiplyScalar(targetDist / currentDist);
     } else {
-      offset.set(0, 0, targetZ);
+      offset.set(0, 0, targetDist);
     }
     this.camera.position.copy(this.controls.target).add(offset);
     this.controls.update();
@@ -219,7 +304,7 @@ export class CameraController {
    * Set azimuthal angle (rotation) while preserving tilt and distance.
    */
   setAzimuth(degrees: number): void {
-    const offset = this.camera.position.clone().sub(this.controls.target);
+    const offset = this._offset.copy(this.camera.position).sub(this.controls.target);
     const r = offset.length();
     const phi = Math.acos(Math.min(1, offset.z / r));
     const theta = (degrees * Math.PI) / 180;
@@ -237,7 +322,7 @@ export class CameraController {
    *   Clamped to the configured pitch range (converted from elevation limits).
    */
   setPitch(degrees: number): void {
-    const offset = this.camera.position.clone().sub(this.controls.target);
+    const offset = this._offset.copy(this.camera.position).sub(this.controls.target);
     const r = offset.length();
     const theta = this.controls.getAzimuthalAngle();
     // Guard: polar angle must stay above ε to avoid the zenith singularity
@@ -295,7 +380,7 @@ export class CameraController {
     this.controls.dispose();
   }
 
-  // -- Private --
+  // == Private ==
 
   /** Sync OrbitControls polar angle limits with current pitch config. */
   private applyPitchLimits(): void {
@@ -303,11 +388,8 @@ export class CameraController {
     this.controls.maxPolarAngle = (90 - this._minPitch) * CameraController.DEG2RAD;
   }
 
-  private handleControlsChange = (): void => {
-    // Fire raw callback immediately for smooth UI updates (compass rotation)
-    this.onRawChangeCallback?.(this.getState());
-
-    // Debounced callback for expensive operations (tile scheduling)
+  /** Schedule the debounced camera-change callback (tile scheduling, etc). */
+  private scheduleDebounced(): void {
     if (this.debounceTimer !== null) {
       clearTimeout(this.debounceTimer);
     }
@@ -315,5 +397,11 @@ export class CameraController {
       this.debounceTimer = null;
       this.onChangeCallback?.();
     }, CAMERA_DEBOUNCE_MS);
+  }
+
+  private handleControlsChange = (): void => {
+    // Fire raw callback immediately for smooth UI updates (compass rotation)
+    this.onRawChangeCallback?.(this.getState());
+    this.scheduleDebounced();
   };
 }

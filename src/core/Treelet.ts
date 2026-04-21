@@ -13,6 +13,7 @@
 
 import { EventEmitter } from './EventEmitter';
 import { DEFAULT_OPTIONS, WEB_MERCATOR_FULL_EXTENT, validateAtlasConfig } from './constants';
+import { version as packageVersion } from '../../package.json';
 import type {
   TreeletOptions,
   ResolvedTreeletOptions,
@@ -90,8 +91,8 @@ function resolveOptions(user: TreeletOptions): ResolvedTreeletOptions {
 }
 
 export class Treelet extends EventEmitter<TreeletEventMap> {
-  /** Library version. */
-  static readonly version = '0.1.0';
+  /** Library version, sourced from package.json at build time. */
+  static readonly version: string = packageVersion;
 
   /**
    * Factory: create a new Treelet map instance.
@@ -429,10 +430,6 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
     this.sceneManager.dispose();
     this.resizeObserver?.disconnect();
     this.removeAllListeners();
-
-    for (const drape of this.layerRegistry.getAllDrapeLayers()) {
-      drape.dispose();
-    }
 
     if (this.compass) { this.compass.remove(); this.compass = null; }
     if (this.attribution) { this.attribution.remove(); this.attribution = null; }

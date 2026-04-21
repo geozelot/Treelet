@@ -1,14 +1,15 @@
 // ============================================================================
-// treelet.js - WMS Tile Source
+// treelet.js - WMS Tile Source (Plugin)
 //
 // Generates OGC WMS GetMap URLs from tile coordinates. Supports
 // reprojection of tile bounding boxes between EPSG:3857 and EPSG:4326.
 // ============================================================================
 
-import type { TileCoord, LayerSourceOptions } from '../core/types';
-import { LayerSource } from './LayerSource';
-import { WebMercator } from '../crs/WebMercator';
-import { WEB_MERCATOR_EXTENT } from '../core/constants';
+import type { TileCoord } from '../../../src/core/types';
+import type { WMSSourceOptions } from './types';
+import { UrlTileSource } from '../../../src/sources/UrlTileSource';
+import { WebMercator } from '../../../src/crs/WebMercator';
+import { WEB_MERCATOR_EXTENT } from '../../../src/core/constants';
 
 /**
  * WMS (Web Map Service) tile source.
@@ -19,7 +20,6 @@ import { WEB_MERCATOR_EXTENT } from '../core/constants';
  * @example
  * ```ts
  * new WMSSource({
- *   type: 'wms',
  *   url: 'https://example.com/geoserver/wms',
  *   layers: 'dem',
  *   format: 'image/png',
@@ -28,57 +28,45 @@ import { WEB_MERCATOR_EXTENT } from '../core/constants';
  * });
  * ```
  */
-export class WMSSource extends LayerSource {
-  private readonly baseUrl: string;
-  private readonly layers: string;
-  private readonly format: string;
+export class WMSSource extends UrlTileSource {
   private readonly crs: string;
   readonly tileSize: number;
+  readonly minZoom: number;
   readonly maxZoom: number;
 
-  constructor(options: LayerSourceOptions) {
-    super(options.attribution);
-    this.baseUrl = options.url;
-    this.layers = options.layers ?? '';
-    this.format = options.format ?? 'image/png';
+  /** Pre-built static query prefix (everything except BBOX). */
+  private readonly queryPrefix: string;
+
+  constructor(options: WMSSourceOptions) {
+    super(options.attribution, options.maxConcurrency);
+    const baseUrl = options.url;
+    const layers = options.layers ?? '';
+    const format = options.format ?? 'image/png';
     this.crs = (options.crs ?? 'EPSG:3857').toUpperCase();
     this.tileSize = options.tileSize ?? 256;
+    this.minZoom = options.minZoom ?? 0;
     this.maxZoom = options.maxZoom ?? 22;
+
+    // Pre-build the static portion of the GetMap query string
+    const separator = baseUrl.includes('?') ? '&' : '?';
+    this.queryPrefix = `${baseUrl}${separator}SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap` +
+      `&LAYERS=${layers}&STYLES=&SRS=${this.crs}` +
+      `&WIDTH=${this.tileSize}&HEIGHT=${this.tileSize}` +
+      `&FORMAT=${format}&TRANSPARENT=TRUE&BBOX=`;
   }
 
   /**
    * Generate a WMS GetMap URL for a tile coordinate.
-   *
-   * Constructs the query string manually instead of via `URLSearchParams`
-   * because the latter encodes commas and slashes (`%2C`, `%2F`) that WMS
-   * servers expect as literal characters in BBOX and FORMAT values.
    */
   getTileUrl(coord: TileCoord): string {
-    const bbox = this.getTileBBox(coord);
-
-    const params = [
-      'SERVICE=WMS',
-      'VERSION=1.1.1',
-      'REQUEST=GetMap',
-      `LAYERS=${this.layers}`,
-      'STYLES=',
-      `SRS=${this.crs}`,
-      `BBOX=${bbox}`,
-      `WIDTH=${this.tileSize}`,
-      `HEIGHT=${this.tileSize}`,
-      `FORMAT=${this.format}`,
-      'TRANSPARENT=TRUE',
-    ].join('&');
-
-    const separator = this.baseUrl.includes('?') ? '&' : '?';
-    return `${this.baseUrl}${separator}${params}`;
+    return this.queryPrefix + this.getTileBBox(coord);
   }
 
   /**
    * Compute the bounding box string for a tile in the configured CRS.
    */
   private getTileBBox(coord: TileCoord): string {
-    const n = Math.pow(2, coord.z);
+    const n = 1 << coord.z;
     const tileSize = (WEB_MERCATOR_EXTENT * 2) / n;
 
     // Tile bounds in EPSG:3857 (meters)

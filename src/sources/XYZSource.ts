@@ -5,8 +5,10 @@
 // placeholders. Supports optional {s} subdomain rotation.
 // ============================================================================
 
-import type { TileCoord, LayerSourceOptions } from '../core/types';
-import { LayerSource } from './LayerSource';
+import type { TileCoord } from '../core/types';
+import type { XYZSourceOptions } from './types';
+import { UrlTileSource } from './UrlTileSource';
+import { splitTemplate, expandTemplate } from './templateUrl';
 
 /**
  * XYZ tile source for standard slippy-map tile services.
@@ -20,25 +22,33 @@ import { LayerSource } from './LayerSource';
  * @example
  * ```ts
  * new XYZSource({
- *   type: 'xyz',
  *   url: 'https://{s}.tile.example.com/{z}/{x}/{y}.png',
  *   subdomains: ['a', 'b', 'c'],
  *   tileSize: 256,
  * });
  * ```
  */
-export class XYZSource extends LayerSource {
-  private readonly urlTemplate: string;
+export class XYZSource extends UrlTileSource {
   private readonly subdomains: string[];
   readonly tileSize: number;
+  readonly minZoom: number;
   readonly maxZoom: number;
 
-  constructor(options: LayerSourceOptions) {
-    super(options.attribution);
-    this.urlTemplate = options.url;
+  /** Pre-split URL template segments for fast concatenation. */
+  private readonly urlParts: string[];
+  private readonly urlTokens: string[];
+
+  constructor(options: XYZSourceOptions) {
+    super(options.attribution, options.maxConcurrency);
     this.subdomains = options.subdomains ?? [];
     this.tileSize = options.tileSize ?? 256;
+    this.minZoom = options.minZoom ?? 0;
     this.maxZoom = options.maxZoom ?? 22;
+
+    // Pre-compile: split template into literal parts and token names
+    const { parts, tokens } = splitTemplate(options.url);
+    this.urlParts = parts;
+    this.urlTokens = tokens;
   }
 
   /**
@@ -46,17 +56,6 @@ export class XYZSource extends LayerSource {
    * Subdomain rotation uses (x + y) mod to distribute requests.
    */
   getTileUrl(coord: TileCoord): string {
-    let url = this.urlTemplate
-      .replace('{z}', String(coord.z))
-      .replace('{x}', String(coord.x))
-      .replace('{y}', String(coord.y));
-
-    // Subdomain rotation
-    if (this.subdomains.length > 0) {
-      const idx = Math.abs(coord.x + coord.y) % this.subdomains.length;
-      url = url.replace('{s}', this.subdomains[idx]);
-    }
-
-    return url;
+    return expandTemplate(this.urlParts, this.urlTokens, coord, this.subdomains);
   }
 }

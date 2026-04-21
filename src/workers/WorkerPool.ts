@@ -64,10 +64,17 @@ export class WorkerPool {
         const value = Reflect.get(target, prop, receiver);
         if (typeof value === 'function') {
           return (...args: unknown[]) => {
-            const result = (value as Function).apply(target, args);
+            let result: unknown;
+            try {
+              result = (value as Function).apply(target, args);
+            } catch (err) {
+              // Synchronous throw - decrement to prevent pending count leak
+              pool.pendingCounts[idx]--;
+              throw err;
+            }
             // If the result is a Promise, decrement when it settles
-            if (result && typeof result.then === 'function') {
-              result.then(
+            if (result && typeof (result as PromiseLike<unknown>).then === 'function') {
+              (result as Promise<unknown>).then(
                 () => { pool.pendingCounts[idx]--; },
                 () => { pool.pendingCounts[idx]--; },
               );

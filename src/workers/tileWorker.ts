@@ -16,12 +16,43 @@ import {
   type ElevationDecoder,
 } from '../decoders/ElevationDecoder';
 
-// Built-in decoder lookup (workers can't share the main-thread registry)
+// Built-in decoder lookup. The main-thread registry doesn't cross the worker
+// boundary, so non-built-in decoders arrive as source strings (see below).
 const decoders: Record<string, ElevationDecoder> = {
   'terrain-rgb': RawRGBDecoder,
   'mapbox': RawRGBDecoder,
   'terrarium': TerrariumDecoder,
 };
+
+/**
+ * Cache of compiled custom decoders, keyed by source string. Multiple fetches
+ * using the same decoder source share a single compiled function.
+ */
+const compiledDecoders = new Map<string, ElevationDecoder>();
+
+/**
+ * Compile a decoder function from its source string and cache it.
+ *
+ * Uses `new Function` (not `eval`) to compile in the global scope, so the
+ * decoder is isolated from worker internals. Decoders must be pure
+ * (no closure captures) — they run with access only to their three
+ * arguments.
+ */
+function compileDecoder(source: string): ElevationDecoder {
+  const cached = compiledDecoders.get(source);
+  if (cached) return cached;
+  // Wrap the source as an expression body so it works for both
+  // arrow functions and `function` declarations.
+  // eslint-disable-next-line @typescript-eslint/no-implied-eval
+  const fn = new Function(
+    'pixels',
+    'width',
+    'height',
+    `return (${source})(pixels, width, height);`,
+  ) as ElevationDecoder;
+  compiledDecoders.set(source, fn);
+  return fn;
+}
 
 /** Reusable OffscreenCanvas for pixel extraction (resized as needed). */
 let reusableCanvas: OffscreenCanvas | null = null;
@@ -51,6 +82,7 @@ const api = {
   async fetchDecodeElevation(
     url: string,
     decoderType: string,
+    decoderSource?: string,
   ): Promise<{ elevations: Float32Array; width: number; height: number }> {
     // 1. Fetch tile image
     const response = await fetch(url);
@@ -71,9 +103,18 @@ const api = {
     const imageData = ctx.getImageData(0, 0, w, h);
     imageBitmap.close();
 
-    // 3. Decode elevation
-    const decoder = decoders[decoderType];
-    if (!decoder) throw new Error(`treelet worker: unknown decoder "${decoderType}"`);
+    // 3. Decode elevation: built-ins via local map; anything else via
+    //    on-demand compile from the source string shipped by BaseLayer.
+    let decoder: ElevationDecoder | undefined = decoders[decoderType];
+    if (!decoder && decoderSource) {
+      decoder = compileDecoder(decoderSource);
+    }
+    if (!decoder) {
+      throw new Error(
+        `treelet worker: unknown decoder "${decoderType}" ` +
+        `(no built-in match and no decoderSource provided)`,
+      );
+    }
     const elevations = decoder(imageData.data, w, h);
 
     return Comlink.transfer(

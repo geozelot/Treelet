@@ -213,6 +213,15 @@ export class TerrainRenderer {
    *  doesn't mutate the calculator's internal buffer. */
   private readonly _frustumPlanes = new Float32Array(12);
 
+  /** Fingerprint of the last instance buffer uploaded to the GPU.
+   *  Used to skip redundant per-attribute scatter + upload when neither
+   *  the visible tile set nor any atlas coordinates have changed. */
+  private _lastInstanceHash = 0;
+  /** Uint32 view over TilePool.instanceData for fast integer hashing.
+   *  Allocated lazily in uploadInstanceData() (TilePool's Float32Array
+   *  isn't available at construction). */
+  private _instanceU32: Uint32Array | null = null;
+
   /** Reusable point for elevation sampling (avoids per-frame allocation). */
   private readonly _samplePoint: WorldPoint = { x: 0, y: 0 };
 
@@ -371,12 +380,24 @@ export class TerrainRenderer {
    * (layer.maxZoom, default 22). The camera clamp naturally limits how far
    * the quadtree subdivides - zoom ≤ baseMaxZoom → maxLod ≤ baseMaxZoom + 1.
    *
-   * Source data availability (overzoom) is handled by getOverzoomRegion().
+   * Source data availability beyond the upper end (overzoom) is handled by
+   * BaseLayer.getOverzoomRegion — finer tiles get URLs clamped to the
+   * source's maxZoom and extract sub-regions from the parent image.
+   *
+   * Underzoom has no analogous mechanism: there is no way to synthesize a
+   * coarser tile when the source only publishes fine zooms. To prevent
+   * tiles being requested below `source.minZoom` (which would 404), the
+   * floor takes the maximum of the map clamp, the layer visibility bound,
+   * and the source's own minZoom.
    */
   private updateEffectiveZoomBounds(): void {
     const baseLayer = this.layerRegistry.getActiveBaseLayer();
     if (baseLayer) {
-      this.effectiveMinZoom = Math.max(this.baseMinZoom, baseLayer.minZoom);
+      this.effectiveMinZoom = Math.max(
+        this.baseMinZoom,
+        baseLayer.minZoom,
+        baseLayer.source.minZoom,
+      );
       this.effectiveMaxZoom = baseLayer.maxZoom;
     } else {
       this.effectiveMinZoom = this.baseMinZoom;
@@ -615,7 +636,14 @@ export class TerrainRenderer {
           await baseLayer.source.ensureReady();
           const url = baseLayer.getTileUrl(coord);
           const proxy = this.workerPool.getProxy();
-          return proxy.fetchDecodeElevation(url, baseLayer.decoderType);
+          // decoderSource is null for built-ins (terrain-rgb/mapbox/terrarium)
+          // and the function source for anything else, so workers can compile
+          // + cache custom/registered decoders they don't know natively.
+          return proxy.fetchDecodeElevation(
+            url,
+            baseLayer.decoderType,
+            baseLayer.decoderSource ?? undefined,
+          );
         });
       }
     }
@@ -1130,6 +1158,9 @@ export class TerrainRenderer {
     this._compositeParents.clear();
     this._drapeEffectiveZ.clear();
     this.lastBaseZoom = -1;
+    // Force the next frame to re-upload the instance buffer even if the
+    // tile set happens to hash to the same value as before the reload.
+    this._lastInstanceHash = 0;
 
     // Recompute zoom bounds for the (potentially new) active layer
     this.updateEffectiveZoomBounds();
@@ -1343,11 +1374,48 @@ export class TerrainRenderer {
   // =========================================================================
 
   /**
+   * Fingerprint the first `count` instances of TilePool.instanceData using
+   * FNV-1a-style mixing over the uint32 bit-patterns of the Float32 values.
+   *
+   * Cheap enough to run every frame (O(count * INSTANCE_FLOATS) = ~5000 ops
+   * at max capacity) and exact enough to catch any float change — no false
+   * collisions within a single render session.
+   */
+  private computeInstanceHash(count: number): number {
+    if (count === 0) return 0;
+    if (!this._instanceU32) {
+      this._instanceU32 = new Uint32Array(this.tilePool.instanceData.buffer);
+    }
+    const u32 = this._instanceU32;
+    const n = count * INSTANCE_FLOATS;
+    // Seed with count so 0-instance and N-instance never collide
+    let h = (2166136261 ^ count) | 0;
+    for (let i = 0; i < n; i++) {
+      h = Math.imul(h ^ u32[i], 16777619);
+    }
+    return h | 0;
+  }
+
+  /**
    * Scatter TilePool's flat instance buffer into per-attribute
    * InstancedBufferAttributes and flag them for GPU upload.
+   *
+   * Skips the scatter + upload entirely if the instance data hasn't changed
+   * since the previous upload (stationary camera, stable atlas state).
+   * For a 60 FPS idle scene this eliminates ~22KB of vertex attribute traffic
+   * and six dirty-flag checks per frame.
    */
   private uploadInstanceData(): void {
     const count = this.tilePool.instanceCount;
+
+    // Fast path: if neither the instance set nor any of its attributes
+    // changed, the previous upload is still correct on the GPU.
+    const hash = this.computeInstanceHash(count);
+    if (hash === this._lastInstanceHash && this.instancedGeo.instanceCount === count) {
+      return;
+    }
+    this._lastInstanceHash = hash;
+
     const src = this.tilePool.instanceData;
 
     const worldArr = this.aTileWorld.array as Float32Array;

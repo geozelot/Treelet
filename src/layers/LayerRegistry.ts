@@ -117,10 +117,7 @@ export class LayerRegistry {
 
   removeDrapeLayer(handle: LayerHandle | string): boolean {
     const id = typeof handle === 'string' ? handle : handle.id;
-    const layer = this.drapeLayers.get(id);
-    if (!layer) return false;
-
-    layer.dispose();
+    if (!this.drapeLayers.has(id)) return false;
     this.drapeLayers.delete(id);
     return true;
   }

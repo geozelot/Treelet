@@ -5,3 +5,4 @@ dist-demo
 .vite
 .idea
 .claude
+.gitignore

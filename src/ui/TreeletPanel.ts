@@ -24,10 +24,18 @@
 // ============================================================================
 
 import { panelStyles } from './styles';
+import { BASE_DRAPE_ID } from '../core/Treelet';
 import type { Treelet } from '../core/Treelet';
-import type { BaseDrapeMode, ColorRamp } from '../core/types';
-import type { BaseLayer } from '../layers/base/BaseLayer';
-import type { DrapeLayer } from '../layers/drape/DrapeLayer';
+import type { BaseDrapeMode, BlendMode, ColorRamp } from '../core/types';
+import type { BaseLayer } from '../layers/BaseLayer';
+import type { DrapeLayer } from '../layers/DrapeLayer';
+
+/** Drape blend mode metadata for the toggle buttons. */
+const BLEND_MODES: { id: BlendMode; label: string }[] = [
+  { id: 'normal',    label: 'Flat' },
+  { id: 'hillshade', label: 'Hillshade' },
+  { id: 'softlight', label: 'Soft Light' },
+];
 
 /** Color ramp metadata with CSS gradient for the indicator strip. */
 const RAMP_META: { id: ColorRamp; label: string; gradient: string }[] = [
@@ -47,11 +55,19 @@ const CONTOUR_COLORS: { label: string; rgb: [number, number, number]; hex: strin
   { label: 'gray',   rgb: [0.45, 0.45, 0.45], hex: '#737373' },
 ];
 
+/** Slider element ID prefixes - used in delegated input handler. */
+const EXAG_PREFIX = 'exag-slider-';
+const OPACITY_PREFIX = 'opacity-slider-';
+
 /** SVG gear icon (14×14). */
 const GEAR_SVG = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="2.5"/><path d="M13.3 10a1.2 1.2 0 0 0 .2 1.3l.1.1a1.4 1.4 0 1 1-2 2l-.1-.1a1.2 1.2 0 0 0-1.3-.2 1.2 1.2 0 0 0-.7 1.1v.2a1.4 1.4 0 1 1-2.9 0v-.1a1.2 1.2 0 0 0-.8-1.1 1.2 1.2 0 0 0-1.3.2l-.1.1a1.4 1.4 0 1 1-2-2l.1-.1a1.2 1.2 0 0 0 .2-1.3 1.2 1.2 0 0 0-1.1-.7h-.2a1.4 1.4 0 1 1 0-2.9h.1a1.2 1.2 0 0 0 1.1-.8 1.2 1.2 0 0 0-.2-1.3l-.1-.1a1.4 1.4 0 1 1 2-2l.1.1a1.2 1.2 0 0 0 1.3.2h.1a1.2 1.2 0 0 0 .7-1.1v-.2a1.4 1.4 0 1 1 2.9 0v.1a1.2 1.2 0 0 0 .7 1.1 1.2 1.2 0 0 0 1.3-.2l.1-.1a1.4 1.4 0 1 1 2 2l-.1.1a1.2 1.2 0 0 0-.2 1.3v.1a1.2 1.2 0 0 0 1.1.7h.2a1.4 1.4 0 1 1 0 2.9h-.1a1.2 1.2 0 0 0-1.1.7Z"/></svg>`;
 
 /**
  * <treelet-panel> - Main UI panel for treelet.js.
+ *
+ * Uses event delegation: a single click + input listener on the shadow root
+ * handles all interactions. No per-element listeners are registered, so
+ * innerHTML replacement (render) doesn't incur re-binding overhead.
  */
 export class TreeletPanel extends HTMLElement {
   private shadow: ShadowRoot;
@@ -63,11 +79,18 @@ export class TreeletPanel extends HTMLElement {
   /** Horizontal position - controls column order (from box outwards). */
   private hPos: 'left' | 'right' = 'right';
 
-  /** Which layer has its settings gear open (id or '__base_drape__'). */
+  /** Which layer has its settings gear open (id or BASE_DRAPE_ID). */
   private settingsOpen: string | null = null;
 
   /** Which mode entry inside Terrain overlay has its gear open. */
   private modeSettingsOpen: BaseDrapeMode | null = null;
+
+  /** Whether delegated listeners have been bound. */
+  private delegated = false;
+
+  /** Persistent panel container - only its innerHTML is replaced on re-render,
+   *  avoiding repeated CSS re-parse from full shadow DOM innerHTML replacement. */
+  private panelEl: HTMLDivElement | null = null;
 
   constructor() {
     super();
@@ -79,6 +102,20 @@ export class TreeletPanel extends HTMLElement {
     if (vPos) this.vPos = vPos;
     if (hPos) this.hPos = hPos;
     this.setAttribute('data-v', this.vPos);
+
+    // Bind delegated handlers ONCE - they survive innerHTML replacements
+    if (!this.delegated) {
+      this.delegated = true;
+      this.shadow.addEventListener('click', this.handleClick);
+      this.shadow.addEventListener('input', this.handleInput);
+    }
+
+    // Inject style and persistent panel container once
+    if (!this.panelEl) {
+      this.shadow.innerHTML = `<style>${panelStyles}</style><div class="panel"></div>`;
+      this.panelEl = this.shadow.querySelector('.panel') as HTMLDivElement;
+    }
+
     this.render();
   }
 
@@ -93,6 +130,144 @@ export class TreeletPanel extends HTMLElement {
     this.render();
   }
 
+  // =========================================================================
+  // Delegated event handlers (arrow functions for stable `this`)
+  // =========================================================================
+
+  private handleClick = (e: Event): void => {
+    if (!this.map) return;
+    const target = e.target as HTMLElement;
+
+    // === Sliders: just stop propagation ===
+    if (target.tagName === 'INPUT') {
+      e.stopPropagation();
+      return;
+    }
+
+    // === Active row click → toggle settings panel ===
+    const activeRow = target.closest('.active-row[data-layer-id]') as HTMLElement | null;
+    if (activeRow) {
+      e.stopPropagation();
+      const layerId = activeRow.dataset.layerId!;
+      const opening = this.settingsOpen !== layerId;
+      this.settingsOpen = opening ? layerId : null;
+      this.modeSettingsOpen = null;
+      this.render();
+      return;
+    }
+
+    // === Dropdown layer button → activate layer ===
+    const layerBtn = target.closest('.layer-col-body .layer-btn[data-action="activate"]') as HTMLElement | null;
+    if (layerBtn) {
+      e.stopPropagation();
+      const entry = layerBtn.closest('.layer-entry') as HTMLElement | null;
+      if (!entry) return;
+
+      const layerId = entry.dataset.layerId!;
+      const layerType = entry.dataset.layerType!;
+
+      this.settingsOpen = null;
+      this.modeSettingsOpen = null;
+
+      if (layerType === 'base') {
+        this.map.setActiveBaseLayer(layerId);
+      } else if (layerType === 'base-drape') {
+        this.map.activateBaseDrape();
+      } else if (layerType === 'base-drape-mode') {
+        const mode = entry.dataset.mode as BaseDrapeMode;
+        this.map.activateBaseDrape();
+        this.map.setBaseDrapeMode(mode);
+      } else if (layerType === 'drape') {
+        this.map.activateDrapeLayer(layerId);
+      }
+      return;
+    }
+
+    // === Wireframe mode toggle ===
+    const wireBtn = target.closest('[data-action="wireframe-mode"]') as HTMLElement | null;
+    if (wireBtn) {
+      e.stopPropagation();
+      this.map.setWireframeWhite(wireBtn.dataset.value === 'white');
+      this.render();
+      return;
+    }
+
+    // === Color ramp button ===
+    const rampBtn = target.closest('.ramp-btn') as HTMLElement | null;
+    if (rampBtn) {
+      e.stopPropagation();
+      this.map.setColorRamp(rampBtn.dataset.value as ColorRamp);
+      this.render();
+      return;
+    }
+
+    // === Contour color swatch ===
+    const swatch = target.closest('.color-swatch') as HTMLElement | null;
+    if (swatch) {
+      e.stopPropagation();
+      const r = parseFloat(swatch.dataset.r!);
+      const g = parseFloat(swatch.dataset.g!);
+      const b = parseFloat(swatch.dataset.b!);
+      this.map.setIsolineColor(r, g, b);
+      this.render();
+      return;
+    }
+
+    // === Blend mode toggle ===
+    const blendBtn = target.closest('[data-action="blend-mode"]') as HTMLElement | null;
+    if (blendBtn) {
+      e.stopPropagation();
+      this.map.setDrapeBlendMode(blendBtn.dataset.value as BlendMode);
+      this.render();
+      return;
+    }
+  };
+
+  private handleInput = (e: Event): void => {
+    if (!this.map) return;
+    const target = e.target as HTMLInputElement;
+    if (target.tagName !== 'INPUT') return;
+    e.stopPropagation();
+    const val = parseFloat(target.value);
+    const id = target.id;
+
+    if (id.startsWith(EXAG_PREFIX)) {
+      const layerId = id.slice(EXAG_PREFIX.length);
+      const label = this.shadow.getElementById(`exag-value-${layerId}`);
+      if (label) label.textContent = `${val.toFixed(1)}x`;
+      this.map.setExaggeration(val);
+    } else if (id.startsWith(OPACITY_PREFIX)) {
+      const layerId = id.slice(OPACITY_PREFIX.length);
+      const label = this.shadow.getElementById(`opacity-value-${layerId}`);
+      if (label) label.textContent = `${Math.round(val * 100)}%`;
+      this.map.setDrapeOpacity(layerId, val);
+    } else if (id === 'thickness-slider') {
+      const label = this.shadow.getElementById('thickness-value');
+      if (label) label.textContent = val.toFixed(1);
+      this.map.setIsolineThickness(val);
+    } else if (id === 'contour-slider') {
+      const label = this.shadow.getElementById('contour-value');
+      if (label) label.textContent = `${val}m`;
+      this.map.setIsolineInterval(val);
+    } else if (id === 'strength-slider') {
+      const label = this.shadow.getElementById('strength-value');
+      if (label) label.textContent = `${Math.round(val * 100)}%`;
+      this.map.setHillshadeStrength(val);
+    } else if (id === 'azimuth-slider') {
+      const label = this.shadow.getElementById('azimuth-value');
+      if (label) label.textContent = `${Math.round(val)}°`;
+      this.map.setSunAzimuth(val);
+    } else if (id === 'altitude-slider') {
+      const label = this.shadow.getElementById('altitude-value');
+      if (label) label.textContent = `${Math.round(val)}°`;
+      this.map.setSunAltitude(val);
+    }
+  };
+
+  // =========================================================================
+  // Render (HTML generation - no event binding needed)
+  // =========================================================================
+
   private render(): void {
     if (!this.map) return;
 
@@ -101,7 +276,7 @@ export class TreeletPanel extends HTMLElement {
 
     const activeDrapeId = this.map.getActiveDrapeId();
     const isBaseDrape = this.map.isBaseDrapeActive();
-    const activeBase = baseLayers.find((l) => l.active);
+    const activeBase = baseLayers.find((l) => l.visible);
 
     // Build each column: active section (button → settings) + selector (header hover → dropdown)
     const terrainCol = `
@@ -116,7 +291,7 @@ export class TreeletPanel extends HTMLElement {
           </div>
           <div class="layer-col-body">
             ${baseLayers
-              .filter((l) => !l.active)
+              .filter((l) => !l.visible)
               .map((l) => this.renderBaseLayerButton(l))
               .join('')}
           </div>
@@ -144,12 +319,10 @@ export class TreeletPanel extends HTMLElement {
       ? overlayCol + terrainCol
       : terrainCol + overlayCol;
 
-    this.shadow.innerHTML = `
-      <style>${panelStyles}</style>
-      <div class="panel">${columns}</div>
-    `;
-
-    this.bindEvents();
+    // Only replace panel content - style tag and panel container persist
+    if (this.panelEl) {
+      this.panelEl.innerHTML = columns;
+    }
   }
 
   // =========================================================================
@@ -168,7 +341,7 @@ export class TreeletPanel extends HTMLElement {
     return `
       <div class="active-btn-wrap">
         <div class="active-row" data-layer-id="${layer.id}" data-layer-type="base">
-          <span class="active-name">${layer.name}</span>
+          <span class="active-name">${layer.layerName}</span>
           <span class="gear-icon${isOpen ? ' open' : ''}" data-action="gear">${GEAR_SVG}</span>
         </div>
         <div class="active-settings${isOpen ? '' : ' hidden'}" data-layer-id="${layer.id}">
@@ -178,6 +351,7 @@ export class TreeletPanel extends HTMLElement {
           </div>
           <input type="range" id="exag-slider-${layer.id}" min="0.5" max="5.0" step="0.1"
             value="${exag}">
+          ${this.renderLightSettings()}
         </div>
       </div>
     `;
@@ -202,31 +376,34 @@ export class TreeletPanel extends HTMLElement {
   /** Render the active Terrain mode: mode name + gear → mode-specific settings. */
   private renderActiveBaseDrape(): string {
     const mode = this.map!.getBaseDrapeMode();
-    const isOpen = this.settingsOpen === '__base_drape__';
+    const isOpen = this.settingsOpen === BASE_DRAPE_ID;
     const label = mode.charAt(0).toUpperCase() + mode.slice(1);
 
     return `
       <div class="active-btn-wrap">
-        <div class="active-row" data-layer-id="__base_drape__" data-layer-type="base-drape">
+        <div class="active-row" data-layer-id="${BASE_DRAPE_ID}" data-layer-type="base-drape">
           <span class="active-name">${label}</span>
           <span class="gear-icon${isOpen ? ' open' : ''}" data-action="gear">${GEAR_SVG}</span>
         </div>
-        <div class="active-settings${isOpen ? '' : ' hidden'}" data-layer-id="__base_drape__">
+        <div class="active-settings${isOpen ? '' : ' hidden'}" data-layer-id="${BASE_DRAPE_ID}">
           ${this.renderModeSettings(mode)}
         </div>
       </div>
     `;
   }
 
-  /** Render the active external drape: name + gear → opacity slider. */
+  /** Render the active external drape: name + gear → opacity, blend mode, strength. */
   private renderActiveExternalDrape(drape: DrapeLayer): string {
     const isOpen = this.settingsOpen === drape.id;
     const opacity = this.map!.getDrapeOpacity(drape.id);
+    const blendMode = this.map!.getDrapeBlendMode();
+    const strength = this.map!.getHillshadeStrength();
+    const showStrength = blendMode !== 'normal';
 
     return `
       <div class="active-btn-wrap">
         <div class="active-row" data-layer-id="${drape.id}" data-layer-type="drape">
-          <span class="active-name">${drape.name}</span>
+          <span class="active-name">${drape.layerName}</span>
           <span class="gear-icon${isOpen ? ' open' : ''}" data-action="gear">${GEAR_SVG}</span>
         </div>
         <div class="active-settings${isOpen ? '' : ' hidden'}" data-layer-id="${drape.id}">
@@ -236,6 +413,20 @@ export class TreeletPanel extends HTMLElement {
           </div>
           <input type="range" id="opacity-slider-${drape.id}" min="0" max="1" step="0.05"
             value="${opacity}">
+
+          <div class="setting-label">Terrain Blend</div>
+          <div class="toggle-row" data-action-type="blend-mode">
+            ${BLEND_MODES.map((m) =>
+              `<button class="toggle-btn${blendMode === m.id ? ' active' : ''}" data-action="blend-mode" data-value="${m.id}">${m.label}</button>`
+            ).join('')}
+          </div>
+
+          <div class="control-row${showStrength ? '' : ' hidden'}" id="strength-row">
+            <span class="control-label">Strength</span>
+            <span class="control-value" id="strength-value">${Math.round(strength * 100)}%</span>
+          </div>
+          <input type="range" id="strength-slider" class="${showStrength ? '' : 'hidden'}" min="0" max="1" step="0.05"
+            value="${strength}">
         </div>
       </div>
     `;
@@ -249,7 +440,7 @@ export class TreeletPanel extends HTMLElement {
   private renderBaseLayerButton(layer: BaseLayer): string {
     return `
       <div class="layer-entry" data-layer-id="${layer.id}" data-layer-type="base">
-        <button class="layer-btn" data-action="activate">${layer.name}</button>
+        <button class="layer-btn" data-action="activate">${layer.layerName}</button>
       </div>
     `;
   }
@@ -274,7 +465,7 @@ export class TreeletPanel extends HTMLElement {
       if (m === activeMode) continue;
       const label = m.charAt(0).toUpperCase() + m.slice(1);
       parts.push(`
-        <div class="layer-entry" data-layer-id="__base_drape__" data-layer-type="base-drape-mode" data-mode="${m}">
+        <div class="layer-entry" data-layer-id="${BASE_DRAPE_ID}" data-layer-type="base-drape-mode" data-mode="${m}">
           <button class="layer-btn" data-action="activate">${label}</button>
         </div>
       `);
@@ -288,7 +479,7 @@ export class TreeletPanel extends HTMLElement {
       for (const drape of inactiveDrapes) {
         parts.push(`
           <div class="layer-entry" data-layer-id="${drape.id}" data-layer-type="drape">
-            <button class="layer-btn" data-action="activate">${drape.name}</button>
+            <button class="layer-btn" data-action="activate">${drape.layerName}</button>
           </div>
         `);
       }
@@ -347,10 +538,29 @@ export class TreeletPanel extends HTMLElement {
     `;
   }
 
+  private renderLightSettings(): string {
+    const azimuth = this.map!.getSunAzimuth();
+    const altitude = this.map!.getSunAltitude();
+
+    return `
+      <div class="setting-label">Light Direction</div>
+      <div class="control-row">
+        <span class="control-label">Direction</span>
+        <span class="control-value" id="azimuth-value">${Math.round(azimuth)}°</span>
+      </div>
+      <input type="range" id="azimuth-slider" min="0" max="360" step="1" value="${azimuth}">
+      <div class="control-row">
+        <span class="control-label">Altitude</span>
+        <span class="control-value" id="altitude-value">${Math.round(altitude)}°</span>
+      </div>
+      <input type="range" id="altitude-slider" min="5" max="90" step="1" value="${altitude}">
+    `;
+  }
+
   private renderContourSettings(): string {
-    const interval = this.map!.getContourInterval();
-    const thickness = this.map!.getContourThickness();
-    const currentColor = this.map!.getContourColor();
+    const interval = this.map!.getIsolineInterval();
+    const thickness = this.map!.getIsolineThickness();
+    const currentColor = this.map!.getIsolineColor();
 
     return `
       <div class="setting-label">Color Ramp</div>
@@ -380,136 +590,6 @@ export class TreeletPanel extends HTMLElement {
       </div>
       <input type="range" id="contour-slider" min="10" max="500" step="10" value="${interval}">
     `;
-  }
-
-  // =========================================================================
-  // Event binding
-  // =========================================================================
-
-  private bindEvents(): void {
-    if (!this.map) return;
-
-    // Active row clicks - toggle settings panel (whole row is the button)
-    this.shadow.querySelectorAll<HTMLElement>('.active-row[data-layer-id]').forEach((row) => {
-      row.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const layerId = row.dataset.layerId!;
-        const opening = this.settingsOpen !== layerId;
-        this.settingsOpen = opening ? layerId : null;
-        this.modeSettingsOpen = null;      // close nested mode gear
-        this.render();
-      });
-    });
-
-    // Layer button clicks in dropdown - activate the layer & close all settings
-    this.shadow.querySelectorAll<HTMLElement>('.layer-col-body .layer-btn[data-action="activate"]').forEach((btn) => {
-      btn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const entry = btn.closest('.layer-entry') as HTMLElement | null;
-        if (!entry) return;
-
-        const layerId = entry.dataset.layerId!;
-        const layerType = entry.dataset.layerType!;
-
-        // Close all open settings when switching layers
-        this.settingsOpen = null;
-        this.modeSettingsOpen = null;
-
-        if (layerType === 'base') {
-          this.map!.setActiveBaseLayer(layerId);
-        } else if (layerType === 'base-drape') {
-          this.map!.activateBaseDrape();
-        } else if (layerType === 'base-drape-mode') {
-          const mode = entry.dataset.mode as BaseDrapeMode;
-          this.map!.activateBaseDrape();
-          this.map!.setBaseDrapeMode(mode);
-        } else if (layerType === 'drape') {
-          this.map!.activateDrapeLayer(layerId);
-        }
-      });
-    });
-
-    // Wireframe normals/white toggle buttons
-    this.shadow.querySelectorAll<HTMLElement>('[data-action="wireframe-mode"]').forEach((btn) => {
-      btn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const val = btn.dataset.value;
-        this.map!.setWireframeWhite(val === 'white');
-        this.render();
-      });
-    });
-
-    // Color ramp buttons
-    this.shadow.querySelectorAll<HTMLElement>('.ramp-list[data-action-type="ramp"] .ramp-btn').forEach((btn) => {
-      btn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const ramp = btn.dataset.value as ColorRamp;
-        this.map!.setColorRamp(ramp);
-        this.render();
-      });
-    });
-
-    // Contour color swatches
-    this.shadow.querySelectorAll<HTMLElement>('.swatch-row[data-action-type="contour-color"] .color-swatch').forEach((swatch) => {
-      swatch.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const r = parseFloat(swatch.dataset.r!);
-        const g = parseFloat(swatch.dataset.g!);
-        const b = parseFloat(swatch.dataset.b!);
-        this.map!.setContourColor(r, g, b);
-        this.render();
-      });
-    });
-
-    // Contour thickness slider
-    const thicknessSlider = this.shadow.getElementById('thickness-slider') as HTMLInputElement | null;
-    const thicknessValue = this.shadow.getElementById('thickness-value');
-    thicknessSlider?.addEventListener('input', (e) => {
-      e.stopPropagation();
-      const val = parseFloat(thicknessSlider.value);
-      if (thicknessValue) thicknessValue.textContent = val.toFixed(1);
-      this.map!.setContourThickness(val);
-    });
-    thicknessSlider?.addEventListener('click', (e) => e.stopPropagation());
-
-    // Contour interval slider
-    const contourSlider = this.shadow.getElementById('contour-slider') as HTMLInputElement | null;
-    const contourValue = this.shadow.getElementById('contour-value');
-    contourSlider?.addEventListener('input', (e) => {
-      e.stopPropagation();
-      const val = parseFloat(contourSlider.value);
-      if (contourValue) contourValue.textContent = `${val}m`;
-      this.map!.setContourInterval(val);
-    });
-    contourSlider?.addEventListener('click', (e) => e.stopPropagation());
-
-    // Exaggeration sliders (one per base layer)
-    this.shadow.querySelectorAll<HTMLInputElement>('input[id^="exag-slider-"]').forEach((slider) => {
-      const layerId = slider.id.replace('exag-slider-', '');
-      const valueEl = this.shadow.getElementById(`exag-value-${layerId}`);
-
-      slider.addEventListener('input', (e) => {
-        e.stopPropagation();
-        const val = parseFloat(slider.value);
-        if (valueEl) valueEl.textContent = `${val.toFixed(1)}x`;
-        this.map!.setExaggeration(val);
-      });
-      slider.addEventListener('click', (e) => e.stopPropagation());
-    });
-
-    // Opacity sliders (one per external drape)
-    this.shadow.querySelectorAll<HTMLInputElement>('input[id^="opacity-slider-"]').forEach((slider) => {
-      const layerId = slider.id.replace('opacity-slider-', '');
-      const valueEl = this.shadow.getElementById(`opacity-value-${layerId}`);
-
-      slider.addEventListener('input', (e) => {
-        e.stopPropagation();
-        const val = parseFloat(slider.value);
-        if (valueEl) valueEl.textContent = `${Math.round(val * 100)}%`;
-        this.map!.setDrapeOpacity(layerId, val);
-      });
-      slider.addEventListener('click', (e) => e.stopPropagation());
-    });
   }
 }
 

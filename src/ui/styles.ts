@@ -213,6 +213,10 @@ export const panelStyles = /* css */ `
     display: none;
   }
 
+  .hidden {
+    display: none !important;
+  }
+
   /* Top-anchored: settings expand downward from the button */
   :host([data-v="top"]) .active-settings {
     top: 100%;

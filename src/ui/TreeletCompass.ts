@@ -17,9 +17,9 @@ import type { CameraController, CameraState } from '../scene/CameraController';
 import type { UICorner } from '../core/types';
 import { WebMercator } from '../crs/WebMercator';
 
-// ---------------------------------------------------------------------------
+// ===========================================================================
 // Inline SVGs for navigation buttons and copy icon
-// ---------------------------------------------------------------------------
+// ===========================================================================
 
 const ARROW_UP = `<svg viewBox="0 0 10 10" fill="currentColor"><path d="M5 1.5 L9 8.5 H1Z"/></svg>`;
 const ARROW_DOWN = `<svg viewBox="0 0 10 10" fill="currentColor"><path d="M5 8.5 L9 1.5 H1Z"/></svg>`;
@@ -27,18 +27,18 @@ const ARROW_LEFT = `<svg viewBox="0 0 10 10" fill="currentColor"><path d="M1.5 5
 const ARROW_RIGHT = `<svg viewBox="0 0 10 10" fill="currentColor"><path d="M8.5 5 L1.5 1 V9Z"/></svg>`;
 const COPY_ICON = `<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="7" height="7.5" rx="1"/><path d="M3.5 9.5V3a1 1 0 0 1 1-1H9"/></svg>`;
 
-// ---------------------------------------------------------------------------
+// ===========================================================================
 // Helpers
-// ---------------------------------------------------------------------------
+// ===========================================================================
 
 /** Format a bearing value: 0-360 range with degree symbol. */
 function formatBearing(rotation: number): string {
   return `${(((rotation % 360) + 360) % 360).toFixed(1)}°`;
 }
 
-// ---------------------------------------------------------------------------
+// ===========================================================================
 // Component
-// ---------------------------------------------------------------------------
+// ===========================================================================
 
 export class TreeletCompass extends HTMLElement {
   private shadow: ShadowRoot;
@@ -73,9 +73,9 @@ export class TreeletCompass extends HTMLElement {
     return { h, v };
   }
 
-  // -----------------------------------------------------------------------
+  // =======================================================================
   // Lifecycle
-  // -----------------------------------------------------------------------
+  // =======================================================================
 
   attach(
     map: Treelet,
@@ -113,9 +113,9 @@ export class TreeletCompass extends HTMLElement {
     }
   }
 
-  // -----------------------------------------------------------------------
+  // =======================================================================
   // Rendering
-  // -----------------------------------------------------------------------
+  // =======================================================================
 
   private render(): void {
     const cp = this.parseCorner(this.compassPos);
@@ -223,9 +223,9 @@ export class TreeletCompass extends HTMLElement {
     this.bearingEl = this.shadow.getElementById('infoBearing');
   }
 
-  // -----------------------------------------------------------------------
+  // =======================================================================
   // Copy helpers
-  // -----------------------------------------------------------------------
+  // =======================================================================
 
   /** Copy text to clipboard and flash the icon on a button. */
   private copyToClipboard(btn: HTMLElement, text: string): void {
@@ -270,9 +270,9 @@ export class TreeletCompass extends HTMLElement {
     ]);
   }
 
-  // -----------------------------------------------------------------------
+  // =======================================================================
   // Event binding
-  // -----------------------------------------------------------------------
+  // =======================================================================
 
   private bindEvents(): void {
     // Compass click - reset orientation

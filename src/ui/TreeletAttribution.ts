@@ -57,16 +57,16 @@ export class TreeletAttribution extends HTMLElement {
 
     // Active base layer attribution
     for (const layer of this.map.getBaseLayers()) {
-      if (layer.active && layer.source.attribution) {
-        parts.push(layer.source.attribution);
+      if (layer.visible && layer.attribution) {
+        parts.push(layer.attribution);
       }
     }
 
     // Active external drape attribution (skip when BaseDrape is active)
     if (!this.map.isBaseDrapeActive()) {
       for (const drape of this.map.getDrapeLayers()) {
-        if (drape.active && drape.source.attribution) {
-          parts.push(drape.source.attribution);
+        if (drape.visible && drape.attribution) {
+          parts.push(drape.attribution);
         }
       }
     }
@@ -85,9 +85,9 @@ export class TreeletAttribution extends HTMLElement {
     }
   }
 
-  // -------------------------------------------------------------------------
+  // =========================================================================
   // Rendering
-  // -------------------------------------------------------------------------
+  // =========================================================================
 
   private render(side: 'left' | 'right'): void {
     const radius = side === 'left' ? '0 4px 0 0' : '4px 0 0 0';

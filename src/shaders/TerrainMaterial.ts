@@ -1,13 +1,9 @@
 // ============================================================================
-// treelet.js - Unified Terrain Material
+// treelet.js - Instanced Terrain Material
 //
-// Single ShaderMaterial supporting 5 shader modes and 4 color ramps via
-// uniform switches, plus independent contour line overlay and drape texture.
-// Mode/ramp switching is instant (uniform update only, no shader recompile).
-//
-// Shader modes: 0=base, 1=elevation, 2=slope, 3=aspect, 4=texture
-// Color ramps:  0=hypsometric, 1=viridis, 2=inferno, 3=grayscale
-// Contour:      uContourEnabled (bool) overlays contour lines on any mode
+// ShaderMaterial for the instanced terrain renderer. Assembles modular GLSL
+// includes into vertex/fragment shaders. One shared grid mesh is instanced
+// across all visible tiles via per-instance attributes.
 // ============================================================================
 
 import {
@@ -16,205 +12,47 @@ import {
   UniformsLib,
   DoubleSide,
   Vector3,
-  Texture,
   type IUniform,
+  type Texture,
 } from 'three';
 import type { ShaderMode, BlendMode, ColorRamp } from '../core/types';
 
-// ---- GLSL shaders ----
+// ==== Import modular GLSL ====
+import declarations from './glsl/includes/declarations.glsl?raw';
+import atlasSampling from './glsl/includes/atlas_sampling.glsl?raw';
+import geomorphing from './glsl/includes/geomorphing.glsl?raw';
+import normals from './glsl/includes/normals.glsl?raw';
+import colorRamps from './glsl/includes/color_ramps.glsl?raw';
+import shaderModes from './glsl/includes/shader_modes.glsl?raw';
+import drapeBlending from './glsl/includes/drape_blending.glsl?raw';
+import isolineOverlay from './glsl/includes/isoline_overlay.glsl?raw';
+import vertexMain from './glsl/terrain.vert.glsl?raw';
+import fragmentMain from './glsl/terrain.frag.glsl?raw';
 
-const vertexShader = /* glsl */ `
-varying vec3 vNormal;
-varying vec2 vUv;
-varying float vElevation;
+// ==== Assemble shaders from modular GLSL ====
+// Vertex: atlas helpers + geomorphing helpers are self-contained (take explicit
+// parameters), so they can precede the declarations in vertexMain.
+// Fragment: includes reference uniforms/varyings directly, so the declarations
+// include MUST come first to satisfy GLSL declaration-before-use.
 
-uniform float uElevationScale;
+const vertexShader = [
+  atlasSampling,
+  geomorphing,
+  vertexMain,
+].join('\n');
 
-#include <fog_pars_vertex>
+const fragmentShader = [
+  declarations,
+  atlasSampling,
+  normals,
+  colorRamps,
+  shaderModes,
+  drapeBlending,
+  isolineOverlay,
+  fragmentMain,
+].join('\n');
 
-void main() {
-  vNormal = normalize(normalMatrix * normal);
-  vUv = uv;
-  vElevation = position.z / uElevationScale;
-  vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-  gl_Position = projectionMatrix * mvPosition;
-  #include <fog_vertex>
-}
-`;
-
-const fragmentShader = /* glsl */ `
-precision highp float;
-
-varying vec3 vNormal;
-varying vec2 vUv;
-varying float vElevation;
-
-// Shader mode: 0=base, 1=elevation, 2=slope, 3=aspect, 4=texture
-uniform int uMode;
-
-// Color ramp: 0=hypsometric, 1=viridis, 2=inferno, 3=grayscale
-uniform int uColorRamp;
-
-// Elevation range (meters)
-uniform float uMinElevation;
-uniform float uMaxElevation;
-
-// Lighting
-uniform vec3 uSunDirection;
-
-// Wireframe: when true, base mode renders flat white instead of normals
-uniform bool uBaseWhite;
-
-// Contour overlay (independent of mode)
-uniform bool uContourEnabled;
-uniform float uContourInterval;
-uniform float uContourThickness;
-uniform vec3 uContourColor;
-
-// Drape texture
-uniform sampler2D uDrapeMap;
-uniform float uDrapeOpacity;
-uniform int uHasDrape;
-
-#include <fog_pars_fragment>
-
-// --- Utility ---
-
-vec3 hsv2rgb(vec3 c) {
-  vec4 K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
-  vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
-  return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
-}
-
-// --- Color ramps ---
-
-vec3 hypsometricColor(float t) {
-  vec3 c0 = vec3(0.08, 0.32, 0.18);  // deep green
-  vec3 c1 = vec3(0.30, 0.58, 0.22);  // forest
-  vec3 c2 = vec3(0.62, 0.72, 0.32);  // light green
-  vec3 c3 = vec3(0.80, 0.72, 0.40);  // tan
-  vec3 c4 = vec3(0.64, 0.48, 0.34);  // brown
-  vec3 c5 = vec3(0.72, 0.68, 0.65);  // gray rock
-  vec3 c6 = vec3(0.96, 0.96, 0.98);  // snow
-
-  if (t < 0.0)  return c0;
-  if (t < 0.08) return mix(c0, c1, t / 0.08);
-  if (t < 0.20) return mix(c1, c2, (t - 0.08) / 0.12);
-  if (t < 0.38) return mix(c2, c3, (t - 0.20) / 0.18);
-  if (t < 0.55) return mix(c3, c4, (t - 0.38) / 0.17);
-  if (t < 0.78) return mix(c4, c5, (t - 0.55) / 0.23);
-  return mix(c5, c6, clamp((t - 0.78) / 0.22, 0.0, 1.0));
-}
-
-vec3 viridisColor(float t) {
-  vec3 c0 = vec3(0.267, 0.004, 0.329);
-  vec3 c1 = vec3(0.282, 0.140, 0.458);
-  vec3 c2 = vec3(0.127, 0.566, 0.551);
-  vec3 c3 = vec3(0.369, 0.789, 0.383);
-  vec3 c4 = vec3(0.993, 0.906, 0.144);
-
-  t = clamp(t, 0.0, 1.0);
-  if (t < 0.25) return mix(c0, c1, t / 0.25);
-  if (t < 0.50) return mix(c1, c2, (t - 0.25) / 0.25);
-  if (t < 0.75) return mix(c2, c3, (t - 0.50) / 0.25);
-  return mix(c3, c4, (t - 0.75) / 0.25);
-}
-
-vec3 infernoColor(float t) {
-  vec3 c0 = vec3(0.001, 0.000, 0.014);
-  vec3 c1 = vec3(0.341, 0.062, 0.429);
-  vec3 c2 = vec3(0.735, 0.215, 0.330);
-  vec3 c3 = vec3(0.988, 0.645, 0.040);
-  vec3 c4 = vec3(0.988, 0.998, 0.645);
-
-  t = clamp(t, 0.0, 1.0);
-  if (t < 0.25) return mix(c0, c1, t / 0.25);
-  if (t < 0.50) return mix(c1, c2, (t - 0.25) / 0.25);
-  if (t < 0.75) return mix(c2, c3, (t - 0.50) / 0.25);
-  return mix(c3, c4, (t - 0.75) / 0.25);
-}
-
-vec3 grayscaleColor(float t) {
-  t = clamp(t, 0.0, 1.0);
-  return vec3(t);
-}
-
-vec3 applyRamp(float t) {
-  if (uColorRamp == 0) return hypsometricColor(t);
-  if (uColorRamp == 1) return viridisColor(t);
-  if (uColorRamp == 2) return infernoColor(t);
-  return grayscaleColor(t);
-}
-
-// --- Shader modes ---
-
-vec3 baseMode() {
-  if (uBaseWhite) return vec3(1.0);
-  // Normal-as-RGB, same rendering as MeshNormalMaterial
-  return normalize(vNormal) * 0.5 + 0.5;
-}
-
-vec3 elevationMode() {
-  float t = (vElevation - uMinElevation) / max(uMaxElevation - uMinElevation, 1.0);
-  vec3 color = applyRamp(t);
-  float light = max(dot(vNormal, uSunDirection), 0.0) * 0.55 + 0.45;
-  return color * light;
-}
-
-vec3 slopeMode() {
-  float slopeAngle = acos(clamp(dot(vNormal, vec3(0.0, 0.0, 1.0)), -1.0, 1.0));
-  float t = clamp(slopeAngle / 1.5708, 0.0, 1.0);
-  vec3 color = applyRamp(t);
-  float light = max(dot(vNormal, vec3(0.0, 0.0, 1.0)), 0.0) * 0.3 + 0.7;
-  return color * light;
-}
-
-vec3 aspectMode() {
-  vec3 n = normalize(vNormal);
-  float flatness = n.z;
-  float angle = atan(n.x, n.y);
-  float t = (angle + 3.14159265) / 6.28318530;
-  vec3 color = applyRamp(t);
-  color = mix(color, vec3(0.65), smoothstep(0.15, 0.0, 1.0 - flatness));
-  return color;
-}
-
-vec3 textureMode() {
-  // Fallback to elevation coloring when no drape texture is loaded
-  if (uHasDrape == 0) return elevationMode();
-
-  // Sample drape texture with V-flip for ImageBitmap (flipY=false)
-  vec2 drapeUv = vec2(vUv.x, 1.0 - vUv.y);
-  vec4 drape = texture2D(uDrapeMap, drapeUv);
-
-  // Blend drape with elevation base using opacity
-  vec3 base = elevationMode();
-  return mix(base, drape.rgb, uDrapeOpacity);
-}
-
-void main() {
-  vec3 color;
-
-  if (uMode == 0) color = baseMode();
-  else if (uMode == 1) color = elevationMode();
-  else if (uMode == 2) color = slopeMode();
-  else if (uMode == 3) color = aspectMode();
-  else color = textureMode();
-
-  // Contour line overlay (independent of mode)
-  if (uContourEnabled) {
-    float d = fract(vElevation / uContourInterval);
-    float fw = fwidth(vElevation / uContourInterval);
-    float line = 1.0 - smoothstep(0.0, uContourThickness * fw, min(d, 1.0 - d));
-    color = mix(color, uContourColor, line * 0.75);
-  }
-
-  gl_FragColor = vec4(color, 1.0);
-  #include <fog_fragment>
-}
-`;
-
-// ---- Mode / ramp indices ----
+// ==== Mode / ramp indices ====
 
 const SHADER_MODE_INDEX: Record<ShaderMode, number> = {
   base: 0,
@@ -231,10 +69,15 @@ const COLOR_RAMP_INDEX: Record<ColorRamp, number> = {
   grayscale: 3,
 };
 
-// Default sun: azimuth 315°, altitude 45° in Z-up
-const DEFAULT_SUN = new Vector3(-0.5, 0.5, 0.7071).normalize();
+const BLEND_MODE_INDEX: Record<BlendMode, number> = {
+  normal: 0,
+  hillshade: 1,
+  softlight: 2,
+};
 
-// ---- Public API ----
+const DEFAULT_SUN = new Vector3(0.0, 0.4, 1.0).normalize();
+
+// ==== Public API ====
 
 export interface TerrainMaterialOptions {
   mode?: ShaderMode;
@@ -242,39 +85,50 @@ export interface TerrainMaterialOptions {
   minElevation?: number;
   maxElevation?: number;
   metersToScene?: number;
+  atlasSize?: number;
   sunDirection?: Vector3;
   baseWhite?: boolean;
-  contourEnabled?: boolean;
-  contourInterval?: number;
-  contourThickness?: number;
-  contourColor?: Vector3;
+  isolineEnabled?: boolean;
+  isolineInterval?: number;
+  isolineThickness?: number;
+  isolineColor?: Vector3;
   wireframe?: boolean;
+  /** Geomorph zone width as fraction of tile edge [0..0.5]. 0 = disabled. Default: 0.15 */
+  morphWidth?: number;
 }
 
 /**
- * Create a unified terrain ShaderMaterial.
- *
- * `uElevationScale` is metersToScene only (no exaggeration).
- * Exaggeration is handled via mesh.scale.z for proper vertex displacement.
+ * Create the instanced terrain ShaderMaterial with VTF displacement.
  */
 export function createTerrainMaterial(options: TerrainMaterialOptions = {}): ShaderMaterial {
   const uniforms: Record<string, IUniform> = UniformsUtils.merge([
     UniformsLib.fog,
     {
-      uMode: { value: SHADER_MODE_INDEX[options.mode ?? 'base'] },
-      uColorRamp: { value: COLOR_RAMP_INDEX[options.colorRamp ?? 'hypsometric'] },
+      // Atlas
+      uAtlas: { value: null },
+      uAtlasSize: { value: options.atlasSize ?? 4096 },
       uElevationScale: { value: options.metersToScene ?? 0.001 },
+      // Geomorphing
+      uMorphWidth: { value: options.morphWidth ?? 0.25 },
+      // Mode/ramp
+      uMode: { value: SHADER_MODE_INDEX[options.mode ?? 'elevation'] },
+      uColorRamp: { value: COLOR_RAMP_INDEX[options.colorRamp ?? 'hypsometric'] },
       uMinElevation: { value: options.minElevation ?? 0 },
       uMaxElevation: { value: options.maxElevation ?? 4000 },
       uSunDirection: { value: options.sunDirection ?? DEFAULT_SUN.clone() },
       uBaseWhite: { value: options.baseWhite ?? false },
-      uContourEnabled: { value: options.contourEnabled ?? false },
-      uContourInterval: { value: options.contourInterval ?? 100 },
-      uContourThickness: { value: options.contourThickness ?? 1.5 },
-      uContourColor: { value: options.contourColor ?? new Vector3(0.12, 0.08, 0.04) },
-      uDrapeMap: { value: null },
+      // Isoline
+      uIsolineEnabled: { value: options.isolineEnabled ?? false },
+      uIsolineInterval: { value: options.isolineInterval ?? 100 },
+      uIsolineThickness: { value: options.isolineThickness ?? 1.5 },
+      uIsolineColor: { value: options.isolineColor ?? new Vector3(0.12, 0.08, 0.04) },
+      // Drape
+      uDrapeAtlas: { value: null },
       uDrapeOpacity: { value: 1.0 },
       uHasDrape: { value: 0 },
+      uDrapeBlendMode: { value: BLEND_MODE_INDEX['hillshade'] },
+      uHillshadeStrength: { value: 0.5 },
+      uDrapePlaceholder: { value: new Vector3(1.0, 1.0, 1.0) },
     },
   ]);
 
@@ -288,112 +142,101 @@ export function createTerrainMaterial(options: TerrainMaterialOptions = {}): Sha
   });
 }
 
-/**
- * Update the shader mode on a terrain material.
- */
-export function setMaterialMode(material: ShaderMaterial, mode: ShaderMode): void {
-  material.uniforms.uMode.value = SHADER_MODE_INDEX[mode];
+// ==== Setter functions ====
+// Guards skip redundant uniform writes. Three.js ShaderMaterial re-uploads
+// all uniforms each draw, so these guards mainly prevent unnecessary JS work
+// (value comparison + object property writes) on the per-frame hot path.
+
+export function setTerrainMode(material: ShaderMaterial, mode: ShaderMode): void {
+  const v = SHADER_MODE_INDEX[mode];
+  if (material.uniforms.uMode.value !== v) material.uniforms.uMode.value = v;
 }
 
-/**
- * Update the color ramp on a terrain material.
- */
-export function setMaterialColorRamp(material: ShaderMaterial, ramp: ColorRamp): void {
-  material.uniforms.uColorRamp.value = COLOR_RAMP_INDEX[ramp];
+export function setTerrainColorRamp(material: ShaderMaterial, ramp: ColorRamp): void {
+  const v = COLOR_RAMP_INDEX[ramp];
+  if (material.uniforms.uColorRamp.value !== v) material.uniforms.uColorRamp.value = v;
 }
 
-/**
- * Enable or disable contour line overlay.
- */
-export function setMaterialContourEnabled(material: ShaderMaterial, enabled: boolean): void {
-  material.uniforms.uContourEnabled.value = enabled;
+export function setTerrainIsolineEnabled(material: ShaderMaterial, enabled: boolean): void {
+  if (material.uniforms.uIsolineEnabled.value !== enabled) material.uniforms.uIsolineEnabled.value = enabled;
 }
 
-/**
- * Set material wireframe rendering.
- */
-export function setMaterialWireframe(material: ShaderMaterial, enabled: boolean): void {
-  material.wireframe = enabled;
+export function setTerrainWireframe(material: ShaderMaterial, enabled: boolean): void {
+  if (material.wireframe !== enabled) material.wireframe = enabled;
 }
 
-/**
- * Update elevation range on a terrain material.
- */
-export function setMaterialElevationRange(
-  material: ShaderMaterial,
-  min: number,
-  max: number,
-): void {
-  material.uniforms.uMinElevation.value = min;
-  material.uniforms.uMaxElevation.value = max;
+export function setTerrainElevationRange(material: ShaderMaterial, min: number, max: number): void {
+  const u = material.uniforms;
+  if (u.uMinElevation.value !== min) u.uMinElevation.value = min;
+  if (u.uMaxElevation.value !== max) u.uMaxElevation.value = max;
 }
 
-/**
- * Update the elevation scale (metersToScene only - no exaggeration).
- */
-export function setMaterialElevationScale(
-  material: ShaderMaterial,
-  metersToScene: number,
-): void {
-  material.uniforms.uElevationScale.value = metersToScene;
+export function setTerrainElevationScale(material: ShaderMaterial, metersToScene: number): void {
+  if (material.uniforms.uElevationScale.value !== metersToScene) material.uniforms.uElevationScale.value = metersToScene;
 }
 
-/**
- * Update the sun direction for elevation lighting.
- */
-export function setMaterialSunDirection(material: ShaderMaterial, dir: Vector3): void {
-  material.uniforms.uSunDirection.value.copy(dir).normalize();
+export function setTerrainSunDirection(material: ShaderMaterial, dir: Vector3): void {
+  const cur = material.uniforms.uSunDirection.value as Vector3;
+  if (!cur.equals(dir)) cur.copy(dir).normalize();
 }
 
-/**
- * Update contour settings.
- */
-export function setMaterialContourSettings(
+export function setTerrainIsolineSettings(
   material: ShaderMaterial,
   interval: number,
   thickness?: number,
 ): void {
-  material.uniforms.uContourInterval.value = interval;
-  if (thickness !== undefined) {
-    material.uniforms.uContourThickness.value = thickness;
+  const u = material.uniforms;
+  if (u.uIsolineInterval.value !== interval) u.uIsolineInterval.value = interval;
+  if (thickness !== undefined && u.uIsolineThickness.value !== thickness) {
+    u.uIsolineThickness.value = thickness;
   }
 }
 
-/**
- * Set drape texture on a terrain material.
- */
-export function setMaterialDrape(
+export function setTerrainIsolineColor(material: ShaderMaterial, r: number, g: number, b: number): void {
+  const v = material.uniforms.uIsolineColor.value as Vector3;
+  if (v.x !== r || v.y !== g || v.z !== b) v.set(r, g, b);
+}
+
+export function setTerrainBaseWhite(material: ShaderMaterial, white: boolean): void {
+  if (material.uniforms.uBaseWhite.value !== white) material.uniforms.uBaseWhite.value = white;
+}
+
+export function setTerrainAtlas(material: ShaderMaterial, texture: Texture | null): void {
+  if (material.uniforms.uAtlas.value !== texture) material.uniforms.uAtlas.value = texture;
+}
+
+export function setTerrainMorphWidth(material: ShaderMaterial, width: number): void {
+  const v = Math.max(0, Math.min(0.5, width));
+  if (material.uniforms.uMorphWidth.value !== v) material.uniforms.uMorphWidth.value = v;
+}
+
+export function setTerrainDrape(
   material: ShaderMaterial,
   texture: Texture | null,
   opacity: number = 1.0,
 ): void {
+  const u = material.uniforms;
   if (texture) {
-    material.uniforms.uDrapeMap.value = texture;
-    material.uniforms.uDrapeOpacity.value = opacity;
-    material.uniforms.uHasDrape.value = 1;
+    if (u.uDrapeAtlas.value !== texture) u.uDrapeAtlas.value = texture;
+    if (u.uDrapeOpacity.value !== opacity) u.uDrapeOpacity.value = opacity;
+    if (u.uHasDrape.value !== 1) u.uHasDrape.value = 1;
   } else {
-    material.uniforms.uHasDrape.value = 0;
-    material.uniforms.uDrapeMap.value = null;
+    if (u.uHasDrape.value !== 0) u.uHasDrape.value = 0;
+    if (u.uDrapeAtlas.value !== null) u.uDrapeAtlas.value = null;
   }
 }
 
-/**
- * Set wireframe base color mode (normals vs flat white).
- */
-export function setMaterialBaseWhite(material: ShaderMaterial, white: boolean): void {
-  material.uniforms.uBaseWhite.value = white;
+export function setTerrainDrapeBlendMode(material: ShaderMaterial, mode: BlendMode): void {
+  const v = BLEND_MODE_INDEX[mode] ?? 0;
+  if (material.uniforms.uDrapeBlendMode.value !== v) material.uniforms.uDrapeBlendMode.value = v;
 }
 
-/**
- * Set contour line color.
- */
-export function setMaterialContourColor(material: ShaderMaterial, r: number, g: number, b: number): void {
-  material.uniforms.uContourColor.value.set(r, g, b);
+export function setTerrainHillshadeStrength(material: ShaderMaterial, strength: number): void {
+  const v = Math.max(0, Math.min(1, strength));
+  if (material.uniforms.uHillshadeStrength.value !== v) material.uniforms.uHillshadeStrength.value = v;
 }
 
-/**
- * Check if a material is a terrain material (has our custom uniforms).
- */
-export function isTerrainMaterial(material: unknown): material is ShaderMaterial {
-  return material instanceof ShaderMaterial && 'uMode' in (material.uniforms ?? {});
+export function setTerrainDrapePlaceholder(material: ShaderMaterial, r: number, g: number, b: number): void {
+  const v = material.uniforms.uDrapePlaceholder.value as Vector3;
+  if (v.x !== r || v.y !== g || v.z !== b) v.set(r, g, b);
 }

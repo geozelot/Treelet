@@ -5,19 +5,40 @@
 import type { TileCoord } from '../core/types';
 
 /**
- * Create a unique string key for a tile coordinate.
+ * Pack z/x/y into a single safe integer key.
+ * Layout: (z * 2^22 + x) * 2^22 + y
+ * Supports z up to 22 (max safe integer headroom verified).
  */
-export function tileKey(coord: TileCoord): string {
-  return `${coord.z}/${coord.x}/${coord.y}`;
+const TILE_KEY_SHIFT = 4194304; // 2^22
+
+/**
+ * Pack z, x, y into a numeric key.
+ */
+export function packTileKey(z: number, x: number, y: number): number {
+  return (z * TILE_KEY_SHIFT + x) * TILE_KEY_SHIFT + y;
 }
 
 /**
- * Parse a tile key back into a TileCoord.
+ * Parse a numeric tile key back into a TileCoord.
  */
-export function parseTileKey(key: string): TileCoord {
-  const [z, x, y] = key.split('/').map(Number);
+export function parseTileKey(key: number): TileCoord {
+  const y = key % TILE_KEY_SHIFT;
+  const rem = (key - y) / TILE_KEY_SHIFT;
+  const x = rem % TILE_KEY_SHIFT;
+  const z = (rem - x) / TILE_KEY_SHIFT;
   return { z, x, y };
 }
+
+/**
+ * Format a numeric tile key as a debug-friendly string "z/x/y".
+ */
+export function tileKeyStr(key: number): string {
+  const { z, x, y } = parseTileKey(key);
+  return `${z}/${x}/${y}`;
+}
+
+/** Sentinel value: no tile key (used for "no parent"). */
+export const NO_TILE_KEY = -1;
 
 /**
  * Get the parent tile at zoom - 1.
@@ -56,7 +77,7 @@ export function neighborTiles(coord: TileCoord): {
   east: TileCoord;
   west: TileCoord;
 } {
-  const max = Math.pow(2, coord.z);
+  const max = 1 << coord.z;
   return {
     north: coord.y > 0 ? { z: coord.z, x: coord.x, y: coord.y - 1 } : null,
     south: coord.y < max - 1 ? { z: coord.z, x: coord.x, y: coord.y + 1 } : null,
@@ -69,7 +90,7 @@ export function neighborTiles(coord: TileCoord): {
  * Check if a tile coordinate is within valid bounds.
  */
 export function isValidTile(coord: TileCoord): boolean {
-  const max = Math.pow(2, coord.z);
+  const max = 1 << coord.z;
   return (
     coord.z >= 0 &&
     coord.x >= 0 &&

@@ -30,7 +30,7 @@ export class TileGrid {
     this.metersPerPixel = [];
 
     for (let z = 0; z <= maxZoomLevels; z++) {
-      const count = Math.pow(2, z);
+      const count = 1 << z;
       this.tileCount.push(count);
       this.tileSizes.push(worldScale / count);
       this.metersPerPixel.push((WEB_MERCATOR_EXTENT * 2) / (count * 256));
@@ -107,6 +107,19 @@ export class TileGrid {
       x: coord.x * tileSize - halfScale + halfTile,
       y: halfScale - coord.y * tileSize - halfTile,
     };
+  }
+
+  /**
+   * Write the world-plane center of a tile into an output object.
+   * Avoids allocating a new WorldPoint on every call - critical for
+   * per-frame quadtree traversal (~400+ calls/frame).
+   */
+  tileToWorldCenterOut(z: number, x: number, y: number, out: WorldPoint): void {
+    const halfScale = this.worldScale / 2;
+    const tileSize = this.tileSizes[z];
+    const halfTile = tileSize / 2;
+    out.x = x * tileSize - halfScale + halfTile;
+    out.y = halfScale - y * tileSize - halfTile;
   }
 
   /**

@@ -1,6 +1,6 @@
 {
   "name": "@geozelot/treelet",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A lightweight 3D terrain and overlay map library using Three.js - this is Leaflet for 3D terrain",
   "repository": {
     "type": "git",

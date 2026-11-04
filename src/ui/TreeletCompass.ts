@@ -16,6 +16,7 @@ import type { Treelet } from '../core/Treelet';
 import type { CameraController, CameraState } from '../scene/CameraController';
 import type { UICorner } from '../core/types';
 import { WebMercator } from '../crs/WebMercator';
+import { BaseElement } from './dom';
 
 // ===========================================================================
 // Inline SVGs for navigation buttons and copy icon
@@ -40,7 +41,7 @@ function formatBearing(rotation: number): string {
 // Component
 // ===========================================================================
 
-export class TreeletCompass extends HTMLElement {
+export class TreeletCompass extends BaseElement {
   private shadow: ShadowRoot;
   private map: Treelet | null = null;
   private cc: CameraController | null = null;
@@ -105,7 +106,7 @@ export class TreeletCompass extends HTMLElement {
     }
 
     // Update live stats in the info box
-    if (this.zoomEl) this.zoomEl.textContent = `${state.zoom}`;
+    if (this.zoomEl) this.zoomEl.textContent = state.zoom.toFixed(1);
     if (this.pitchEl) this.pitchEl.textContent = `${(90 - state.pitch).toFixed(1)}°`;
     if (this.bearingEl) this.bearingEl.textContent = formatBearing(state.rotation);
     if (this.tileCountEl && this.map) {
@@ -229,10 +230,11 @@ export class TreeletCompass extends HTMLElement {
 
   /** Copy text to clipboard and flash the icon on a button. */
   private copyToClipboard(btn: HTMLElement, text: string): void {
-    navigator.clipboard.writeText(text).then(() => {
+    // Clipboard API is unavailable on insecure origins; fail quietly.
+    navigator.clipboard?.writeText(text).then(() => {
       btn.classList.add('copied');
       setTimeout(() => btn.classList.remove('copied'), 800);
-    });
+    }).catch(() => {});
   }
 
   /** Build a JSON coordinate array string for the current center. */
@@ -289,8 +291,8 @@ export class TreeletCompass extends HTMLElement {
     };
 
     // Zoom ±1
-    bind('zoomIn',  () => this.cc && this.cc.setZoomLevel(this.cc.getState().zoom + 1));
-    bind('zoomOut', () => this.cc && this.cc.setZoomLevel(this.cc.getState().zoom - 1));
+    bind('zoomIn',  () => this.cc && this.cc.setZoomLevel(Math.round(this.cc.getState().zoom) + 1));
+    bind('zoomOut', () => this.cc && this.cc.setZoomLevel(Math.round(this.cc.getState().zoom) - 1));
 
     // Rotation ±15°
     bind('rotLeft',  () => this.cc && this.cc.setAzimuth(this.cc.getState().rotation - 15));
@@ -321,7 +323,3 @@ export class TreeletCompass extends HTMLElement {
   }
 }
 
-// Register the custom element
-if (!customElements.get('treelet-compass')) {
-  customElements.define('treelet-compass', TreeletCompass);
-}

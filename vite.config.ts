@@ -3,6 +3,8 @@ import { resolve } from 'path';
 import dts from 'vite-plugin-dts';
 
 export default defineConfig({
+  // Relative asset URLs: the bundle must never reference the consumer's site root.
+  base: './',
   plugins: [
     dts({
       rollupTypes: true,
@@ -29,7 +31,7 @@ export default defineConfig({
     },
     sourcemap: true,
     minify: 'esbuild',
-    target: 'esnext',
+    target: 'es2022',
   },
   worker: {
     format: 'es',

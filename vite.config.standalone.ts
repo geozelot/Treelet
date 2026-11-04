@@ -3,13 +3,14 @@ import { resolve } from 'path';
 
 /**
  * Standalone build: bundles Three.js and all dependencies into a single
- * self-contained file (+ worker asset). For direct browser use via CDN
- * or <script> tag — no separate Three.js installation needed.
+ * self-contained file. The tile worker is inlined (blob: URL), so the file
+ * works from any CDN or <script> tag without serving extra assets.
  *
  * Run AFTER the main build (which emits types + slim bundles):
  *   vite build && vite build --config vite.config.standalone.ts
  */
 export default defineConfig({
+  base: './',
   resolve: {
     alias: {
       '@treelet': resolve(__dirname, 'src'),
@@ -26,15 +27,14 @@ export default defineConfig({
     rollupOptions: {
       output: {
         exports: 'named',
-        // Ensure OrbitControls addon is resolved correctly when bundled
-        inlineDynamicImports: false,
+        inlineDynamicImports: true,
       },
     },
     outDir: 'dist',
     emptyOutDir: false, // Preserve slim build output
     sourcemap: true,
     minify: 'esbuild',
-    target: 'esnext',
+    target: 'es2022',
   },
   worker: {
     format: 'es',

@@ -3,7 +3,7 @@
 //
 // A drape layer binds a raster imagery source and per-layer display settings
 // (opacity, blend mode, hillshade strength) to the terrain. Fetching and
-// GPU residency are handled by TerrainRenderer + UnifiedDrapeAtlas — the
+// GPU residency are handled by TerrainRenderer + DrapeAtlas — the
 // layer itself is a thin configuration + identity object.
 // ============================================================================
 
@@ -28,7 +28,7 @@ let nextDrapeLayerId = 0;
  * Multiple drape layers may be registered; TerrainRenderer activates one at
  * a time. When a layer becomes active, its source is fetched through the
  * same pipeline that feeds the elevation atlas, with results landing in
- * the shared UnifiedDrapeAtlas.
+ * the shared DrapeAtlas.
  */
 export class DrapeLayer implements Layer {
   readonly id: string;
@@ -52,7 +52,7 @@ export class DrapeLayer implements Layer {
     this.source = options.layerSource;
     this.attribution = options.layerAttribution ?? options.layerSource.attribution ?? '';
     this.minZoom = options.minZoom ?? 0;
-    this.maxZoom = options.maxZoom ?? 22;
+    this.maxZoom = Math.min(options.maxZoom ?? 22, 22);
     this.lodOffset = Math.max(1, Math.min(3, options.lodOffset ?? 1));
 
     // Resolve display settings with defaults

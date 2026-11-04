@@ -8,6 +8,7 @@
 // ============================================================================
 
 import type { Treelet } from '../core/Treelet';
+import { BaseElement, appendSanitizedHtml } from './dom';
 
 /** Inline treelet logo SVG (optimized from assets/treelet_logo.svg). */
 const LOGO_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 3.196 2.665"><g transform="translate(-89.118,-155.866)"><path d="m92.008 157.174-.325.599c.169-.004.338.011.503.045z" fill="#a5c500"/><path d="m89.518 157.998 1.238.009c-.144-.262-.258-.54-.339-.827z" fill="#ccc"/><path d="m92.314 157.153c-.148-.19-.273-.397-.372-.614-.097-.217-.167-.443-.21-.673l-1.307 1.266z" fill="#ccc"/><path d="m89.118 156.279c.156.21.288.436.392.675.101.238.175.486.218.738l1.405-1.375z" fill="#999"/><rect width=".325" height="1.043" x="19.705" y="180.364" rx="0" fill="#999" transform="matrix(.91845 -.39553 .40191 .91568 0 0)"/><rect width=".324" height=".793" x="113.853" y="148.952" rx="0" fill="#999" transform="matrix(.99578 .09178 -.14996 .98869 0 0)"/></g></svg>`;
@@ -19,8 +20,11 @@ const LOGO_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 3.196 2.6
  *
  * Automatically refreshes on every `layerchange` event, collecting
  * attribution text from the active base and drape layer sources.
+ *
+ * Attribution strings may contain simple HTML (links, emphasis); it is
+ * sanitized to text plus `<a href>` with http(s)/mailto targets.
  */
-export class TreeletAttribution extends HTMLElement {
+export class TreeletAttribution extends BaseElement {
   private shadow: ShadowRoot;
   private map: Treelet | null = null;
   private attrEl: HTMLElement | null = null;
@@ -74,14 +78,19 @@ export class TreeletAttribution extends HTMLElement {
     // Deduplicate (same text may appear across base + drape)
     const unique = [...new Set(parts)];
 
+    this.attrEl.replaceChildren();
     if (unique.length === 0) {
-      this.attrEl.textContent = '';
       this.attrEl.style.display = 'none';
       this.sepEl.style.display = 'none';
+      this.attrEl.removeAttribute('title');
     } else {
-      this.attrEl.textContent = unique.join(' | ');
+      unique.forEach((html, i) => {
+        if (i > 0) this.attrEl!.appendChild(document.createTextNode(' | '));
+        appendSanitizedHtml(this.attrEl!, html);
+      });
       this.attrEl.style.display = '';
       this.sepEl.style.display = '';
+      this.attrEl.title = this.attrEl.textContent ?? '';
     }
   }
 
@@ -101,6 +110,7 @@ export class TreeletAttribution extends HTMLElement {
           z-index: 999;
           pointer-events: auto;
           color-scheme: light dark;
+          max-width: calc(100% - 60px);
         }
 
         .bar {
@@ -115,6 +125,9 @@ export class TreeletAttribution extends HTMLElement {
           padding: 2px 6px;
           border-radius: ${radius};
           white-space: nowrap;
+          overflow: hidden;
+          max-width: 100%;
+          box-sizing: border-box;
           opacity: 0.65;
           transition: opacity 0.15s;
         }
@@ -146,6 +159,13 @@ export class TreeletAttribution extends HTMLElement {
 
         .attr {
           opacity: 0.85;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          min-width: 0;
+        }
+
+        .attr a {
+          color: inherit;
         }
       </style>
       <div class="bar">
@@ -157,7 +177,3 @@ export class TreeletAttribution extends HTMLElement {
   }
 }
 
-// Register the custom element
-if (!customElements.get('treelet-attribution')) {
-  customElements.define('treelet-attribution', TreeletAttribution);
-}

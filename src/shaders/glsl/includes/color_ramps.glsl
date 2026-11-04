@@ -51,9 +51,17 @@ vec3 grayscaleColor(float t) {
   return vec3(t);
 }
 
+// Cyclic hue wheel for circular quantities (aspect): t and t+1 map to the
+// same color, so there is no seam at north/south.
+vec3 cyclicColor(float t) {
+  t = fract(t);
+  return 0.55 + 0.4 * cos(6.283185307179586 * (t + vec3(0.0, 0.6666667, 0.3333333)));
+}
+
 vec3 applyRamp(float t) {
   if (uColorRamp == 0) return hypsometricColor(t);
   if (uColorRamp == 1) return viridisColor(t);
   if (uColorRamp == 2) return infernoColor(t);
+  if (uColorRamp == 4) return cyclicColor(t);
   return grayscaleColor(t);
 }

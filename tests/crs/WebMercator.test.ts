@@ -155,3 +155,23 @@ describe('WebMercator.tileCenter / tileWorldSize', () => {
     expect(s2).toBeCloseTo(worldScale / 4, 4);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Scale factor + ground distance
+// ---------------------------------------------------------------------------
+
+describe('WebMercator.scaleFactorAtWorldY', () => {
+  it('equals 1/cos(latitude)', () => {
+    const W = 40075.016686;
+    for (const lat of [0, 30, 47.27, 60, 80]) {
+      const y = WebMercator.toWorldPlane(WebMercator.project({ lng: 0, lat }), W).y;
+      expect(WebMercator.scaleFactorAtWorldY(y, W)).toBeCloseTo(1 / Math.cos(lat * Math.PI / 180), 6);
+    }
+  });
+});
+
+describe('WebMercator.groundDistance', () => {
+  it('measures one degree of longitude at the equator (~111.3 km)', () => {
+    expect(WebMercator.groundDistance({ lng: 0, lat: 0 }, { lng: 1, lat: 0 })).toBeCloseTo(111319.49, 0);
+  });
+});

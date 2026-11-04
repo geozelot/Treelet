@@ -53,26 +53,20 @@ export class LayerController {
   // =========================================================================
 
   addBaseLayer(options: BaseLayerOptions): LayerHandle {
+    const before = this.layerRegistry.getActiveBaseLayer();
     const handle = this.layerRegistry.addBaseLayer(options);
     this.emitEvent('layeradd', { id: handle.id });
-
-    if (this.getIsRunning()) {
-      this.terrainRenderer.reload();
-    }
-
+    this.onActiveBaseLayerMaybeChanged(before);
     this.emitEvent('layerchange', {});
     return handle;
   }
 
   removeBaseLayer(handle: LayerHandle | string): boolean {
     const id = typeof handle === 'string' ? handle : handle.id;
+    const before = this.layerRegistry.getActiveBaseLayer();
     if (this.layerRegistry.removeBaseLayer(handle)) {
       this.emitEvent('layerremove', { id });
-
-      if (this.getIsRunning()) {
-        this.terrainRenderer.reload();
-      }
-
+      this.onActiveBaseLayerMaybeChanged(before);
       this.emitEvent('layerchange', {});
       return true;
     }
@@ -80,13 +74,23 @@ export class LayerController {
   }
 
   setActiveBaseLayer(handle: LayerHandle | string): void {
+    const before = this.layerRegistry.getActiveBaseLayer();
     this.layerRegistry.setActiveBaseLayer(handle);
-
-    if (this.getIsRunning()) {
-      this.terrainRenderer.reload();
-    }
-
+    this.onActiveBaseLayerMaybeChanged(before);
     this.emitEvent('layerchange', {});
+  }
+
+  /**
+   * Reload terrain data and re-apply the layer's display settings, but only
+   * when the active base layer actually changed — adding an inactive layer
+   * must not wipe the atlas.
+   */
+  private onActiveBaseLayerMaybeChanged(before: BaseLayer | null): void {
+    const after = this.layerRegistry.getActiveBaseLayer();
+    if (after === before) return;
+    this.terrainRenderer.reload();
+    this.displayController.applyMaterialState();
+    this.scheduleTiles();
   }
 
   // =========================================================================
@@ -122,13 +126,14 @@ export class LayerController {
    */
   activateDrapeLayer(handle: LayerHandle | string): void {
     const id = typeof handle === 'string' ? handle : handle.id;
+    const drapeLayer = this.layerRegistry.getDrapeLayer(id);
+    if (!drapeLayer) {
+      console.warn(`treelet: drape layer "${id}" not found`);
+      return;
+    }
 
     // Deactivate all external drapes first
     this.deactivateAllDrapes();
-
-    // Activate the requested one
-    const drapeLayer = this.layerRegistry.getDrapeLayer(id);
-    if (!drapeLayer) return;
 
     this.layerRegistry.setDrapeLayerActive(id, true);
     this.displayController.activeDrapeId = id;
@@ -143,7 +148,7 @@ export class LayerController {
     // Apply material state for texture mode
     this.displayController.applyMaterialState();
 
-    // Force a tile schedule pass so drape tiles start fetching immediately
+    // Render (and with it schedule drape fetches) on the next frame
     this.scheduleTiles();
     this.emitEvent('layerchange', {});
   }

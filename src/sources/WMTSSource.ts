@@ -11,7 +11,7 @@
 import type { TileCoord } from '../core/types';
 import type { WMTSSourceOptions } from './types';
 import { UrlTileSource } from './UrlTileSource';
-import { splitTemplate, expandTemplate } from './templateUrl';
+import { splitTemplate, expandTemplate, hasTokenPlaceholder } from './templateUrl';
 
 /**
  * WMTS (Web Map Tile Service) tile source.
@@ -49,13 +49,14 @@ export class WMTSSource extends UrlTileSource {
 
   // KVP-mode: pre-built static query prefix
   private readonly kvpPrefix: string;
+  private readonly hasToken: boolean;
 
   readonly tileSize: number;
   readonly minZoom: number;
   readonly maxZoom: number;
 
   constructor(options: WMTSSourceOptions) {
-    super(options.attribution, options.maxConcurrency);
+    super(options);
     this.baseUrl = options.url;
     this.subdomains = options.subdomains ?? [];
     this.tileSize = options.tileSize ?? 256;
@@ -69,6 +70,7 @@ export class WMTSSource extends UrlTileSource {
     const { parts, tokens } = splitTemplate(options.url);
     this.urlParts = parts;
     this.urlTokens = tokens;
+    this.hasToken = hasTokenPlaceholder(tokens);
 
     // Pre-build KVP static prefix
     const layer = options.layers ?? '';
@@ -76,8 +78,9 @@ export class WMTSSource extends UrlTileSource {
     const tilematrixSet = options.tilematrixSet ?? 'EPSG:3857';
     const format = options.format ?? 'image/png';
     const separator = this.baseUrl.includes('?') ? '&' : '?';
+    const enc = encodeURIComponent;
     this.kvpPrefix = `${this.baseUrl}${separator}SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0` +
-      `&LAYER=${layer}&STYLE=${style}&TILEMATRIXSET=${tilematrixSet}&FORMAT=${format}`;
+      `&LAYER=${enc(layer)}&STYLE=${enc(style)}&TILEMATRIXSET=${enc(tilematrixSet)}&FORMAT=${enc(format)}`;
   }
 
   /**
@@ -87,13 +90,13 @@ export class WMTSSource extends UrlTileSource {
    */
   getTileUrl(coord: TileCoord): string {
     if (this.isRestful) {
-      return this.getRestfulUrl(coord);
+      return this.withAccessToken(this.getRestfulUrl(coord), this.hasToken);
     }
-    return this.getKvpUrl(coord);
+    return this.withAccessToken(this.getKvpUrl(coord), false);
   }
 
   private getRestfulUrl(coord: TileCoord): string {
-    return expandTemplate(this.urlParts, this.urlTokens, coord, this.subdomains);
+    return expandTemplate(this.urlParts, this.urlTokens, coord, this.subdomains, this.templateContext);
   }
 
   private getKvpUrl(coord: TileCoord): string {

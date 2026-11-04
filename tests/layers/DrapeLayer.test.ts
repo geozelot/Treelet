@@ -2,7 +2,7 @@
 // Tests for src/layers/DrapeLayer.ts
 //
 // DrapeLayer is a configuration + identity object — fetching and GPU
-// residency happen in TerrainRenderer + UnifiedDrapeAtlas. We validate
+// residency happen in TerrainRenderer + DrapeAtlas. We validate
 // construction defaults, LOD-offset clamping, attribution resolution,
 // and source-ready delegation.
 // ============================================================================
@@ -162,7 +162,7 @@ describe('DrapeLayer identity + source surface', () => {
   });
 
   it('does not expose a per-layer texture cache API', () => {
-    // Fetching and GPU residency live in TerrainRenderer/UnifiedDrapeAtlas.
+    // Fetching and GPU residency live in TerrainRenderer/DrapeAtlas.
     // The layer intentionally has no fetchTexture/getCachedTexture surface.
     const layer = new DrapeLayer({ layerName: 'T', layerSource: makeMockSource() });
     expect((layer as unknown as { fetchTexture?: unknown }).fetchTexture).toBeUndefined();

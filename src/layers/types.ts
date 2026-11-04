@@ -35,6 +35,7 @@ export interface BaseLayerOptions {
 }
 
 export interface BaseLayerDisplay {
+  /** Make this the active base layer when added (the first layer always is). */
   visible?: boolean;
   exaggeration?: number;
 }
@@ -43,7 +44,10 @@ export interface TerrainDisplay {
   isoplethInterval?: number;
   isolineStrength?: number;
   isolineColor?: [number, number, number];
+  /** Elevation ramp range in meters, or 'auto' to fit the visible tiles' data. Default [0, 4000]. */
   rampInterpolationRange?: [number, number] | 'auto';
+  /** Slope ramp range in degrees. Default [0, 60]. */
+  slopeRange?: [number, number];
   rampDefaultElevation?: ColorRamp;
   rampDefaultSlope?: ColorRamp;
   rampDefaultAspect?: ColorRamp;
@@ -60,6 +64,7 @@ export interface ResolvedTerrainDisplay {
   isolineStrength: number;
   isolineColor: [number, number, number];
   rampInterpolationRange: [number, number] | 'auto';
+  slopeRange: [number, number];
   rampDefaultElevation: ColorRamp;
   rampDefaultSlope: ColorRamp;
   rampDefaultAspect: ColorRamp;

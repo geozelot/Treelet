@@ -24,7 +24,8 @@
 // ============================================================================
 
 import { panelStyles } from './styles';
-import { BASE_DRAPE_ID } from '../core/Treelet';
+import { BASE_DRAPE_ID } from '../core/DisplayController';
+import { BaseElement, escapeHtml } from './dom';
 import type { Treelet } from '../core/Treelet';
 import type { BaseDrapeMode, BlendMode, ColorRamp } from '../core/types';
 import type { BaseLayer } from '../layers/BaseLayer';
@@ -43,6 +44,7 @@ const RAMP_META: { id: ColorRamp; label: string; gradient: string }[] = [
   { id: 'viridis',     label: 'Viridis',     gradient: 'linear-gradient(to right, #440154, #31688e, #35b779, #fde725)' },
   { id: 'inferno',     label: 'Inferno',     gradient: 'linear-gradient(to right, #000004, #57106e, #bc3754, #f98e09, #fcffa4)' },
   { id: 'grayscale',   label: 'Grayscale',   gradient: 'linear-gradient(to right, #000, #fff)' },
+  { id: 'cyclic',      label: 'Cyclic',      gradient: 'linear-gradient(to right, #f26b6b, #c7c25a, #5ad16f, #5ab7c7, #8a6bf2, #f26b6b)' },
 ];
 
 /** Contour color presets: label → [r, g, b] in 0–1 range. */
@@ -69,7 +71,7 @@ const GEAR_SVG = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" st
  * handles all interactions. No per-element listeners are registered, so
  * innerHTML replacement (render) doesn't incur re-binding overhead.
  */
-export class TreeletPanel extends HTMLElement {
+export class TreeletPanel extends BaseElement {
   private shadow: ShadowRoot;
   private map: Treelet | null = null;
 
@@ -340,11 +342,11 @@ export class TreeletPanel extends HTMLElement {
 
     return `
       <div class="active-btn-wrap">
-        <div class="active-row" data-layer-id="${layer.id}" data-layer-type="base">
-          <span class="active-name">${layer.layerName}</span>
+        <div class="active-row" data-layer-id="${escapeHtml(layer.id)}" data-layer-type="base">
+          <span class="active-name">${escapeHtml(layer.layerName)}</span>
           <span class="gear-icon${isOpen ? ' open' : ''}" data-action="gear">${GEAR_SVG}</span>
         </div>
-        <div class="active-settings${isOpen ? '' : ' hidden'}" data-layer-id="${layer.id}">
+        <div class="active-settings${isOpen ? '' : ' hidden'}" data-layer-id="${escapeHtml(layer.id)}">
           <div class="control-row">
             <span class="control-label">Exaggeration</span>
             <span class="control-value" id="exag-value-${layer.id}">${exag.toFixed(1)}x</span>
@@ -402,11 +404,11 @@ export class TreeletPanel extends HTMLElement {
 
     return `
       <div class="active-btn-wrap">
-        <div class="active-row" data-layer-id="${drape.id}" data-layer-type="drape">
-          <span class="active-name">${drape.layerName}</span>
+        <div class="active-row" data-layer-id="${escapeHtml(drape.id)}" data-layer-type="drape">
+          <span class="active-name">${escapeHtml(drape.layerName)}</span>
           <span class="gear-icon${isOpen ? ' open' : ''}" data-action="gear">${GEAR_SVG}</span>
         </div>
-        <div class="active-settings${isOpen ? '' : ' hidden'}" data-layer-id="${drape.id}">
+        <div class="active-settings${isOpen ? '' : ' hidden'}" data-layer-id="${escapeHtml(drape.id)}">
           <div class="control-row">
             <span class="control-label">Opacity</span>
             <span class="control-value" id="opacity-value-${drape.id}">${Math.round(opacity * 100)}%</span>
@@ -439,8 +441,8 @@ export class TreeletPanel extends HTMLElement {
   /** Render a base layer as a simple selectable button (for dropdown). */
   private renderBaseLayerButton(layer: BaseLayer): string {
     return `
-      <div class="layer-entry" data-layer-id="${layer.id}" data-layer-type="base">
-        <button class="layer-btn" data-action="activate">${layer.layerName}</button>
+      <div class="layer-entry" data-layer-id="${escapeHtml(layer.id)}" data-layer-type="base">
+        <button class="layer-btn" data-action="activate">${escapeHtml(layer.layerName)}</button>
       </div>
     `;
   }
@@ -478,8 +480,8 @@ export class TreeletPanel extends HTMLElement {
       parts.push('<div class="dropdown-group-label">Layer</div>');
       for (const drape of inactiveDrapes) {
         parts.push(`
-          <div class="layer-entry" data-layer-id="${drape.id}" data-layer-type="drape">
-            <button class="layer-btn" data-action="activate">${drape.layerName}</button>
+          <div class="layer-entry" data-layer-id="${escapeHtml(drape.id)}" data-layer-type="drape">
+            <button class="layer-btn" data-action="activate">${escapeHtml(drape.layerName)}</button>
           </div>
         `);
       }
@@ -593,7 +595,3 @@ export class TreeletPanel extends HTMLElement {
   }
 }
 
-// Register the custom element
-if (typeof customElements !== 'undefined' && !customElements.get('treelet-panel')) {
-  customElements.define('treelet-panel', TreeletPanel);
-}

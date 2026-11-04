@@ -6,7 +6,7 @@
 // ============================================================================
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { splitTemplate, expandTemplate } from '../../src/sources/templateUrl';
+import { splitTemplate, expandTemplate, tileQuadkey, appendQueryParam, hasTokenPlaceholder } from '../../src/sources/templateUrl';
 
 // ---------------------------------------------------------------------------
 // splitTemplate
@@ -186,5 +186,37 @@ describe('expandTemplate', () => {
   it('expands every token occurrence (tokens can repeat)', () => {
     const { parts, tokens } = splitTemplate('{z}/{z}/{x}');
     expect(expandTemplate(parts, tokens, { z: 4, x: 9, y: 0 }, [])).toBe('4/4/9');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Extended tokens
+// ---------------------------------------------------------------------------
+
+
+describe('extended template tokens', () => {
+  it('expands {-y} as the TMS row', () => {
+    const { parts, tokens } = splitTemplate('t/{z}/{x}/{-y}.png');
+    expect(expandTemplate(parts, tokens, { z: 3, x: 1, y: 2 }, [])).toBe('t/3/1/5.png');
+  });
+
+  it('expands {quadkey}', () => {
+    expect(tileQuadkey({ z: 3, x: 3, y: 5 })).toBe('213');
+    expect(tileQuadkey({ z: 0, x: 0, y: 0 })).toBe('');
+    const { parts, tokens } = splitTemplate('q/{quadkey}');
+    expect(expandTemplate(parts, tokens, { z: 3, x: 3, y: 5 }, [])).toBe('q/213');
+  });
+
+  it('expands {r} and {accessToken} from the context', () => {
+    const { parts, tokens } = splitTemplate('t/{z}/{x}/{y}{r}.png?token={accessToken}');
+    expect(hasTokenPlaceholder(tokens)).toBe(true);
+    expect(expandTemplate(parts, tokens, { z: 1, x: 0, y: 1 }, [], { retina: '@2x', accessToken: 'a b' }))
+      .toBe('t/1/0/1@2x.png?token=a%20b');
+  });
+
+  it('appends query parameters to URLs with or without a query string', () => {
+    expect(appendQueryParam('https://x/a.png', 'access_token', 'k')).toBe('https://x/a.png?access_token=k');
+    expect(appendQueryParam('https://x/a.png?v=1', 'access_token', 'k')).toBe('https://x/a.png?v=1&access_token=k');
+    expect(appendQueryParam('https://x/a.png?v=1#f', 'access_token', 'k')).toBe('https://x/a.png?v=1&access_token=k#f');
   });
 });

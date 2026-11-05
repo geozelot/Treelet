@@ -18,6 +18,8 @@ describe('resolveOptions', () => {
     expect(o.mapDisplay.tileCacheSize).toBe(256);
     expect(o.mapDisplay.horizonDistance).toBe(16);
     expect(o.mapDisplay.fog).toBe(true);
+    expect(o.guiDisplay.glass).toBe(false);
+    expect(resolveOptions({ ...base, guiDisplay: { glass: true } }).guiDisplay.glass).toBe(true);
     expect(o.workerCount).toBeGreaterThanOrEqual(1);
     expect(o.workerCount).toBeLessThanOrEqual(4);
   });

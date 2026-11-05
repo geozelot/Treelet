@@ -18,6 +18,7 @@ const map = (window as any).__treelet = Treelet.map('map', {
   },
   guiDisplay: {
     enabled: true,
+    glass: true,
     compassPosition: 'top-right',
     layerPosition: 'bottom-right',
   },

@@ -2,7 +2,8 @@
 // treelet.js - UI Styles
 //
 // CSS for the <treelet-panel> web component (Shadow DOM).
-// Light/dark theme via light-dark(); grey-only palette.
+// Light/dark theme via light-dark(); grey palette with the logo green as
+// accent. Colors, type scale and radii are inherited from treelet-compass.
 // ============================================================================
 
 export const panelStyles = /* css */ `
@@ -18,8 +19,27 @@ export const panelStyles = /* css */ `
     /* Panel-specific vars (shared vars inherited from treelet-compass) */
     --thumb-border: light-dark(rgba(250, 250, 250, 0.9), rgba(24, 24, 24, 0.9));
     --submenu2-bg: light-dark(rgba(0, 0, 0, 0.06), rgba(255, 255, 255, 0.07));
+    --header-h: 26px;
 
     color: var(--text);
+  }
+
+  button {
+    margin: 0;
+    font: inherit;
+    color: inherit;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* Inset, so lists that clip their corners don't cut the ring off */
+  button:focus-visible,
+  input:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+
+  @keyframes treelet-fade-in {
+    from { opacity: 0; }
   }
 
   /* ==========================================================================
@@ -39,7 +59,8 @@ export const panelStyles = /* css */ `
   .layer-col {
     display: flex;
     position: relative;
-    min-width: 190px;
+    /* Half the slide's room on narrow maps (--slide-room from treelet-compass) */
+    min-width: min(190px, var(--slide-room, 380px) / 2);
     border-right: 1px solid var(--border);
   }
 
@@ -53,79 +74,81 @@ export const panelStyles = /* css */ `
   :host([data-v="top"]) .layer-col    { flex-direction: column; }
   :host([data-v="bottom"]) .layer-col { flex-direction: column-reverse; }
 
-  /* -- Column header (hover target for layer selector dropdown) -- */
+  /* -- Column header: section title. With alternatives (.has-choices) it is
+        a button that opens the source dropdown, marked by a chevron. -- */
 
   .layer-col-header {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    white-space: nowrap;
-    cursor: pointer;
-    position: relative;
-    z-index: 11;
+    gap: 4px;
+    width: 100%;
+    height: var(--header-h);
+    box-sizing: border-box;
+    padding: 0 10px;
+    background: transparent;
+    border: none;
     border-left: 1px solid transparent;
     border-right: 1px solid transparent;
+    text-align: left;
+    white-space: nowrap;
+    position: relative;
+    z-index: 11;
+    transition: background-color var(--fade), border-color var(--fade);
   }
 
-  /* Header padding: larger gap on the outer (panel edge) side for breathing room.
+  /* Title sits nearer its active row; the extra gap goes to the panel edge.
      Top-anchored: header at bottom of column → more bottom padding.
      Bottom-anchored: header at top of column → more top padding. */
-  :host([data-v="top"])    .layer-col-header { padding: 1px 8px 9px; }
-  :host([data-v="bottom"]) .layer-col-header { padding: 9px 8px 1px; }
+  :host([data-v="top"])    .layer-col-header { padding-bottom: 4px; }
+  :host([data-v="bottom"]) .layer-col-header { padding-top: 4px; }
 
-  .layer-col-header:hover {
-    background: var(--hover-bg);
+  .has-choices > .layer-col-header {
+    cursor: pointer;
   }
 
-  /* On hover: header becomes the cap of the dropdown card */
-  :host([data-v="top"]) .layer-col-selector:hover .layer-col-header {
+  /* Open: header becomes the cap of the dropdown card */
+  .has-choices.open > .layer-col-header {
     background: var(--bg);
     border-left-color: var(--border);
     border-right-color: var(--border);
-    border-radius: 10px 10px 0 0;
   }
-
-  :host([data-v="bottom"]) .layer-col-selector:hover .layer-col-header {
-    background: var(--bg);
-    border-left-color: var(--border);
-    border-right-color: var(--border);
-    border-radius: 0 0 10px 10px;
-  }
+  :host([data-v="top"])    .has-choices.open > .layer-col-header { border-radius: var(--radius) var(--radius) 0 0; }
+  :host([data-v="bottom"]) .has-choices.open > .layer-col-header { border-radius: 0 0 var(--radius) var(--radius); }
 
   .layer-col-title {
-    font-size: 10px;
+    font-size: var(--fs-label);
     font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.6px;
-    opacity: 0.55;
+    letter-spacing: 0.5px;
+    opacity: 0.5;
+    transition: opacity var(--fade);
   }
 
-  .layer-col-header:hover .layer-col-title {
-    opacity: 0.8;
+  .has-choices .layer-col-title {
+    opacity: 0.75;
   }
 
-  /* Chevron hint - discrete arrow indicating the header is interactive */
+  /* Chevron right after the title: points where the list opens, flips while open */
   .header-chevron {
+    display: flex;
     flex-shrink: 0;
-    width: 0;
-    height: 0;
-    border-left: 3.5px solid transparent;
-    border-right: 3.5px solid transparent;
-    opacity: 0.35;
-    transition: opacity 0.15s;
+    opacity: 0.75;
+    transition: opacity var(--fade), transform var(--fade);
   }
-  :host([data-v="bottom"]) .header-chevron { border-bottom: 4px solid currentColor; }
-  :host([data-v="top"])    .header-chevron { border-top: 4px solid currentColor; }
+  :host([data-v="bottom"]) .header-chevron { transform: rotate(180deg); }
 
-  .layer-col-header:hover .header-chevron { opacity: 0.6; }
+  .has-choices.open .layer-col-title,
+  .has-choices.open .header-chevron { opacity: 1; }
+  :host([data-v="top"])    .has-choices.open .header-chevron { transform: rotate(180deg); }
+  :host([data-v="bottom"]) .has-choices.open .header-chevron { transform: none; }
 
-  /* -- Selector wrapper (header + dropdown, hover trigger) -- */
+  /* -- Selector wrapper (header + dropdown) -- */
 
   .layer-col-selector {
     position: relative;
   }
 
-  /* -- Active layer section (clickable button → settings) -- */
+  /* -- Active layer section (button → settings) -- */
 
   .layer-col-active {
     flex: 1;
@@ -134,44 +157,57 @@ export const panelStyles = /* css */ `
     justify-content: center;
     align-items: stretch;
     overflow: visible;
-    padding: 2px 4px;
+    padding: 0 6px;
   }
 
   /* Halve padding on the separator side so inter-column gap ≈ outer gap */
-  .layer-col:not(:last-child) .layer-col-active { padding-right: 2px; }
-  .layer-col:not(:first-child) .layer-col-active { padding-left: 2px; }
+  .layer-col:not(:last-child) .layer-col-active { padding-right: 3px; }
+  .layer-col:not(:first-child) .layer-col-active { padding-left: 3px; }
 
   /* Wrapper - positions the settings panel relative to the button */
   .active-btn-wrap {
     position: relative;
   }
 
+  /* The selected source: full-strength text on a light fill (selected, not disabled) */
   .active-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 2px 6px;
+    gap: 6px;
+    width: 100%;
+    padding: 4px 8px;
     cursor: pointer;
-    border-radius: 4px;
-    background: var(--active-bg);
-    color: var(--active-text);
-    opacity: 0.45;
-    transition: opacity 0.15s;
+    border: none;
+    border-radius: var(--radius-sm);
+    background: var(--btn-bg);
+    color: var(--text);
+    text-align: left;
+    transition: background-color var(--fade);
   }
 
-  .active-row:hover,
-  .active-row:has(+ .active-settings:not(.hidden)) {
-    opacity: 1;
+  @media (hover: hover) {
+    .active-row:hover { background: var(--btn-bg-hover); }
+  }
+
+  .active-row[aria-expanded="true"] {
+    background: var(--btn-bg-hover);
+  }
+
+  .active-row.is-empty {
+    cursor: default;
+    color: var(--text-muted);
   }
 
   .active-name {
-    font-size: 11px;
+    font-size: var(--fs-body);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
     color: inherit;
   }
 
+  /* Settings gear: always faintly visible, so the row reads as configurable */
   .active-row .gear-icon {
     display: flex;
     align-items: center;
@@ -179,18 +215,17 @@ export const panelStyles = /* css */ `
     flex-shrink: 0;
     width: 16px;
     height: 16px;
-    border-radius: 3px;
     color: var(--text-muted);
-    opacity: 0;
+    opacity: 0.8;
     pointer-events: none;
-    transition: opacity 0.15s, color 0.15s;
+    transition: opacity var(--fade), color var(--fade);
   }
 
-  .active-row:hover .gear-icon {
-    opacity: 1;
+  @media (hover: hover) {
+    .active-row:hover .gear-icon { opacity: 1; color: var(--text-dim); }
   }
 
-  .active-row .gear-icon.open {
+  .active-row[aria-expanded="true"] .gear-icon {
     opacity: 1;
     color: var(--accent);
   }
@@ -209,8 +244,8 @@ export const panelStyles = /* css */ `
     z-index: 15;
   }
 
-  .active-settings.hidden {
-    display: none;
+  .active-settings.entering {
+    animation: treelet-fade-in var(--fade) ease-out;
   }
 
   .hidden {
@@ -221,20 +256,19 @@ export const panelStyles = /* css */ `
   :host([data-v="top"]) .active-settings {
     top: 100%;
     border-top: none;
-    border-radius: 0 0 10px 10px;
+    border-radius: 0 0 var(--radius) var(--radius);
   }
 
   /* Bottom-anchored: settings expand upward from the button */
   :host([data-v="bottom"]) .active-settings {
     bottom: 100%;
     border-bottom: none;
-    border-radius: 10px 10px 0 0;
+    border-radius: var(--radius) var(--radius) 0 0;
   }
 
-  /* -- Layer dropdown (shown on header hover, visually connected to header) -- */
+  /* -- Layer dropdown (shown while its selector is .open, joined to the header) -- */
 
   .layer-col-body {
-    display: none;
     position: absolute;
     left: 0;
     right: 0;
@@ -243,40 +277,41 @@ export const panelStyles = /* css */ `
     border: 1px solid var(--border);
     box-shadow: var(--shadow);
     z-index: 10;
-  }
-
-  .layer-col-body:empty {
-    display: none !important;
-  }
-
-  .layer-col-selector:hover .layer-col-body {
-    display: block;
+    visibility: hidden;
+    opacity: 0;
+    transition: opacity var(--fade), visibility 0s var(--fade);
   }
 
   /* Top-anchored: dropdown slides under header, extends downward */
   :host([data-v="top"]) .layer-col-body {
     top: 0;
     border-top: none;
-    border-radius: 0 0 10px 10px;
-    padding-top: 31px; /* header height (~27px) + content gap (4px) */
+    border-radius: 0 0 var(--radius) var(--radius);
+    padding-top: calc(var(--header-h) + 4px);
   }
 
   /* Bottom-anchored: dropdown slides under header, extends upward */
   :host([data-v="bottom"]) .layer-col-body {
     bottom: 0;
     border-bottom: none;
-    border-radius: 10px 10px 0 0;
-    padding-bottom: 31px; /* header height (~27px) + content gap (4px) */
+    border-radius: var(--radius) var(--radius) 0 0;
+    padding-bottom: calc(var(--header-h) + 4px);
   }
 
-  /* -- Dropdown group label (e.g. "Terrain", "Layer" section headers) -- */
+  .has-choices.open > .layer-col-body {
+    visibility: visible;
+    opacity: 1;
+    transition: opacity var(--fade), visibility 0s;
+  }
+
+  /* -- Dropdown group label ("Analysis", "Layers" section headers) -- */
 
   .dropdown-group-label {
-    font-size: 10px;
+    font-size: var(--fs-label);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.5px;
-    opacity: 0.4;
+    opacity: 0.45;
     padding: 4px 8px 2px;
     pointer-events: none;
   }
@@ -284,7 +319,7 @@ export const panelStyles = /* css */ `
   /* -- Layer entries (in dropdown) -- */
 
   .layer-entry {
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     margin-bottom: 2px;
     overflow: hidden;
   }
@@ -294,32 +329,27 @@ export const panelStyles = /* css */ `
   }
 
   .layer-btn {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
+    display: block;
     width: 100%;
     padding: 5px 8px;
     cursor: pointer;
     user-select: none;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     border: none;
     background: transparent;
     color: var(--text-dim);
-    font: inherit;
-    font-size: 12px;
+    font-size: var(--fs-body);
     text-align: left;
     white-space: nowrap;
-    transition: background 0.1s, color 0.1s;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    transition: background-color 0.1s, color 0.1s;
   }
 
-  .layer-btn:hover {
+  .layer-btn:hover,
+  .layer-btn:focus-visible {
     background: var(--hover-bg);
     color: var(--hover-text);
-  }
-
-  .layer-btn.active {
-    background: var(--active-bg);
-    color: var(--active-text);
   }
 
   /* -- Overlay dropdown separator -- */
@@ -333,10 +363,10 @@ export const panelStyles = /* css */ `
   /* -- Setting sub-labels -- */
 
   .setting-label {
-    font-size: 10px;
+    font-size: var(--fs-label);
     opacity: 0.5;
     text-transform: uppercase;
-    letter-spacing: 0.4px;
+    letter-spacing: 0.5px;
     margin-top: 4px;
     margin-bottom: 2px;
   }
@@ -350,7 +380,7 @@ export const panelStyles = /* css */ `
     margin-top: 3px;
     margin-bottom: 3px;
     padding: 2px;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     overflow: hidden;
     background: var(--submenu2-bg);
   }
@@ -362,13 +392,13 @@ export const panelStyles = /* css */ `
     gap: 8px;
     padding: 3px 6px 3px 8px;
     border: none;
+    border-radius: calc(var(--radius-sm) - 2px);
     background: transparent;
     color: var(--text-muted);
-    font: inherit;
-    font-size: 10px;
+    font-size: var(--fs-small);
     cursor: pointer;
     user-select: none;
-    transition: background 0.1s, color 0.1s;
+    transition: background-color 0.1s, color 0.1s;
     text-align: left;
   }
 
@@ -397,7 +427,7 @@ export const panelStyles = /* css */ `
     margin-top: 4px;
     margin-bottom: 4px;
     padding: 5px 6px;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     flex-wrap: wrap;
     background: var(--submenu2-bg);
   }
@@ -405,7 +435,8 @@ export const panelStyles = /* css */ `
   .color-swatch {
     width: 18px;
     height: 18px;
-    border-radius: 4px;
+    padding: 0;
+    border-radius: var(--radius-sm);
     border: 2px solid transparent;
     cursor: pointer;
     transition: border-color 0.1s, transform 0.1s;
@@ -419,7 +450,11 @@ export const panelStyles = /* css */ `
     border-color: var(--accent);
   }
 
-  /* -- Toggle switch (for wireframe normals/white) -- */
+  .color-swatch:focus-visible {
+    outline-offset: 1px;
+  }
+
+  /* -- Toggle buttons (wireframe coloring, drape blend mode) -- */
 
   .toggle-row {
     display: flex;
@@ -429,20 +464,20 @@ export const panelStyles = /* css */ `
   }
 
   .toggle-label {
-    font-size: 11px;
+    font-size: var(--fs-small);
     opacity: 0.6;
   }
 
   .toggle-btn {
-    font-size: 10px;
+    font-size: var(--fs-label);
     padding: 2px 8px;
-    border-radius: 8px;
+    border-radius: 999px;
     border: 1px solid var(--control-border);
     background: var(--control-bg);
     color: var(--text-dim);
     cursor: pointer;
     user-select: none;
-    transition: all 0.1s;
+    transition: background-color 0.1s, border-color 0.1s, color 0.1s;
   }
 
   .toggle-btn:hover {
@@ -466,13 +501,13 @@ export const panelStyles = /* css */ `
   }
 
   .control-label {
-    font-size: 11px;
+    font-size: var(--fs-small);
     opacity: 0.6;
     white-space: nowrap;
   }
 
   .control-value {
-    font-size: 11px;
+    font-size: var(--fs-small);
     opacity: 0.5;
     min-width: 32px;
     text-align: right;
@@ -488,6 +523,11 @@ export const panelStyles = /* css */ `
     border-radius: 2px;
     outline: none;
     margin: 4px 0;
+  }
+
+  input[type="range"]:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
   }
 
   input[type="range"]::-webkit-slider-thumb {

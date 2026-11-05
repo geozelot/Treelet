@@ -172,7 +172,7 @@ Zoom follows the standard web-map scale: at zoom `z` the world spans `256 · 2^z
 | `maxPixelRatio` | `number` | `2` | Device-pixel-ratio cap |
 | `lodQuality` | `number` | `1` | LOD multiplier: > 1 finer tiles, < 1 coarser |
 | `morphWidth` | `number` | `0.3` | Fraction of each LOD range used for geomorphing |
-| `horizonDistance` | `number` | `16` | Visible range as a multiple of the camera's height above the orbit target (4–64); terrain fades into the horizon there |
+| `horizonDistance` | `number` | `16` | Visible range as a multiple of the orbit height (the camera's height above the terrain it looks at, at the current zoom and tilt; 4–64); terrain fades into the horizon there |
 | `fog` | `boolean` | `true` | Atmospheric haze over distant terrain; when `false`, terrain stays clear and only blends into the horizon over the last 20% of the range |
 | `renderOnDemand` | `boolean` | `true` | Render only when the view, data or settings change |
 
@@ -185,6 +185,9 @@ The defaults fit a typical view in well under the tile budget at any screen size
 | `enabled` | `boolean` | `true` | Show compass + layer panel |
 | `compassPosition` | `UICorner` | `'top-right'` | Compass widget corner |
 | `layerPosition` | `UICorner` | `'bottom-right'` | Layer panel corner |
+| `glass` | `boolean` | `false` | Frosted-glass controls (translucent, map blurred behind); costs some GPU time while the map redraws |
+
+The controls open on mouse hover, on a tap (touch screens; a tap elsewhere closes them) and with the keyboard (Tab to a control, Escape to close). On a touch screen the first tap on the compass opens its panel and the next one resets the orientation. On narrow maps the compass panel drops its Map and Viewport sections and the layer panel shrinks to fit.
 
 ---
 
@@ -203,7 +206,7 @@ The main map class. Extends `EventEmitter`.
 | `getTileCount()` | `number` | Number of terrain tiles drawn in the last frame |
 | `getStats()` | `TreeletStats` | Tiles, atlas use, pending and failed requests |
 | `setLodQuality(q)` | `this` | Change the LOD multiplier at runtime |
-| `setHorizonDistance(factor)` | `this` | Visible range as a multiple of camera height (4–64) |
+| `setHorizonDistance(factor)` | `this` | Visible range as a multiple of the orbit height (4–64) |
 | `getHorizonDistance()` | `number` | Get the visible range factor |
 | `setFog(enabled)` | `this` | Toggle atmospheric haze over distant terrain |
 | `requestRender()` | `this` | Force a redraw (with `renderOnDemand`) |
@@ -343,6 +346,8 @@ Elevation-derived visualization modes:
 | `'cyclic'` | Hue wheel for circular data (aspect default) |
 
 #### Camera
+
+The camera keeps its height while you pan or zoom. The orbit target is the terrain at the screen center, so the zoom follows the distance to it: panning onto a mountain zooms in. The camera only rises where it would otherwise touch the terrain (at once, so the terrain never cuts into the view), or, smoothly and keeping its pitch, where moving brings the terrain at the screen center closer than half the zoom's distance. Rotating into a mountain lifts the camera over it, still looking at the same point. Once past the obstacle, the camera glides back down until it shows your zoom again, but never below the height you were at, so it doesn't dive into valleys.
 
 | Method | Returns | Description |
 |---|---|---|

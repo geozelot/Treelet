@@ -94,6 +94,8 @@ export class ElevationAtlas {
   /** Occupied pins allowed before pin() refuses: keeps slots evictable so loading never deadlocks. */
   private readonly pinLimit: number;
   private generation = 0;
+  /** Bumped whenever the stored elevations change (writes, evictions, clear). */
+  private _version = 0;
   private lruHead = -1;
   private lruTail = -1;
 
@@ -147,6 +149,11 @@ export class ElevationAtlas {
   /** Slot generation for `key`, or 0 when not loaded. */
   gen(key: number): number {
     return this.slotMap.get(key)?.gen ?? 0;
+  }
+
+  /** Changes whenever the stored elevations change (sampled results may differ). */
+  get version(): number {
+    return this._version;
   }
 
   get size(): number {
@@ -246,6 +253,7 @@ export class ElevationAtlas {
     if (tile.length !== S * S) throw new Error(`treelet: elevation tile must have ${S * S} values, got ${tile.length}`);
     const slot = this.allocate(z, x, y);
     if (!slot) return null;
+    this._version++;
     slot.min = min;
     slot.max = max;
     slot.empty = false;
@@ -262,6 +270,7 @@ export class ElevationAtlas {
     const S = this.slotSize;
     const slot = this.allocate(z, x, y);
     if (!slot) return null;
+    this._version++;
     slot.min = 0;
     slot.max = 0;
     slot.empty = true;
@@ -274,6 +283,7 @@ export class ElevationAtlas {
 
   /** Forget every tile. GPU data is not touched: no instance references it anymore. */
   clear(): void {
+    this._version++;
     this.slotMap.clear();
     this.freeLayers.length = 0;
     for (let i = this.capacity - 1; i >= 0; i--) this.freeLayers.push(i);

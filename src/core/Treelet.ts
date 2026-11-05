@@ -35,6 +35,7 @@ import type {
   TreeletStats,
 } from './types';
 import { SceneManager } from '../scene/SceneManager';
+import { CameraTerrain, marchToTerrain, type GroundSampler } from '../scene/CameraTerrain';
 import type { CameraController } from '../scene/CameraController';
 import type { BaseLayer } from '../layers/BaseLayer';
 import type { DrapeLayer } from '../layers/DrapeLayer';
@@ -58,11 +59,11 @@ import type { TreeletAttribution } from '../ui/TreeletAttribution';
 /** @deprecated Import from DisplayController instead. */
 export { BASE_DRAPE_ID } from './DisplayController';
 
-/** Time constant (seconds) of the orbit-target terrain following. */
-const TARGET_SMOOTHING_S = 0.12;
-
 /** Minimum camera clearance above the terrain, in meters. */
 const CAMERA_MIN_CLEARANCE_M = 2;
+
+/** Time constant (seconds) at which the visible range shrinks (it grows at once). */
+const HORIZON_EASE_S = 0.4;
 
 /** The visible range never ends closer than this many orbit distances (low-pitch views). */
 const MIN_HORIZON_ORBITS = 3;
@@ -135,6 +136,7 @@ export function resolveOptions(user: TreeletOptions): ResolvedTreeletOptions {
       enabled: gui.enabled ?? DEFAULT_OPTIONS.guiDisplay.enabled,
       compassPosition: gui.compassPosition ?? DEFAULT_OPTIONS.guiDisplay.compassPosition,
       layerPosition: gui.layerPosition ?? DEFAULT_OPTIONS.guiDisplay.layerPosition,
+      glass: gui.glass ?? DEFAULT_OPTIONS.guiDisplay.glass,
     },
     mapDisplay: {
       atlasSegments,
@@ -188,10 +190,13 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
   /** Meters → scene-units conversion factor (at the equator). */
   private readonly metersToScene: number;
 
-  /** Smoothed terrain elevation at the orbit target, in scene units. */
-  private smoothedTargetZ = 0;
-  /** Jump straight to the terrain height on the next successful sample (after setView). */
-  private snapTarget = true;
+  /** Keeps the orbit target on the terrain and the camera above it. */
+  private readonly cameraTerrain: CameraTerrain;
+  /** Exaggeration the ground sampler applies (refreshed each frame and before picking). */
+  private exag = 1;
+  /** Elevation data version and exaggeration seen last frame. */
+  private terrainVersion = -1;
+  private terrainExag = NaN;
   /** The view jumped: don't extrapolate motion for prefetching. */
   private teleported = true;
   private lastZoom = NaN;
@@ -273,6 +278,7 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
       () => this.isRunning,
     );
 
+    this.cameraTerrain = new CameraTerrain(this.sceneManager.cameraController, CAMERA_MIN_CLEARANCE_M * this.metersToScene);
     this.sceneManager.onFrame((dt, moved) => this.onFrame(dt, moved));
     this.sceneManager.cameraController.onChange(() => this.onCameraSettled());
 
@@ -301,6 +307,7 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
       this.compass.attach(this, {
         compassPosition: gd.compassPosition,
         layerPosition: gd.layerPosition,
+        glass: gd.glass,
       });
       this.sceneManager.cameraController.onRawChange((state) => this.compass?.updateCamera(state));
       this.compass.updateCamera(this.sceneManager.cameraController.getState());
@@ -331,66 +338,55 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
     return meters * this.metersToScene * WebMercator.scaleFactorAtWorldY(worldY, this.options.mapDisplay.worldScale) * exaggeration;
   }
 
+  /** Terrain height in scene units at a world-plane point, or null where nothing is loaded. */
+  private readonly groundZ: GroundSampler = (x, y) => {
+    const meters = this.terrainRenderer.sampleElevationAtWorld(x, y);
+    return meters === null ? null : this.elevationToScene(meters, y, this.exag);
+  };
+
   private onFrame(dt: number, cameraMoved: boolean): boolean {
     if (!this.isRunning || this.destroyed) return false;
     const cc = this.sceneManager.cameraController;
     const cam = cc.camera;
     const target = cc.controls.target;
     const exag = this.layerRegistry.getActiveBaseLayer()?.display.exaggeration ?? 1;
-    let adjusted = false;
+    this.exag = exag;
 
-    // ==== Terrain following: the orbit target rides on the surface ====
-    // Camera and target always move together, so the orbit (distance, pitch,
-    // bearing) is never changed here and never fights OrbitControls' limits.
-    const dist0 = cam.position.distanceTo(target);
-    const orbitDz = cam.position.z - target.z;
-    const groundAtTarget = this.terrainRenderer.sampleElevationAtWorld(target.x, target.y);
-
-    // Keep the camera above the terrain: if the ground under the camera
-    // (e.g. a ridge between camera and target) would put it below the
-    // clearance, the orbit is lifted — instantly, never through smoothing.
-    const clearance = Math.max(dist0 * 0.03, CAMERA_MIN_CLEARANCE_M * this.metersToScene);
-    const groundAtCam = this.terrainRenderer.sampleElevationAtWorld(cam.position.x, cam.position.y);
-    const camGroundZ = groundAtCam !== null
-      ? this.elevationToScene(groundAtCam, cam.position.y, exag)
-      : target.z;
-    const minTargetZ = groundAtCam !== null ? camGroundZ + clearance - orbitDz : -Infinity;
-
-    let following = false;
-    if (groundAtTarget !== null || groundAtCam !== null) {
-      const terrainZ = groundAtTarget !== null
-        ? this.elevationToScene(groundAtTarget, target.y, exag)
-        : this.smoothedTargetZ;
-      const goal = Math.max(terrainZ, minTargetZ);
-      if (this.snapTarget && groundAtTarget !== null) {
-        this.smoothedTargetZ = goal;
-        this.snapTarget = false;
-      } else {
-        const a = 1 - Math.exp(-dt / TARGET_SMOOTHING_S);
-        this.smoothedTargetZ += (goal - this.smoothedTargetZ) * a;
-      }
-      if (this.smoothedTargetZ < minTargetZ) this.smoothedTargetZ = minTargetZ;
-      following = Math.abs(goal - this.smoothedTargetZ) > dist0 * 1e-5;
-    }
-
-    const deltaZ = this.smoothedTargetZ - target.z;
-    if (Math.abs(deltaZ) > dist0 * 1e-7) {
-      target.z += deltaZ;
-      cam.position.z += deltaZ;
-      cam.updateMatrixWorld();
-      adjusted = true;
-    }
+    // ==== Camera and terrain ====
+    // The target sits on the terrain at the screen center; the camera keeps
+    // its height unless it would touch the terrain.
+    const version = this.terrainRenderer.elevationVersion;
+    const terrainChanged = version !== this.terrainVersion || exag !== this.terrainExag;
+    this.terrainVersion = version;
+    this.terrainExag = exag;
+    const adjusted = this.cameraTerrain.update(this.groundZ, terrainChanged, this.horizon, dt);
 
     // ==== Visible range, clip planes and haze ====
     // Terrain dissolves into the horizon color at `horizon` (camera distance)
     // and is culled beyond it; past that range the sky shows the same color,
-    // so the far clip plane can sit right there.
+    // so the far clip plane can sit right there. The range follows the zoom
+    // (the orbit's height at the zoom's distance and current tilt), not the
+    // terrain the camera passes over, but always reaches well past the screen
+    // center. It grows at once and shrinks eased, so a ridge passing the
+    // screen center doesn't make distant terrain pop.
     const dist = cam.position.distanceTo(target);
-    const heightAboveGround = Math.max(cam.position.z - camGroundZ, clearance * 0.5);
-    const heightAboveRef = Math.max(cam.position.z - target.z, dist * 0.05);
-    const horizon = Math.max(heightAboveRef * this.horizonDistance, dist * MIN_HORIZON_ORBITS);
+    const clearance = this.cameraTerrain.clearance;
+    const groundBelow = this.cameraTerrain.cameraGround ?? target.z;
+    const heightAboveGround = Math.max(cam.position.z - groundBelow, clearance * 0.5);
+    const zoomDist = this.cameraTerrain.zoomDistance;
+    const orbitHeight = Math.max(zoomDist * Math.cos(cc.controls.getPolarAngle()), zoomDist * 0.05);
+    const range = Math.max(orbitHeight * this.horizonDistance, dist * MIN_HORIZON_ORBITS);
+    let horizon = range;
+    if (range < this.horizon && !this.teleported) {
+      horizon = this.horizon + (range - this.horizon) * (1 - Math.exp(-dt / HORIZON_EASE_S));
+      if (horizon < range * 1.01) horizon = range;
+    }
     this.horizon = horizon;
-    const near = Math.max(Math.min(dist, heightAboveGround) * 0.02, this.options.mapDisplay.worldScale * 1e-10);
+    // The near plane stays inside the clearance sphere, so terrain never cuts into it.
+    const near = Math.max(
+      Math.min(Math.min(dist, heightAboveGround) * 0.02, clearance * 0.5),
+      this.options.mapDisplay.worldScale * 1e-10,
+    );
     this.sceneManager.setClipPlanes(near, horizon * 1.02);
     this.terrainRenderer.setFog(
       this.sceneManager.horizonColor,
@@ -415,6 +411,7 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
       teleported: this.teleported,
     });
     this.teleported = false;
+    this.compass?.updateTileCount(this.terrainRenderer.getInstanceCount());
 
     // ==== Events ====
     if (cameraMoved || adjusted) this.emit('move', { center: this.getCenter() });
@@ -423,7 +420,7 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
       this.emit('zoom', { zoom });
     }
 
-    return needsRender || adjusted || following;
+    return needsRender || adjusted || horizon !== range;
   }
 
   /** Debounced end of a camera interaction. */
@@ -454,7 +451,7 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
     });
     const cc = this.sceneManager.cameraController;
     cc.setView(world.x, world.y, requireFinite(zoom, 'zoom'), cc.controls.target.z);
-    this.snapTarget = true;
+    this.cameraTerrain.snapToTerrain();
     this.teleported = true;
     this.sceneManager.requestRender();
     return this;
@@ -488,9 +485,9 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
   }
 
   /**
-   * Visible range as a multiple of the camera's height above the orbit
-   * target (clamped to [4, 64]). Larger values show more distant terrain and
-   * use more tiles.
+   * Visible range as a multiple of the orbit height: the camera's height
+   * above the terrain it looks at, at the current zoom and tilt (clamped to
+   * [4, 64]). Larger values show more distant terrain and use more tiles.
    */
   setHorizonDistance(factor: number): this {
     this.horizonDistance = clamp(requireFinite(factor, 'horizonDistance'), 4, 64);
@@ -498,7 +495,7 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
     return this;
   }
 
-  /** Visible range as a multiple of the camera's height above the orbit target. */
+  /** Visible range as a multiple of the orbit height (see setHorizonDistance). */
   getHorizonDistance(): number { return this.horizonDistance; }
 
   /** Turn the atmospheric haze over distant terrain on or off. */
@@ -541,45 +538,20 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
     const origin = this.scratch.setFromMatrixPosition(cam.matrixWorld);
     const ox = origin.x, oy = origin.y, oz = origin.z;
     const dir = this.scratchDir.set((x / w) * 2 - 1, -(y / h) * 2 + 1, 0.5).unproject(cam).sub(origin).normalize();
-    const exag = this.layerRegistry.getActiveBaseLayer()?.display.exaggeration ?? 1;
+    this.exag = this.layerRegistry.getActiveBaseLayer()?.display.exaggeration ?? 1;
 
-    const surfaceGap = (t: number): number | null => {
-      const px = ox + dir.x * t;
-      const py = oy + dir.y * t;
-      const g = this.terrainRenderer.sampleElevationAtWorld(px, py);
-      if (g === null) return null;
-      return oz + dir.z * t - this.elevationToScene(g, py, exag);
-    };
-
-    // March until the ray drops below the surface, then bisect between the
-    // last sample known to be above it and the first one below.
-    // Samples without data count as "above" (the bracket then ends at the
-    // first loaded point below the surface).
-    let t0 = cam.near;
-    const first = surfaceGap(t0);
-    if (first !== null && first <= 0) return null; // camera inside terrain
-    let lastAbove = t0;
-    const tMax = cam.far;
-    for (let i = 0; i < 4000 && t0 < tMax; i++) {
-      const t1 = t0 + Math.max(t0 * 0.004, cam.near);
-      const gap1 = surfaceGap(t1);
-      if (gap1 !== null && gap1 <= 0) {
-        let lo = lastAbove, hi = t1;
-        for (let k = 0; k < 24; k++) {
-          const mid = (lo + hi) / 2;
-          const g = surfaceGap(mid);
-          if (g !== null && g <= 0) hi = mid; else lo = mid;
-        }
-        const px = ox + dir.x * hi;
-        const py = oy + dir.y * hi;
-        const elevation = this.terrainRenderer.sampleElevationAtWorld(px, py);
-        if (elevation === null) return null;
-        return { lngLat: this.worldToLngLat(px, py), elevation };
-      }
-      lastAbove = t1;
-      t0 = t1;
-    }
-    return null;
+    // March until the ray drops below the surface, then bisect. Samples
+    // without data count as above it (the bracket then ends at the first
+    // loaded point below the surface).
+    const g0 = this.groundZ(ox + dir.x * cam.near, oy + dir.y * cam.near);
+    if (g0 !== null && oz + dir.z * cam.near <= g0) return null; // camera inside terrain
+    const t = marchToTerrain(this.groundZ, origin, dir, cam.near, cam.far, 1.004, cam.near, 4000);
+    if (t === null) return null;
+    const px = ox + dir.x * t;
+    const py = oy + dir.y * t;
+    const elevation = this.terrainRenderer.sampleElevationAtWorld(px, py);
+    if (elevation === null) return null;
+    return { lngLat: this.worldToLngLat(px, py), elevation };
   }
 
   /**

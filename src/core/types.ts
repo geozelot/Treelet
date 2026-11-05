@@ -53,6 +53,12 @@ export interface GuiDisplayOptions {
   enabled?: boolean;
   compassPosition?: UICorner;
   layerPosition?: UICorner;
+  /**
+   * Frosted-glass compass and layer controls: translucent, with the map
+   * blurred behind them. Costs some GPU time while the map redraws, so it is
+   * off by default. Default false.
+   */
+  glass?: boolean;
 }
 
 export interface MapDisplayOptions {
@@ -89,8 +95,9 @@ export interface MapDisplayOptions {
   /** Fraction of each LOD range used for geomorphing [0.05..0.5]. Default 0.3. */
   morphWidth?: number;
   /**
-   * Visible range as a multiple of the camera's height above the orbit
-   * target, in [4, 64]. Terrain fades into the sky's horizon color there.
+   * Visible range as a multiple of the orbit height (the camera's height
+   * above the terrain it looks at, at the current zoom and tilt), in
+   * [4, 64]. Terrain fades into the sky's horizon color there.
    * Larger values show more distant terrain and use more tiles. Default 16.
    */
   horizonDistance?: number;

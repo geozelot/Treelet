@@ -1071,6 +1071,11 @@ export class TerrainRenderer {
   // Queries
   // =========================================================================
 
+  /** Changes whenever loaded elevation data changes (sampled heights may differ). */
+  get elevationVersion(): number {
+    return this.atlas.version;
+  }
+
   /** Number of tile instances drawn in the last frame. */
   getInstanceCount(): number {
     return this.geometry.instanceCount;

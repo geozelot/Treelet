@@ -130,6 +130,7 @@ export const DEFAULT_OPTIONS: ResolvedTreeletOptions = {
     enabled: true,
     compassPosition: 'top-right',
     layerPosition: 'bottom-right',
+    glass: false,
   },
   mapDisplay: {
     atlasSegments: DEFAULT_ATLAS_SEGMENTS,

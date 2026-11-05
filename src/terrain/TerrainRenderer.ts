@@ -29,7 +29,7 @@ import {
   type WebGLRenderer,
   type Vector3,
 } from 'three';
-import type { TileCoord, ShaderMode, BlendMode, ColorRamp, VisibleExtent, TreeletStats } from '../core/types';
+import type { TileCoord, ShaderMode, BlendMode, ColorRamp, TreeletStats } from '../core/types';
 import type { TileGrid } from '../tiles/TileGrid';
 import type { WorkerPool } from '../workers/WorkerPool';
 import type { LayerRegistry } from '../layers/LayerRegistry';
@@ -42,7 +42,7 @@ import { buildTileGrid } from './TileGeometry';
 import { ElevationAtlas, type SlotInfo } from './ElevationAtlas';
 import { DrapeAtlas } from './DrapeAtlas';
 import { ArrayTextureWriter } from './ArrayTextureWriter';
-import { TilePool, type SelectedTile, type CullRegion } from './TilePool';
+import { TilePool, type SelectedTile, type CullRegion, type HeightBounds } from './TilePool';
 import { FetchChannel } from './FetchChannel';
 import {
   createTerrainMaterial,
@@ -63,6 +63,7 @@ import {
   setTerrainHillshadeStrength,
   setTerrainDrapePlaceholder,
   setTerrainView,
+  setTerrainFog,
 } from '../shaders/TerrainMaterial';
 
 /** Floats per instance: world(2) size(1) elev(4) parent(4) drape(4) morph(2). */
@@ -83,6 +84,14 @@ const ERROR_LOG_INTERVAL_MS = 5000;
 /** Prefetch lookahead: camera motion is extrapolated this many frames ahead. */
 const PREFETCH_LOOKAHEAD_FRAMES = 10;
 
+/** Uncovered tiles first load their ancestor this many levels up: one
+ *  request then fills a whole region (e.g. the horizon after a fast pan). */
+const COARSE_FALLBACK_LEVELS = 3;
+
+/** Assumed elevation range (meters) of tiles with no loaded data or ancestor. */
+const UNKNOWN_MIN_ELEVATION_M = -500;
+const UNKNOWN_MAX_ELEVATION_M = 9000;
+
 export interface TerrainRendererOptions {
   tileGrid: TileGrid;
   workerPool: WorkerPool;
@@ -90,7 +99,8 @@ export interface TerrainRendererOptions {
   layerRegistry: LayerRegistry;
   metersToScene: number;
   segments: number;
-  atlasSize: number;
+  /** Tiles held in GPU memory (elevation, and drape imagery when active). */
+  tileCacheSize: number;
   slotSize: number;
   drapeSlotSize: number;
   maxInstances: number;
@@ -117,10 +127,10 @@ export interface FrameView {
   /** Vertical focal length in CSS pixels: (viewport height / 2) / tan(fov / 2). */
   focalLength: number;
   exaggeration: number;
-  /** Ground footprint of the view on the plane z = targetZ, or null. */
-  extent: VisibleExtent | null;
-  /** 2D frustum half-planes for the footprint, or null (near top-down). */
-  planes: Float32Array | null;
+  /** Visible range: ground distance from the camera where terrain ends (fully hazed). */
+  horizon: number;
+  /** The camera's four side planes in world space, inward: (nx, ny, nz, d) × 4. */
+  frustum: Float64Array;
   /** The view jumped (setView): don't extrapolate motion. */
   teleported: boolean;
 }
@@ -155,6 +165,8 @@ export class TerrainRenderer {
   private readonly slotSize: number;
   private readonly drapeSlotSize: number;
   private readonly budget: number;
+  private budgetWarned = false;
+  private exaggeration = 1;
   /** Levels beyond the source's max zoom that still add geometric detail. */
   private readonly overzoomLevels: number;
 
@@ -189,13 +201,17 @@ export class TerrainRenderer {
   private readonly missingElev: SelectedTile[] = [];
   private readonly missingElevCovered: SelectedTile[] = [];
   private readonly missingParents: number[] = [];
+  private readonly missingFallback = new Set<number>();
   /** Missing drapes; tiles showing the bare placeholder come before those with a coarse fallback. */
   private readonly missingDrape: Array<{ tile: SelectedTile; slot: SlotInfo }> = [];
   private readonly missingDrapeCovered: Array<{ tile: SelectedTile; slot: SlotInfo }> = [];
   private readonly neededElev = new Set<number>();
   private readonly neededDrape = new Set<number>();
-  private readonly cull: CullRegion = { minX: 0, minY: 0, maxX: 0, maxY: 0, planes: null };
-  private readonly planes = new Float32Array(12);
+  private readonly cull: CullRegion = {
+    minX: 0, minY: 0, maxX: 0, maxY: 0, radius: Infinity, planes: null, prefetch: null,
+  };
+  private readonly planes = new Float64Array(16);
+  private readonly prefetch = new Float64Array(5);
 
   /** Tile events waiting to be delivered outside of atlas/scheduler code. */
   private readonly tileEvents: Array<{ type: 'load' | 'unload'; coord: TileCoord }> = [];
@@ -224,7 +240,7 @@ export class TerrainRenderer {
     this.overzoomLevels = Math.max(0, Math.round(Math.log2(options.slotSize / options.segments)));
 
     // ==== Atlas ====
-    let capacity = (options.atlasSize / options.slotSize) ** 2;
+    let capacity = options.tileCacheSize;
     const gl = this.renderer.getContext() as WebGL2RenderingContext;
     const maxLayers = gl.getParameter(gl.MAX_ARRAY_TEXTURE_LAYERS) as number | null;
     if (maxLayers && capacity > maxLayers) {
@@ -241,12 +257,6 @@ export class TerrainRenderer {
     };
 
     this.budget = Math.max(16, Math.min(options.maxInstances, Math.floor(capacity * ATLAS_VISIBLE_FRACTION)));
-    if (this.budget < options.maxInstances) {
-      console.info(
-        `treelet: rendering at most ${this.budget} tiles per frame (atlas holds ${capacity}; ` +
-        `increase mapDisplay.atlasSize to raise this)`,
-      );
-    }
 
     this.tilePool = new TilePool(this.tileGrid);
     const settled = () => this.markDirty();
@@ -331,6 +341,7 @@ export class TerrainRenderer {
       return this.consumeRenderDirty();
     }
 
+    this.exaggeration = view.exaggeration;
     if (setTerrainExaggeration(this.material, view.exaggeration)) this.renderDirty = true;
     this.updateDrapeVisibility(view.zoom);
     const now = performance.now();
@@ -375,18 +386,27 @@ export class TerrainRenderer {
     this.lastMaxLevel = maxLevel;
 
     this.computeCullRegion(view, orbitDist);
+    const rangeFactor = Math.max(PREFERRED_RANGE_FACTOR, (view.focalLength * this.lodQuality) / this.slotSize);
     const tiles = this.tilePool.select({
       cameraX: view.cameraX,
       cameraY: view.cameraY,
       cameraZ: view.cameraZ,
       refZ: view.targetZ,
-      rangeFactor: Math.max(PREFERRED_RANGE_FACTOR, (view.focalLength * this.lodQuality) / this.slotSize),
+      rangeFactor,
       minLevel,
       maxLevel,
       morphWidth: this.morphWidth,
       budget: this.budget,
       cull: this.cull,
+      heightBounds: this.heightBounds,
     });
+    if (!this.budgetWarned && (this.tilePool.truncated || this.tilePool.rangeFactor < rangeFactor * 0.999)) {
+      this.budgetWarned = true;
+      const limit = this.budget < this.opts.maxInstances
+        ? `mapDisplay.tileCacheSize (now ${this.atlas.capacity}; ${ATLAS_VISIBLE_FRACTION * 100}% of it can be on screen)`
+        : `mapDisplay.maxInstances (now ${this.opts.maxInstances})`;
+      console.info(`treelet: this view needs more than ${this.budget} tiles, so distant detail was reduced. Raise ${limit} for full detail.`);
+    }
 
     // ==== Instances ====
     this.buildInstances(tiles, base);
@@ -449,55 +469,79 @@ export class TerrainRenderer {
     }
   }
 
-  /** Footprint AABB + padded frustum planes, extended along camera motion. */
+  /**
+   * Horizon circle + camera side planes, plus a lookahead that widens only
+   * the planes the camera is moving toward, so tiles about to come into view
+   * are already loading.
+   */
   private computeCullRegion(view: FrameView, orbitDist: number): void {
     const c = this.cull;
-    const height = Math.max(view.cameraZ - view.targetZ, orbitDist * 0.05);
-    if (view.extent) {
-      let minX = view.cameraX, maxX = view.cameraX, minY = view.cameraY, maxY = view.cameraY;
-      for (const p of view.extent.corners) {
-        if (p.x < minX) minX = p.x;
-        if (p.x > maxX) maxX = p.x;
-        if (p.y < minY) minY = p.y;
-        if (p.y > maxY) maxY = p.y;
-      }
-      c.minX = minX; c.maxX = maxX; c.minY = minY; c.maxY = maxY;
-    } else {
-      const r = height * 8 + orbitDist;
-      c.minX = view.cameraX - r; c.maxX = view.cameraX + r;
-      c.minY = view.cameraY - r; c.maxY = view.cameraY + r;
-    }
-
-    // Pad for terrain relief above/below the reference plane and for the
-    // horizon clamp; extrapolate motion (clamped, and never across jumps).
-    const pad = Math.max(c.maxX - c.minX, c.maxY - c.minY) * 0.08 + orbitDist * 0.1;
     let vx = 0;
     let vy = 0;
     if (!view.teleported && Number.isFinite(this.prevCamX)) {
       vx = (view.cameraX - this.prevCamX) * PREFETCH_LOOKAHEAD_FRAMES;
       vy = (view.cameraY - this.prevCamY) * PREFETCH_LOOKAHEAD_FRAMES;
-      const limit = orbitDist * 2;
+      const limit = orbitDist * 0.5;
       const speed = Math.sqrt(vx * vx + vy * vy);
-      if (speed > limit * 4) { vx = 0; vy = 0; } // jump, not motion
+      if (speed > limit * 8) { vx = 0; vy = 0; } // jump, not motion
       else if (speed > limit) { vx *= limit / speed; vy *= limit / speed; }
     }
     this.prevCamX = view.cameraX;
     this.prevCamY = view.cameraY;
 
-    c.minX -= pad - Math.min(vx, 0);
-    c.maxX += pad + Math.max(vx, 0);
-    c.minY -= pad - Math.min(vy, 0);
-    c.maxY += pad + Math.max(vy, 0);
+    // Small fixed margin against tiles flickering at the screen edges.
+    const margin = orbitDist * 0.01;
+    const r = view.horizon + margin;
+    c.radius = r;
+    this.planes.set(view.frustum);
+    for (let i = 3; i < 16; i += 4) this.planes[i] += margin;
+    c.planes = this.planes;
 
-    if (view.planes) {
-      const margin = pad + Math.sqrt(vx * vx + vy * vy);
-      this.planes.set(view.planes);
-      for (let i = 0; i < 4; i++) this.planes[i * 3 + 2] += margin;
-      c.planes = this.planes;
+    const speed = Math.sqrt(vx * vx + vy * vy);
+    if (speed > 0) {
+      // Where the frustum will be: n·(p − v) + d ≥ 0, i.e. d grows by −n·v.
+      const f = this.planes;
+      for (let i = 0; i < 4; i++) this.prefetch[i] = Math.max(0, -(f[i * 4] * vx + f[i * 4 + 1] * vy));
+      this.prefetch[4] = speed;
+      c.prefetch = this.prefetch;
     } else {
-      c.planes = null;
+      c.prefetch = null;
     }
+    const rr = r + speed;
+    c.minX = view.cameraX - rr;
+    c.maxX = view.cameraX + rr;
+    c.minY = view.cameraY - rr;
+    c.maxY = view.cameraY + rr;
   }
+
+  /**
+   * Height range of a tile in scene units for frustum culling: from its own
+   * data, else its nearest loaded ancestor (padded: coarse data flattens
+   * peaks), else a range that covers any terrain on Earth.
+   */
+  private readonly heightBounds: HeightBounds = (z, x, y, south, north, out) => {
+    let lo = UNKNOWN_MIN_ELEVATION_M;
+    let hi = UNKNOWN_MAX_ELEVATION_M;
+    for (let az = z, ax = x, ay = y; az >= 0; az--, ax >>= 1, ay >>= 1) {
+      const slot = this.atlas.get(packTileKey(az, ax, ay));
+      if (!slot) continue;
+      lo = slot.min;
+      hi = slot.max;
+      if (az < z) {
+        const pad = (hi - lo) * 0.25 + 100;
+        lo -= pad;
+        hi += pad;
+      }
+      break;
+    }
+    // Mercator scales heights by cosh(y·2π/W), growing away from the equator.
+    const w = (2 * Math.PI) / this.tileGrid.worldScale;
+    const kFar = Math.cosh(Math.max(Math.abs(south), Math.abs(north)) * w);
+    const kNear = south < 0 && north > 0 ? 1 : Math.cosh(Math.min(Math.abs(south), Math.abs(north)) * w);
+    const s = this.opts.metersToScene * this.exaggeration;
+    out[0] = lo * (lo < 0 ? kFar : kNear) * s;
+    out[1] = hi * (hi > 0 ? kFar : kNear) * s;
+  };
 
   // =========================================================================
   // Instance buffer
@@ -510,6 +554,7 @@ export class TerrainRenderer {
     this.missingElev.length = 0;
     this.missingElevCovered.length = 0;
     this.missingParents.length = 0;
+    this.missingFallback.clear();
     this.missingDrape.length = 0;
     this.missingDrapeCovered.length = 0;
     this.neededElev.clear();
@@ -533,6 +578,12 @@ export class TerrainRenderer {
         const anc = this.findAncestor(t.z, t.x, t.y, minLevel);
         if (!anc) {
           this.missingElev.push(t);
+          const fz = Math.max(minLevel, t.z - COARSE_FALLBACK_LEVELS);
+          if (fz < t.z) {
+            const fallback = packTileKey(fz, t.x >> (t.z - fz), t.y >> (t.z - fz));
+            this.missingFallback.add(fallback);
+            this.neededElev.add(fallback);
+          }
           continue; // nothing to draw yet
         }
         this.missingElevCovered.push(t);
@@ -715,8 +766,14 @@ export class TerrainRenderer {
     };
 
     let open = true;
-    for (const t of this.missingElev) {
-      if (!(open = tryElevation(t.z, t.x, t.y, t.key))) break;
+    for (const key of this.missingFallback) {
+      const { z, x, y } = parseTileKey(key);
+      if (!(open = tryElevation(z, x, y, key))) break;
+    }
+    if (open) {
+      for (const t of this.missingElev) {
+        if (!(open = tryElevation(t.z, t.x, t.y, t.key))) break;
+      }
     }
     if (open) {
       for (const key of this.missingParents) {
@@ -1003,6 +1060,11 @@ export class TerrainRenderer {
   setLodQuality(quality: number): void {
     this.lodQuality = Math.max(0.25, Math.min(4, quality));
     this.markRender();
+  }
+
+  /** Haze toward the horizon (sRGB color, camera distances). */
+  setFog(color: readonly number[], start: number, end: number): void {
+    if (setTerrainFog(this.material, color, start, end)) this.renderDirty = true;
   }
 
   // =========================================================================

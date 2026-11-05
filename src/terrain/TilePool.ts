@@ -19,6 +19,11 @@
 // Distances are 3D from the camera to the tile footprint on a horizontal
 // reference plane (the orbit target's height); the shader uses the identical
 // metric per vertex, so CPU selection and GPU morphing always agree.
+//
+// Culling is radial (a horizon circle around the camera) plus the camera's
+// four side planes against each tile's 3D box, whose height range comes from
+// the loaded elevation data. LOD never depends on the cull region, so moving
+// the culling boundaries can't change any tile's level.
 // ============================================================================
 
 import type { TileGrid } from '../tiles/TileGrid';
@@ -46,15 +51,29 @@ export interface SelectedTile {
   parentKey: number;
 }
 
-/** Culling region: an axis-aligned box plus optional inward 2D half-planes. */
+/** Culling region: a root box, a horizon radius and optional 3D side planes. */
 export interface CullRegion {
   minX: number;
   minY: number;
   maxX: number;
   maxY: number;
-  /** 4 planes × (nx, ny, d): inside when nx·x + ny·y + d ≥ 0. */
-  planes: Float32Array | null;
+  /** Tiles whose footprint lies farther than this (ground distance from the camera) are dropped. */
+  radius: number;
+  /** 4 planes × (nx, ny, nz, d): inside when nx·x + ny·y + nz·z + d ≥ 0. */
+  planes: Float64Array | null;
+  /**
+   * Optional lookahead along the camera's motion: extra offsets for the 4
+   * planes and the radius ([d0, d1, d2, d3, r]). Dropped first when the
+   * selection exceeds the budget, before any detail is given up.
+   */
+  prefetch: Float64Array | null;
 }
+
+/**
+ * Height range of a tile in scene units: writes [min, max] into `out`.
+ * Only consulted when 3D planes are given.
+ */
+export type HeightBounds = (z: number, x: number, y: number, south: number, north: number, out: Float64Array) => void;
 
 export interface SelectParams {
   cameraX: number;
@@ -70,6 +89,8 @@ export interface SelectParams {
   morphWidth: number;
   budget: number;
   cull: CullRegion;
+  /** Tile height ranges for plane culling; flat at refZ when omitted. */
+  heightBounds?: HeightBounds;
 }
 
 /** Morph distances for tiles that must never morph (coarsest level). */
@@ -98,11 +119,19 @@ export class TilePool {
   rangeFactor = MIN_LOD_RANGE_FACTOR;
   /** Whether the last select() had to drop tiles to respect the budget. */
   truncated = false;
+  /** Whether the last select() included the motion lookahead. */
+  prefetched = false;
+
+  /** Budget-fitted factor kept from the previous frame (Infinity when unconstrained). */
+  private fittedK = Infinity;
+  private lastCount = 0;
+  private usePrefetch = false;
 
   // Per-select parameters (avoids threading them through the recursion).
   private p!: SelectParams;
   private dz = 0;
   private half = 0;
+  private readonly zRange = new Float64Array(2);
 
   constructor(tileGrid: TileGrid) {
     this.tileGrid = tileGrid;
@@ -114,8 +143,9 @@ export class TilePool {
   }
 
   /**
-   * Select tiles for the current view. Lowers the range factor (coarser
-   * tiles) until the selection fits the budget; if even the minimum factor
+   * Select tiles for the current view. When the selection exceeds the
+   * budget, the motion lookahead is dropped first, then the range factor is
+   * lowered (coarser tiles) until it fits; if even the minimum factor
    * overflows, the farthest tiles are dropped and `truncated` is set.
    */
   select(params: SelectParams): readonly SelectedTile[] {
@@ -124,14 +154,28 @@ export class TilePool {
     this.half = this.tileGrid.worldScale / 2;
 
     const minLevel = Math.max(0, Math.min(params.minLevel, params.maxLevel));
-    let k = Math.max(MIN_LOD_RANGE_FACTOR, params.rangeFactor);
+    const preferred = Math.max(MIN_LOD_RANGE_FACTOR, params.rangeFactor);
+    let k = preferred;
+    // Hysteresis: once the budget forced a coarser factor, keep it until the
+    // view clearly fits at the preferred one (the tile count grows ~1.6× per
+    // step), so the LOD doesn't flip back and forth between frames.
+    if (this.fittedK < preferred && this.lastCount > params.budget * 0.5) k = this.fittedK;
+    this.usePrefetch = params.cull.prefetch !== null;
 
     for (let attempt = 0; ; attempt++) {
       this.rangeFactor = k;
       this.runSelection(minLevel, k);
-      if (!this.overflow || k <= MIN_LOD_RANGE_FACTOR || attempt >= 8) break;
+      if (!this.overflow || attempt >= 10) break;
+      if (this.usePrefetch) {
+        this.usePrefetch = false;
+        continue;
+      }
+      if (k <= MIN_LOD_RANGE_FACTOR) break;
       k = Math.max(MIN_LOD_RANGE_FACTOR, k * 0.8);
     }
+    this.fittedK = k < preferred ? k : Infinity;
+    this.lastCount = this.count;
+    this.prefetched = this.usePrefetch;
 
     const out = this._selected;
     out.length = 0;
@@ -156,11 +200,12 @@ export class TilePool {
     // Hard limit on candidates collected (selection budget plus slack for
     // the farthest-first truncation fallback).
     const hardLimit = this.p.budget * 4;
-    for (let y = y0; y <= y1; y++) {
-      for (let x = x0; x <= x1; x++) {
+    for (let y = y0; y <= y1 && this.count < hardLimit; y++) {
+      for (let x = x0; x <= x1 && this.count < hardLimit; x++) {
         this.visit(minLevel, x, y, minLevel, k, hardLimit);
       }
     }
+    if (this.count >= hardLimit) this.overflow = true;
   }
 
   private visit(z: number, x: number, y: number, minLevel: number, k: number, hardLimit: number): void {
@@ -177,24 +222,36 @@ export class TilePool {
 
     const cull = p.cull;
     if (east < cull.minX || west > cull.maxX || north < cull.minY || south > cull.maxY) return;
-    const planes = cull.planes;
-    if (planes !== null) {
-      for (let i = 0; i < 4; i++) {
-        const nx = planes[i * 3];
-        const ny = planes[i * 3 + 1];
-        const d = planes[i * 3 + 2];
-        // Test the corner farthest along the plane normal.
-        const tx = nx > 0 ? east : west;
-        const ty = ny > 0 ? north : south;
-        if (nx * tx + ny * ty + d < 0) return;
-      }
-    }
 
     const cx = p.cameraX;
     const cy = p.cameraY;
     const dx = cx < west ? west - cx : cx > east ? cx - east : 0;
     const dy = cy < south ? south - cy : cy > north ? cy - north : 0;
-    const minDist = Math.sqrt(dx * dx + dy * dy + this.dz * this.dz);
+    const ground2 = dx * dx + dy * dy;
+    const prefetch = this.usePrefetch ? cull.prefetch : null;
+    const radius = prefetch !== null ? cull.radius + prefetch[4] : cull.radius;
+    if (ground2 > radius * radius) return;
+
+    const planes = cull.planes;
+    if (planes !== null) {
+      const zr = this.zRange;
+      if (p.heightBounds) p.heightBounds(z, x, y, south, north, zr);
+      else { zr[0] = p.refZ; zr[1] = p.refZ; }
+      for (let i = 0; i < 4; i++) {
+        const o = i * 4;
+        const nx = planes[o];
+        const ny = planes[o + 1];
+        const nz = planes[o + 2];
+        const d = prefetch !== null ? planes[o + 3] + prefetch[i] : planes[o + 3];
+        // Test the box corner farthest along the plane normal.
+        const tx = nx > 0 ? east : west;
+        const ty = ny > 0 ? north : south;
+        const tz = nz > 0 ? zr[1] : zr[0];
+        if (nx * tx + ny * ty + nz * tz + d < 0) return;
+      }
+    }
+
+    const minDist = Math.sqrt(ground2 + this.dz * this.dz);
 
     if (z >= p.maxLevel || minDist >= k * size * 0.5) {
       this.emit(z, x, y, west, north, size, minDist, minLevel, k);

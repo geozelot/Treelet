@@ -13,6 +13,7 @@
 - Default sun is north-west at 45° (cartographic convention); aspect defaults to the new `'cyclic'` ramp; slope is mapped in degrees over `slopeRange` (default 0–60°).
 - WMTS KVP and WMS query values are URL-encoded.
 - `TerrainRenderer`, the atlases and `TilePool` were rewritten; their internal APIs changed.
+- `mapDisplay.atlasSize` is deprecated in favour of `mapDisplay.tileCacheSize` (a tile count). `atlasSize` still works and maps to `(atlasSize / slotSize)²` tiles, with a console warning.
 
 ### Fixed
 
@@ -28,6 +29,11 @@
 - Layer names were inserted into the panel as HTML (XSS).
 - Overzoomed parents were fetched and decoded once per child.
 - Hard tile budget truncation punched holes; atlas capacity vs. `maxInstances` and zoom limits weren't validated.
+- Distant terrain ended in a jagged edge that shifted as the view rotated: culling cut the far range along a straight line while fog was based on view depth. Terrain now dissolves into a sky gradient at a circular horizon.
+- Motion prefetch widened the view in every direction, pushing the selection over budget while moving; the LOD then coarsened during interaction and snapped back afterwards (distant popping). Prefetch now extends only in the direction of motion, is dropped before any detail, and budget-driven LOD changes have hysteresis.
+- Mountains just outside the ground footprint were culled even when they rose into view (culling ignored terrain height).
+- Mobile: the map flashed white when the canvas was resized (toolbars showing/hiding) or the GPU context was lost; the canvas is now redrawn in the same frame and its background matches the horizon.
+- The startup note about the per-frame tile limit was printed on every load and suggested a misleading fix; it now appears only when a view actually exceeds the limit.
 - Half-texel offset and point sampling of vertex heights; contours were drawn from the coarse mesh instead of the DEM.
 - Undefined-behaviour `smoothstep` calls (reversed edges; zero width on flat ground).
 - Switching base layers kept the previous layer's ramp/isoline settings; `'auto'` elevation range was a fixed 0–4000 m.
@@ -40,11 +46,12 @@
 - Texture-array atlases (no slot bleeding), per-layer mipmapped and anisotropically filtered drapes with gamma-correct mips.
 - Seamless tiles: shared edges and corners are stitched on load, blended over about one source pixel.
 - Per-fragment DEM elevation and smooth normals for shading, color ramps and contours.
-- Render on demand, device-pixel-ratio cap, WebGL context-loss recovery.
+- Render on demand, device-pixel-ratio cap, WebGL context-loss recovery (logged).
+- Horizon: a sky gradient with radial atmospheric haze that terrain fades into, culled at a circular visible range; 3D frustum culling against per-tile height bounds; coarse-first loading so newly exposed regions fill in with one request.
 - Worker pipeline: decode, resample and mipmap off the main thread; URL-affinity routing with decode cache and in-flight dedupe; request cancellation.
 - Inspection API: `getElevation()`, `pick()`, `getElevationProfile()`, `getStats()`, `setElevationRange('auto' | [min, max])`, `setSlopeRange()`, `setLodQuality()`, `requestRender()`, `'tileerror'` event.
 - Sources: `{-y}`, `{quadkey}`, `{r}`, `{accessToken}` tokens; `headers`, `credentials`, `referrerPolicy`, `retina` options; WMS 1.3.0 axis order, `styles`, `transparent`.
 - Touch panning with one finger, zoom-to-cursor, keyboard panning.
 - Sanitized HTML attributions with links; attribution overflow handling.
 - SSR-safe imports, `"sideEffects": false`, explicit `defineTreeletElements()`.
-- New options: `workerUrl`, `mapDisplay.drapeSlotSize`, `maxPixelRatio`, `lodQuality`, `morphWidth`, `renderOnDemand`.
+- New options: `workerUrl`, `mapDisplay.drapeSlotSize`, `maxPixelRatio`, `lodQuality`, `morphWidth`, `renderOnDemand`, `tileCacheSize`, `horizonDistance`, `fog`; methods `setHorizonDistance()`, `setFog()`.

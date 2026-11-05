@@ -26,7 +26,7 @@ function params(overrides: Partial<SelectParams> = {}): SelectParams {
     maxLevel: 17,
     morphWidth: 0.3,
     budget: 4000,
-    cull: { minX: 1100, minY: 5800, maxX: 1300, maxY: 6000, planes: null },
+    cull: { minX: 1100, minY: 5800, maxX: 1300, maxY: 6000, radius: Infinity, planes: null, prefetch: null },
     ...overrides,
   };
 }
@@ -119,10 +119,60 @@ describe('TilePool.select', () => {
     }
   });
 
-  it('culls tiles outside the frustum half-planes', () => {
-    // Half-plane x >= 1200 (nx=1, ny=0, d=-1200).
-    const planes = new Float32Array([1, 0, -1200, 0, 0, 1, 0, 0, 1, 0, 0, 1]);
-    const tiles = new TilePool(grid).select(params({ cull: { minX: 1100, minY: 5800, maxX: 1300, maxY: 6000, planes } }));
+  it('culls tiles outside the frustum planes', () => {
+    // Plane x >= 1200 (n = (1, 0, 0), d = -1200); the other three always pass.
+    const planes = new Float64Array([1, 0, 0, -1200, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]);
+    const cull = { minX: 1100, minY: 5800, maxX: 1300, maxY: 6000, radius: Infinity, planes, prefetch: null };
+    const tiles = new TilePool(grid).select(params({ cull }));
     for (const t of tiles) expect(bounds(t).e).toBeGreaterThanOrEqual(1200);
+  });
+
+  it('tests the 3D box: tall terrain keeps a tile the ground plane alone would cull', () => {
+    // Plane z >= 2 tilted slightly: inside when 0.1·x + z - 122 >= 0, i.e. above z = 2 at x = 1200.
+    const planes = new Float64Array([0.1, 0, 1, -122, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]);
+    const cull = { minX: 1100, minY: 5800, maxX: 1300, maxY: 6000, radius: Infinity, planes, prefetch: null };
+    const flat = new TilePool(grid).select(params({ cull, heightBounds: (_z, _x, _y, _s, _n, out) => { out[0] = 0; out[1] = 0; } }));
+    const tall = new TilePool(grid).select(params({ cull, heightBounds: (_z, _x, _y, _s, _n, out) => { out[0] = 0; out[1] = 5; } }));
+    for (const t of flat) expect(bounds(t).e).toBeGreaterThanOrEqual(1220);
+    expect(tall.some((t) => bounds(t).e < 1220)).toBe(true);
+  });
+
+  it('drops the motion lookahead before giving up detail', () => {
+    const planes = new Float64Array([1, 0, 0, -1200, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]);
+    const prefetch = new Float64Array([60, 0, 0, 0, 0]); // lookahead toward −x
+    const cull = { minX: 1100, minY: 5800, maxX: 1300, maxY: 6000, radius: Infinity, planes, prefetch };
+    const pool = new TilePool(grid);
+    const exact = pool.select(params({ cull: { ...cull, prefetch: null } })).length;
+    const ahead = pool.select(params({ cull })).length;
+    expect(ahead).toBeGreaterThan(exact);
+    expect(pool.prefetched).toBe(true);
+    const tight = pool.select(params({ cull, budget: exact }));
+    expect(pool.prefetched).toBe(false);
+    expect(pool.rangeFactor).toBe(4);
+    expect(tight.length).toBe(exact);
+  });
+
+  it('keeps a budget-reduced range factor until the view clearly fits again', () => {
+    const pool = new TilePool(grid);
+    const generous = pool.select(params({ rangeFactor: 6 })).length;
+    pool.select(params({ rangeFactor: 6, budget: Math.floor(generous * 0.9) }));
+    const reduced = pool.rangeFactor;
+    expect(reduced).toBeLessThan(6);
+    // Still near the threshold: stays coarse instead of flipping back.
+    pool.select(params({ rangeFactor: 6, budget: generous }));
+    expect(pool.rangeFactor).toBe(reduced);
+    // Plenty of room: returns to the preferred factor.
+    pool.select(params({ rangeFactor: 6, budget: generous * 4 }));
+    expect(pool.rangeFactor).toBe(6);
+  });
+
+  it('drops tiles beyond the horizon radius without changing anyone\'s level', () => {
+    const p = params();
+    const all = new TilePool(grid).select(p).map((t) => ({ key: t.key, d: t.distance }));
+    const ground = (d: number) => Math.sqrt(Math.max(0, d * d - (p.cameraZ - p.refZ) ** 2));
+    const radius = 60;
+    const cut = new TilePool(grid).select(params({ cull: { ...p.cull, radius } }));
+    const kept = new Set(cut.map((t) => t.key));
+    for (const t of all) expect(kept.has(t.key)).toBe(ground(t.d) <= radius + 1e-9);
   });
 });

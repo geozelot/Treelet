@@ -62,13 +62,23 @@ export interface MapDisplayOptions {
   worldScale?: number;
   minPitch?: number;
   maxPitch?: number;
-  /** Atlas texture resolution in pixels (power-of-two, divisible by slotSize). Default 4096. */
+  /**
+   * Tiles kept in GPU memory, in [64, 2048]. Up to 60% of them can be on
+   * screen at once (capped by maxInstances); more allows wider views at full
+   * detail. Each tile costs ~0.5 MB (elevation, GPU + CPU copy) plus ~0.35 MB
+   * of GPU memory while a drape layer is active. Default 256.
+   */
+  tileCacheSize?: number;
+  /**
+   * @deprecated Use `tileCacheSize`. Holds `(atlasSize / slotSize)²` tiles,
+   * so the former default 4096 equals `tileCacheSize: 256`.
+   */
   atlasSize?: number;
   /** Elevation tile slot resolution in pixels (power-of-two). Default 256. */
   slotSize?: number;
   /** Drape imagery slot resolution in pixels (power-of-two). Default 256. */
   drapeSlotSize?: number;
-  /** Upper bound on tile instances rendered per frame. Default 512 (clamped to atlas capacity). */
+  /** Upper bound on tile instances rendered per frame. Default 512 (capped at 60% of tileCacheSize). */
   maxInstances?: number;
   /** Maximum concurrent tile requests per layer. Default 12. */
   maxConcurrentFetches?: number;
@@ -78,6 +88,18 @@ export interface MapDisplayOptions {
   lodQuality?: number;
   /** Fraction of each LOD range used for geomorphing [0.05..0.5]. Default 0.3. */
   morphWidth?: number;
+  /**
+   * Visible range as a multiple of the camera's height above the orbit
+   * target, in [4, 64]. Terrain fades into the sky's horizon color there.
+   * Larger values show more distant terrain and use more tiles. Default 16.
+   */
+  horizonDistance?: number;
+  /**
+   * Atmospheric haze over distant terrain. When false, terrain stays clear
+   * and only blends into the horizon over the last 20% of the visible range.
+   * Default true.
+   */
+  fog?: boolean;
   /** Render only when something changed (camera, data, settings). Default true. */
   renderOnDemand?: boolean;
 }
@@ -89,7 +111,7 @@ export interface ResolvedTreeletOptions {
   minZoom: number;
   maxZoom: number;
   guiDisplay: Required<GuiDisplayOptions>;
-  mapDisplay: Required<MapDisplayOptions>;
+  mapDisplay: Required<Omit<MapDisplayOptions, 'atlasSize'>>;
   workerCount: number;
   workerUrl: string | URL | null;
 }

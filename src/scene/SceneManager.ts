@@ -1,6 +1,6 @@
 // ============================================================================
 // treelet.js - Scene Manager
-// Sets up the Three.js renderer, scene and camera, runs the (on-demand)
+// Sets up the Three.js renderer, scene, camera and sky, runs the (on-demand)
 // render loop, and handles resize, pixel ratio and WebGL context loss.
 // ============================================================================
 
@@ -9,16 +9,25 @@ import {
   Scene,
   PerspectiveCamera,
   Group,
-  Color,
-  Fog,
+  Frustum,
+  Matrix4,
   type Mesh,
 } from 'three';
 import { CameraController } from './CameraController';
 import { FrustumCalculator } from './FrustumCalculator';
+import { Sky } from './Sky';
 import type { VisibleExtent, ResolvedTreeletOptions, WorldPoint } from '../core/types';
 
 /** Per-frame callback; returns true when the scene must be re-rendered. */
 export type FrameCallback = (dt: number, cameraMoved: boolean) => boolean;
+
+/** Sky colors (sRGB hex): zenith, and the horizon haze terrain fades into. */
+const SKY_LIGHT = { zenith: 0x8fbce3, horizon: 0xdde8f1 };
+const SKY_DARK = { zenith: 0x081426, horizon: 0x223754 };
+
+function srgb(hex: number): [number, number, number] {
+  return [((hex >> 16) & 255) / 255, ((hex >> 8) & 255) / 255, (hex & 255) / 255];
+}
 
 export class SceneManager {
   readonly renderer: WebGLRenderer;
@@ -26,8 +35,13 @@ export class SceneManager {
   readonly camera: PerspectiveCamera;
   readonly cameraController: CameraController;
   readonly tileGroup: Group;
+  /** Current horizon haze color (sRGB components); terrain fades into it. */
+  readonly horizonColor: [number, number, number] = [1, 1, 1];
 
+  private readonly sky: Sky;
   private readonly frustumCalc = new FrustumCalculator();
+  private readonly frustum = new Frustum();
+  private readonly projView = new Matrix4();
   private readonly container: HTMLElement;
   private readonly maxPixelRatio: number;
   private readonly renderOnDemand: boolean;
@@ -47,9 +61,14 @@ export class SceneManager {
   private readonly onContextLost = (e: Event) => {
     e.preventDefault();
     this.contextLost = true;
+    console.warn(
+      'treelet: WebGL context lost (GPU reset or memory pressure); waiting for the browser to restore it. ' +
+      'If this repeats, lower mapDisplay.tileCacheSize or maxPixelRatio.',
+    );
   };
   private readonly onContextRestored = () => {
     this.contextLost = false;
+    console.info('treelet: WebGL context restored');
     this.contextRestoredCallback?.();
     this.requestRender();
   };
@@ -73,25 +92,27 @@ export class SceneManager {
 
     // Scene
     this.scene = new Scene();
+    this.sky = new Sky();
+    this.scene.add(this.sky.mesh);
 
-    // Theme-aware sky background + atmospheric haze fog.
-    // Background = deep sky color; fog = lighter horizon glow color.
-    const BG_DARK = new Color(0x0a1628);    // deep navy night sky
-    const BG_LIGHT = new Color(0xb8d4e8);   // soft powder blue sky
-    const FOG_DARK = new Color(0x1a2e48);   // lighter navy - horizon glow
-    const FOG_LIGHT = new Color(0xd4e4f0);  // very light blue - horizon glow
-
+    // Theme-aware sky. The canvas background matches the horizon so a frame
+    // the browser shows before we draw (resize, context loss) isn't white:
+    // three always creates the context with alpha, so a blank canvas is
+    // transparent and the page shows through.
     this.themeQuery = typeof window !== 'undefined' && window.matchMedia
       ? window.matchMedia('(prefers-color-scheme: dark)')
       : null;
     const applyTheme = () => {
-      const dark = this.themeQuery?.matches ?? false;
-      this.renderer.setClearColor(dark ? BG_DARK : BG_LIGHT);
-      this.scene.background = dark ? BG_DARK : BG_LIGHT;
-      if (this.scene.fog) (this.scene.fog as Fog).color.copy(dark ? FOG_DARK : FOG_LIGHT);
+      const sky = this.themeQuery?.matches ? SKY_DARK : SKY_LIGHT;
+      const horizon = srgb(sky.horizon);
+      this.horizonColor[0] = horizon[0];
+      this.horizonColor[1] = horizon[1];
+      this.horizonColor[2] = horizon[2];
+      this.sky.setColors(srgb(sky.zenith), horizon);
+      this.renderer.setClearColor(sky.horizon);
+      this.renderer.domElement.style.backgroundColor = `#${sky.horizon.toString(16).padStart(6, '0')}`;
       this.requestRender();
     };
-    this.scene.fog = new Fog(FOG_LIGHT, 1, 2);
     applyTheme();
     this.themeListener = applyTheme;
     this.themeQuery?.addEventListener('change', this.themeListener);
@@ -122,18 +143,26 @@ export class SceneManager {
     this.contextRestoredCallback = callback;
   }
 
-  /** Ground footprint on the plane z = planeZ. */
-  getVisibleExtent(planeZ = 0): VisibleExtent | null {
+  /** Ground footprint on the plane z = planeZ, clipped to `maxDist` from the camera. */
+  getVisibleExtent(planeZ = 0, maxDist = Infinity): VisibleExtent | null {
     this.camera.updateMatrixWorld();
-    return this.frustumCalc.computeExtent(this.camera, planeZ);
+    return this.frustumCalc.computeExtent(this.camera, planeZ, maxDist);
   }
 
-  /**
-   * 2D frustum half-planes for the extent returned by the last
-   * getVisibleExtent() call (shares its buffers), or null near top-down.
-   */
-  getVisibleFrustumPlanes(extent: VisibleExtent): Float32Array | null {
-    return this.frustumCalc.computeFrustumPlanes(extent);
+  /** The camera's four side planes in world space, inward: (nx, ny, nz, d) × 4. */
+  getSidePlanes(out: Float64Array): Float64Array {
+    const cam = this.camera;
+    cam.updateMatrixWorld();
+    this.projView.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
+    this.frustum.setFromProjectionMatrix(this.projView);
+    for (let i = 0; i < 4; i++) {
+      const p = this.frustum.planes[i];
+      out[i * 4] = p.normal.x;
+      out[i * 4 + 1] = p.normal.y;
+      out[i * 4 + 2] = p.normal.z;
+      out[i * 4 + 3] = p.constant;
+    }
+    return out;
   }
 
   getExtentBounds(extent: VisibleExtent): { min: WorldPoint; max: WorldPoint } {
@@ -153,13 +182,6 @@ export class SceneManager {
       cam.far = far;
       cam.updateProjectionMatrix();
     }
-  }
-
-  /** Update fog distances (world units from the camera). */
-  setFog(near: number, far: number): void {
-    const fog = this.scene.fog as Fog;
-    fog.near = near;
-    fog.far = far;
   }
 
   /** Set the per-frame callback. @internal */
@@ -239,7 +261,7 @@ export class SceneManager {
       this.dprQuery = window.matchMedia(`(resolution: ${dpr}dppx)`);
       this.dprQuery.addEventListener('change', this.dprListener);
     }
-    this.requestRender();
+    this.renderNow();
   }
 
   /** Handle container resize (CSS pixels). */
@@ -249,7 +271,18 @@ export class SceneManager {
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(width, height);
     this.cameraController.setViewportHeight(height);
+    this.renderNow();
+  }
+
+  /**
+   * Resizing the canvas clears it. Draw again right away (resize observers
+   * run before paint) so the cleared canvas never reaches the screen; mobile
+   * browsers resize constantly as their toolbars show and hide.
+   */
+  private renderNow(): void {
     this.requestRender();
+    if (this.animationFrameId === null || this.contextLost) return;
+    this.frame(performance.now());
   }
 
   get viewportHeight(): number {
@@ -264,6 +297,7 @@ export class SceneManager {
     this.renderer.domElement.removeEventListener('webglcontextlost', this.onContextLost);
     this.renderer.domElement.removeEventListener('webglcontextrestored', this.onContextRestored);
     this.cameraController.dispose();
+    this.sky.dispose();
     this.tileGroup.clear();
     this.renderer.dispose();
     // Release the context now instead of waiting for GC; browsers cap the

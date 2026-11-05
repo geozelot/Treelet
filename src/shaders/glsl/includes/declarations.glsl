@@ -13,6 +13,11 @@ in float vTileScale;
 flat in vec4 vElev;
 flat in vec4 vParent;
 flat in vec4 vDrape;
+in vec3 vCamVec;
+
+// ==== Distance haze (sRGB color; camera distances where it starts / is opaque) ====
+uniform vec3 uFogColor;
+uniform vec2 uFogRange;
 
 // ==== Elevation ====
 uniform float uElevationScale;

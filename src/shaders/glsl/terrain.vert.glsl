@@ -29,8 +29,7 @@ out float vTileScale;
 flat out vec4 vElev;
 flat out vec4 vParent;
 flat out vec4 vDrape;
-
-#include <fog_pars_vertex>
+out vec3 vCamVec;            // camera → vertex (world units, for distance haze)
 
 void main() {
   // ==== Geomorph ====
@@ -74,6 +73,5 @@ void main() {
   vElev = iElev;
   vParent = iParent;
   vDrape = iDrape;
-
-  #include <fog_vertex>
+  vCamVec = vec3(world, z) - uCameraLocal;
 }

@@ -163,15 +163,20 @@ Zoom follows the standard web-map scale: at zoom `z` the world spans `256 · 2^z
 | `worldScale` | `number` | `40075.02` | CRS meters to scene units scale |
 | `minPitch` | `number` | `25` | Minimum pitch (most tilted) in degrees |
 | `maxPitch` | `number` | `90` | Maximum pitch (top-down) in degrees |
-| `atlasSize` | `number` | `4096` | Atlas size in px; holds `(atlasSize / slotSize)²` tiles (64–2048) |
+| `tileCacheSize` | `number` | `256` | Tiles kept in GPU memory (64–2048); up to 60% of them can be on screen. ~0.5 MB per tile, plus ~0.35 MB with a drape active |
+| `atlasSize` | `number` | — | *Deprecated*: use `tileCacheSize`. Holds `(atlasSize / slotSize)²` tiles; the former default `4096` equals `tileCacheSize: 256` |
 | `slotSize` | `number` | `256` | Elevation texels per tile edge |
 | `drapeSlotSize` | `number` | `slotSize` | Drape pixels per tile edge |
-| `maxInstances` | `number` | `512` | Tile budget per frame (capped at 60% of atlas capacity) |
+| `maxInstances` | `number` | `512` | Tile budget per frame (capped at 60% of `tileCacheSize`) |
 | `maxConcurrentFetches` | `number` | `12` | Concurrent requests per layer |
 | `maxPixelRatio` | `number` | `2` | Device-pixel-ratio cap |
 | `lodQuality` | `number` | `1` | LOD multiplier: > 1 finer tiles, < 1 coarser |
 | `morphWidth` | `number` | `0.3` | Fraction of each LOD range used for geomorphing |
+| `horizonDistance` | `number` | `16` | Visible range as a multiple of the camera's height above the orbit target (4–64); terrain fades into the horizon there |
+| `fog` | `boolean` | `true` | Atmospheric haze over distant terrain; when `false`, terrain stays clear and only blends into the horizon over the last 20% of the range |
 | `renderOnDemand` | `boolean` | `true` | Render only when the view, data or settings change |
+
+The defaults fit a typical view in well under the tile budget at any screen size. Treelet logs a one-time note when a view needs more tiles than `tileCacheSize` allows (it then reduces distant detail rather than leaving holes). To raise the limit, set a larger `tileCacheSize`, e.g. `512`; memory grows with it.
 
 ##### GuiDisplayOptions
 
@@ -198,6 +203,9 @@ The main map class. Extends `EventEmitter`.
 | `getTileCount()` | `number` | Number of terrain tiles drawn in the last frame |
 | `getStats()` | `TreeletStats` | Tiles, atlas use, pending and failed requests |
 | `setLodQuality(q)` | `this` | Change the LOD multiplier at runtime |
+| `setHorizonDistance(factor)` | `this` | Visible range as a multiple of camera height (4–64) |
+| `getHorizonDistance()` | `number` | Get the visible range factor |
+| `setFog(enabled)` | `this` | Toggle atmospheric haze over distant terrain |
 | `requestRender()` | `this` | Force a redraw (with `renderOnDemand`) |
 
 #### Inspection

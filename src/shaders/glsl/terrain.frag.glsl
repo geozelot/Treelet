@@ -4,10 +4,10 @@
 //
 // All uniform/varying declarations live in includes/declarations.glsl
 // and are prepended before this file during assembly. Colors are produced
-// in sRGB (display) space, matching three's convention for unlit materials:
-// fog is mixed afterwards with an sRGB fog color.
-
-#include <fog_pars_fragment>
+// in sRGB (display) space, matching three's convention for unlit materials.
+// Haze is radial (camera distance, not view depth) so the horizon doesn't
+// shift as the view rotates, and reaches the sky's horizon color exactly at
+// the visible range: terrain dissolves into the sky instead of ending.
 
 void main() {
   // Derivatives are taken in uniform control flow (before any branching).
@@ -32,6 +32,6 @@ void main() {
 
   color = applyIsolineOverlay(color, scaled, fw);
 
-  gl_FragColor = vec4(color, 1.0);
-  #include <fog_fragment>
+  float haze = smoothstep(uFogRange.x, uFogRange.y, length(vCamVec));
+  gl_FragColor = vec4(mix(color, uFogColor, haze), 1.0);
 }

@@ -18,7 +18,8 @@ import {
   MAX_TILE_ZOOM,
   WEB_MERCATOR_FULL_EXTENT,
   WEB_MERCATOR_MAX_LAT,
-  validateAtlasConfig,
+  tilesForAtlasSize,
+  validateTileConfig,
 } from './constants';
 import { version as packageVersion } from '../../package.json';
 import type {
@@ -34,7 +35,6 @@ import type {
   TreeletStats,
 } from './types';
 import { SceneManager } from '../scene/SceneManager';
-import { MAX_HORIZON_FACTOR } from '../scene/FrustumCalculator';
 import type { CameraController } from '../scene/CameraController';
 import type { BaseLayer } from '../layers/BaseLayer';
 import type { DrapeLayer } from '../layers/DrapeLayer';
@@ -63,6 +63,13 @@ const TARGET_SMOOTHING_S = 0.12;
 
 /** Minimum camera clearance above the terrain, in meters. */
 const CAMERA_MIN_CLEARANCE_M = 2;
+
+/** The visible range never ends closer than this many orbit distances (low-pitch views). */
+const MIN_HORIZON_ORBITS = 3;
+
+/** Where haze starts, as a fraction of the visible range (fog on / off). */
+const FOG_START = 0.35;
+const HORIZON_BLEND_START = 0.8;
 
 function requireFinite(value: number, name: string): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
@@ -94,13 +101,20 @@ export function resolveOptions(user: TreeletOptions): ResolvedTreeletOptions {
   if (minZoom > maxZoom) throw new Error(`treelet: minZoom (${minZoom}) must be <= maxZoom (${maxZoom})`);
   const initZoom = clamp(requireFinite(user.initZoom ?? DEFAULT_OPTIONS.initZoom, 'initZoom'), minZoom, maxZoom);
 
-  const atlasSize = map.atlasSize ?? dm.atlasSize;
   const slotSize = map.slotSize ?? dm.slotSize;
   const drapeSlotSize = map.drapeSlotSize ?? map.slotSize ?? dm.drapeSlotSize;
   const maxInstances = map.maxInstances ?? dm.maxInstances;
   const maxConcurrentFetches = map.maxConcurrentFetches ?? dm.maxConcurrentFetches;
   const atlasSegments = map.atlasSegments ?? dm.atlasSegments;
-  validateAtlasConfig(atlasSize, slotSize, maxInstances, maxConcurrentFetches, atlasSegments, drapeSlotSize);
+  let tileCacheSize = map.tileCacheSize ?? dm.tileCacheSize;
+  if (map.tileCacheSize === undefined && map.atlasSize !== undefined) {
+    tileCacheSize = tilesForAtlasSize(map.atlasSize, slotSize);
+    console.warn(
+      `treelet: mapDisplay.atlasSize is deprecated; atlasSize ${map.atlasSize} with slotSize ${slotSize} ` +
+      `holds ${tileCacheSize} tiles. Use mapDisplay.tileCacheSize instead (default ${dm.tileCacheSize}).`,
+    );
+  }
+  validateTileConfig(tileCacheSize, slotSize, maxInstances, maxConcurrentFetches, atlasSegments, drapeSlotSize);
 
   const worldScale = requireFinite(map.worldScale ?? dm.worldScale, 'mapDisplay.worldScale');
   if (worldScale <= 0) throw new Error('treelet: mapDisplay.worldScale must be > 0');
@@ -128,7 +142,7 @@ export function resolveOptions(user: TreeletOptions): ResolvedTreeletOptions {
       worldScale,
       minPitch,
       maxPitch,
-      atlasSize,
+      tileCacheSize,
       slotSize,
       drapeSlotSize,
       maxInstances,
@@ -136,6 +150,10 @@ export function resolveOptions(user: TreeletOptions): ResolvedTreeletOptions {
       maxPixelRatio,
       lodQuality: clamp(requireFinite(map.lodQuality ?? dm.lodQuality, 'mapDisplay.lodQuality'), 0.25, 4),
       morphWidth: clamp(requireFinite(map.morphWidth ?? dm.morphWidth, 'mapDisplay.morphWidth'), 0.05, 0.5),
+      horizonDistance: clamp(
+        requireFinite(map.horizonDistance ?? dm.horizonDistance, 'mapDisplay.horizonDistance'), 4, 64,
+      ),
+      fog: map.fog ?? dm.fog,
       renderOnDemand: map.renderOnDemand ?? dm.renderOnDemand,
     },
     workerCount: clamp(workerCount, 1, 16),
@@ -177,6 +195,11 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
   /** The view jumped: don't extrapolate motion for prefetching. */
   private teleported = true;
   private lastZoom = NaN;
+  /** Visible range (multiple of camera height), haze on/off, and the last frame's range in world units. */
+  private horizonDistance: number;
+  private fogEnabled: boolean;
+  private horizon = Infinity;
+  private readonly sidePlanes = new Float64Array(16);
 
   private isRunning = false;
   private destroyed = false;
@@ -203,6 +226,8 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
     const gd = this.options.guiDisplay;
 
     this.metersToScene = md.worldScale / WEB_MERCATOR_FULL_EXTENT;
+    this.horizonDistance = md.horizonDistance;
+    this.fogEnabled = md.fog;
 
     // Initialize subsystems
     this.tileGrid = new TileGrid(md.worldScale, MAX_TILE_ZOOM);
@@ -217,7 +242,7 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
       layerRegistry: this.layerRegistry,
       metersToScene: this.metersToScene,
       segments: md.atlasSegments,
-      atlasSize: md.atlasSize,
+      tileCacheSize: md.tileCacheSize,
       slotSize: md.slotSize,
       drapeSlotSize: md.drapeSlotSize,
       maxInstances: md.maxInstances,
@@ -356,18 +381,24 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
       adjusted = true;
     }
 
-    // ==== Clip planes + fog from the current geometry ====
+    // ==== Visible range, clip planes and haze ====
+    // Terrain dissolves into the horizon color at `horizon` (camera distance)
+    // and is culled beyond it; past that range the sky shows the same color,
+    // so the far clip plane can sit right there.
     const dist = cam.position.distanceTo(target);
     const heightAboveGround = Math.max(cam.position.z - camGroundZ, clearance * 0.5);
     const heightAboveRef = Math.max(cam.position.z - target.z, dist * 0.05);
+    const horizon = Math.max(heightAboveRef * this.horizonDistance, dist * MIN_HORIZON_ORBITS);
+    this.horizon = horizon;
     const near = Math.max(Math.min(dist, heightAboveGround) * 0.02, this.options.mapDisplay.worldScale * 1e-10);
-    const far = Math.max(dist * 4, heightAboveRef * (MAX_HORIZON_FACTOR + 2)) + dist;
-    this.sceneManager.setClipPlanes(near, far);
-    this.sceneManager.setFog(heightAboveRef * 4, heightAboveRef * 8);
+    this.sceneManager.setClipPlanes(near, horizon * 1.02);
+    this.terrainRenderer.setFog(
+      this.sceneManager.horizonColor,
+      horizon * (this.fogEnabled ? FOG_START : HORIZON_BLEND_START),
+      horizon,
+    );
 
     // ==== Terrain ====
-    const extent = this.sceneManager.getVisibleExtent(target.z);
-    const planes = extent ? this.sceneManager.getVisibleFrustumPlanes(extent) : null;
     const zoom = cc.deriveZoom();
     const needsRender = this.terrainRenderer.update({
       cameraX: cam.position.x,
@@ -379,8 +410,8 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
       zoom,
       focalLength: cc.focalLength,
       exaggeration: exag,
-      extent,
-      planes,
+      horizon,
+      frustum: this.sceneManager.getSidePlanes(this.sidePlanes),
       teleported: this.teleported,
     });
     this.teleported = false;
@@ -447,13 +478,34 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
   /** Visible ground footprint (on the target's height) as a lng/lat box, or null. */
   getBounds(): { sw: LngLat; ne: LngLat } | null {
     const target = this.sceneManager.cameraController.controls.target;
-    const extent = this.sceneManager.getVisibleExtent(target.z);
+    const extent = this.sceneManager.getVisibleExtent(target.z, this.horizon);
     if (!extent) return null;
     const bounds = this.sceneManager.getExtentBounds(extent);
     return {
       sw: this.worldToLngLat(bounds.min.x, bounds.min.y),
       ne: this.worldToLngLat(bounds.max.x, bounds.max.y),
     };
+  }
+
+  /**
+   * Visible range as a multiple of the camera's height above the orbit
+   * target (clamped to [4, 64]). Larger values show more distant terrain and
+   * use more tiles.
+   */
+  setHorizonDistance(factor: number): this {
+    this.horizonDistance = clamp(requireFinite(factor, 'horizonDistance'), 4, 64);
+    this.sceneManager.requestRender();
+    return this;
+  }
+
+  /** Visible range as a multiple of the camera's height above the orbit target. */
+  getHorizonDistance(): number { return this.horizonDistance; }
+
+  /** Turn the atmospheric haze over distant terrain on or off. */
+  setFog(enabled: boolean): this {
+    this.fogEnabled = !!enabled;
+    this.sceneManager.requestRender();
+    return this;
   }
 
   /** Request a redraw on the next animation frame (renderOnDemand mode). */

@@ -8,9 +8,8 @@
 
 import {
   ShaderMaterial,
-  UniformsUtils,
-  UniformsLib,
   FrontSide,
+  Vector2,
   Vector3,
   type IUniform,
   type Texture,
@@ -92,49 +91,48 @@ export interface TerrainMaterialOptions {
  * Create the instanced terrain ShaderMaterial.
  */
 export function createTerrainMaterial(options: TerrainMaterialOptions): ShaderMaterial {
-  const uniforms: Record<string, IUniform> = UniformsUtils.merge([
-    UniformsLib.fog,
-    {
-      // Elevation atlas + geometry
-      uElevAtlas: { value: null },
-      uSlotSize: { value: options.slotSize },
-      uGridSize: { value: options.gridSize },
-      uElevationScale: { value: options.metersToScene },
-      uExaggeration: { value: 1.0 },
-      uWorldScale: { value: options.worldScale },
-      uOriginY: { value: 0.0 },
-      uCameraLocal: { value: new Vector3() },
-      uRefZ: { value: 0.0 },
-      // Mode/ramp
-      uMode: { value: SHADER_MODE_INDEX[options.mode ?? 'elevation'] },
-      uColorRamp: { value: COLOR_RAMP_INDEX[options.colorRamp ?? 'hypsometric'] },
-      uMinElevation: { value: options.minElevation ?? 0 },
-      uMaxElevation: { value: options.maxElevation ?? 4000 },
-      uSlopeMin: { value: 0 },
-      uSlopeMax: { value: 60 },
-      uSunDirection: { value: DEFAULT_SUN.clone() },
-      uBaseWhite: { value: false },
-      // Isoline
-      uIsolineEnabled: { value: false },
-      uIsolineInterval: { value: 100 },
-      uIsolineThickness: { value: 1.5 },
-      uIsolineColor: { value: new Vector3(0.12, 0.08, 0.04) },
-      // Drape
-      uDrapeAtlas: { value: null },
-      uDrapeOpacity: { value: 1.0 },
-      uHasDrape: { value: 0 },
-      uDrapeBlendMode: { value: BLEND_MODE_INDEX.hillshade },
-      uHillshadeStrength: { value: 0.5 },
-      uDrapePlaceholder: { value: new Vector3(1.0, 1.0, 1.0) },
-    },
-  ]);
+  const uniforms: Record<string, IUniform> = {
+    // Elevation atlas + geometry
+    uElevAtlas: { value: null },
+    uSlotSize: { value: options.slotSize },
+    uGridSize: { value: options.gridSize },
+    uElevationScale: { value: options.metersToScene },
+    uExaggeration: { value: 1.0 },
+    uWorldScale: { value: options.worldScale },
+    uOriginY: { value: 0.0 },
+    uCameraLocal: { value: new Vector3() },
+    uRefZ: { value: 0.0 },
+    // Mode/ramp
+    uMode: { value: SHADER_MODE_INDEX[options.mode ?? 'elevation'] },
+    uColorRamp: { value: COLOR_RAMP_INDEX[options.colorRamp ?? 'hypsometric'] },
+    uMinElevation: { value: options.minElevation ?? 0 },
+    uMaxElevation: { value: options.maxElevation ?? 4000 },
+    uSlopeMin: { value: 0 },
+    uSlopeMax: { value: 60 },
+    uSunDirection: { value: DEFAULT_SUN.clone() },
+    uBaseWhite: { value: false },
+    // Isoline
+    uIsolineEnabled: { value: false },
+    uIsolineInterval: { value: 100 },
+    uIsolineThickness: { value: 1.5 },
+    uIsolineColor: { value: new Vector3(0.12, 0.08, 0.04) },
+    // Drape
+    uDrapeAtlas: { value: null },
+    uDrapeOpacity: { value: 1.0 },
+    uHasDrape: { value: 0 },
+    uDrapeBlendMode: { value: BLEND_MODE_INDEX.hillshade },
+    uHillshadeStrength: { value: 0.5 },
+    uDrapePlaceholder: { value: new Vector3(1.0, 1.0, 1.0) },
+    // Distance haze toward the horizon (sRGB color; camera distances)
+    uFogColor: { value: new Vector3(1.0, 1.0, 1.0) },
+    uFogRange: { value: new Vector2(1e20, 2e20) },
+  };
 
   return new ShaderMaterial({
     vertexShader,
     fragmentShader,
     uniforms,
     side: FrontSide,
-    fog: true,
   });
 }
 
@@ -256,6 +254,20 @@ export function setTerrainDrapePlaceholder(material: ShaderMaterial, r: number, 
   const v = material.uniforms.uDrapePlaceholder.value as Vector3;
   if (v.x === r && v.y === g && v.z === b) return false;
   v.set(r, g, b);
+  return true;
+}
+
+/**
+ * Haze toward the horizon: terrain blends into `color` (sRGB) between camera
+ * distances `start` and `end`, and is fully hidden beyond `end`.
+ */
+export function setTerrainFog(material: ShaderMaterial, color: readonly number[], start: number, end: number): boolean {
+  const u = material.uniforms;
+  const c = u.uFogColor.value as Vector3;
+  const r = u.uFogRange.value as Vector2;
+  if (c.x === color[0] && c.y === color[1] && c.z === color[2] && r.x === start && r.y === end) return false;
+  c.set(color[0], color[1], color[2]);
+  r.set(start, end);
   return true;
 }
 

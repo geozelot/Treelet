@@ -13,6 +13,7 @@ const map = (window as any).__treelet = Treelet.map('map', {
   minZoom: 4,
   maxZoom: 18,
   mapDisplay: {
+    horizonDistance: 32,
     atlasSegments: 64,
     antialias: true,
   },

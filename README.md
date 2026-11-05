@@ -172,7 +172,7 @@ Zoom follows the standard web-map scale: at zoom `z` the world spans `256 · 2^z
 | `maxPixelRatio` | `number` | `2` | Device-pixel-ratio cap |
 | `lodQuality` | `number` | `1` | LOD multiplier: > 1 finer tiles, < 1 coarser |
 | `morphWidth` | `number` | `0.3` | Fraction of each LOD range used for geomorphing |
-| `horizonDistance` | `number` | `16` | Visible range as a multiple of the orbit height (the camera's height above the terrain it looks at, at the current zoom and tilt; 4–64); terrain fades into the horizon there |
+| `horizonDistance` | `number` | `16` | Visible range as a multiple of the camera's height (what the zoom and tilt give it above the terrain it looks at, or its actual height where that is more; 4–64); terrain fades into the horizon there |
 | `fog` | `boolean` | `true` | Atmospheric haze over distant terrain; when `false`, terrain stays clear and only blends into the horizon over the last 20% of the range |
 | `renderOnDemand` | `boolean` | `true` | Render only when the view, data or settings change |
 
@@ -206,7 +206,7 @@ The main map class. Extends `EventEmitter`.
 | `getTileCount()` | `number` | Number of terrain tiles drawn in the last frame |
 | `getStats()` | `TreeletStats` | Tiles, atlas use, pending and failed requests |
 | `setLodQuality(q)` | `this` | Change the LOD multiplier at runtime |
-| `setHorizonDistance(factor)` | `this` | Visible range as a multiple of the orbit height (4–64) |
+| `setHorizonDistance(factor)` | `this` | Visible range as a multiple of the camera's height (4–64) |
 | `getHorizonDistance()` | `number` | Get the visible range factor |
 | `setFog(enabled)` | `this` | Toggle atmospheric haze over distant terrain |
 | `requestRender()` | `this` | Force a redraw (with `renderOnDemand`) |

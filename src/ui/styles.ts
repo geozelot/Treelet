@@ -108,7 +108,7 @@ export const panelStyles = /* css */ `
 
   /* Open: header becomes the cap of the dropdown card */
   .has-choices.open > .layer-col-header {
-    background: var(--bg);
+    background: var(--menu-bg, var(--bg));
     border-left-color: var(--border);
     border-right-color: var(--border);
   }
@@ -237,8 +237,10 @@ export const panelStyles = /* css */ `
     left: 0;
     right: 0;
     padding: 6px 8px 8px 8px;
-    background-color: var(--bg);
+    background-color: var(--menu-bg, var(--bg));
     background-image: linear-gradient(var(--active-bg), var(--active-bg));
+    -webkit-backdrop-filter: var(--menu-filter, none);
+    backdrop-filter: var(--menu-filter, none);
     border: 1px solid var(--border);
     box-shadow: var(--shadow);
     z-index: 15;
@@ -273,7 +275,9 @@ export const panelStyles = /* css */ `
     left: 0;
     right: 0;
     padding: 4px 6px 6px;
-    background: var(--bg);
+    background: var(--menu-bg, var(--bg));
+    -webkit-backdrop-filter: var(--menu-filter, none);
+    backdrop-filter: var(--menu-filter, none);
     border: 1px solid var(--border);
     box-shadow: var(--shadow);
     z-index: 10;

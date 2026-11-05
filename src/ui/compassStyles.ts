@@ -29,9 +29,12 @@ export const compassStyles = /* css */ `
     color-scheme: light dark;
 
     --bg: light-dark(#fafafa, #181818);
-    /* Boxes and slide-outs; translucent with [glass]. Menus stay on --bg. */
+    /* Boxes and slide-outs, and the menus that open from them (dropdowns,
+       settings); translucent with [glass], menus a little less so. */
     --surface-bg: var(--bg);
     --surface-filter: none;
+    --menu-bg: var(--bg);
+    --menu-filter: none;
     --border: light-dark(rgba(0, 0, 0, 0.10), rgba(255, 255, 255, 0.08));
     --shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
     --text: light-dark(#333333, #e8e8e8);
@@ -75,6 +78,8 @@ export const compassStyles = /* css */ `
   :host([glass]) {
     --surface-bg: light-dark(rgba(250, 250, 250, 0.72), rgba(24, 24, 24, 0.66));
     --surface-filter: blur(14px) saturate(1.5);
+    --menu-bg: light-dark(rgba(250, 250, 250, 0.8), rgba(24, 24, 24, 0.74));
+    --menu-filter: blur(14px) saturate(1.5);
   }
 
   button {
@@ -206,6 +211,50 @@ export const compassStyles = /* css */ `
     pointer-events: auto;
     transform: translateX(0);
     transition: opacity 0.2s, transform 0.2s, visibility 0s;
+  }
+
+  /* Glass: a blur only shows what lies inside its nearest blurred or
+     translucent ancestor. So the slide-out itself neither blurs nor fades:
+     its frosted background sits on ::before, which fades with the content
+     (and the border and shadow by color), so the menus opening from it can
+     blur the map too. */
+  :host([glass]) .slide {
+    isolation: isolate;
+    opacity: 1;
+    background: transparent;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    border-color: transparent;
+    box-shadow: none;
+    transition: transform 0.2s, border-color 0.2s, box-shadow 0.2s, visibility 0s 0.2s;
+  }
+
+  :host([glass]) .slide::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    border-radius: inherit;
+    background: var(--surface-bg);
+    -webkit-backdrop-filter: var(--surface-filter);
+    backdrop-filter: var(--surface-filter);
+  }
+
+  :host([glass]) .slide::before,
+  :host([glass]) .slide > * {
+    opacity: 0;
+    transition: opacity 0.2s;
+  }
+
+  :host([glass]) .row[data-h].open > .slide {
+    border-color: var(--border);
+    box-shadow: var(--shadow);
+    transition: transform 0.2s, border-color 0.2s, box-shadow 0.2s, visibility 0s;
+  }
+
+  :host([glass]) .row.open > .slide::before,
+  :host([glass]) .row.open > .slide > * {
+    opacity: 1;
   }
 
   /* SVG container with 3D transforms */

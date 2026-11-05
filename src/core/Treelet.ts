@@ -364,18 +364,24 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
     // ==== Visible range, clip planes and haze ====
     // Terrain dissolves into the horizon color at `horizon` (camera distance)
     // and is culled beyond it; past that range the sky shows the same color,
-    // so the far clip plane can sit right there. The range follows the zoom
-    // (the orbit's height at the zoom's distance and current tilt), not the
-    // terrain the camera passes over, but always reaches well past the screen
-    // center. It grows at once and shrinks eased, so a ridge passing the
-    // screen center doesn't make distant terrain pop.
+    // so the far clip plane can sit right there. The range scales with the
+    // camera's height: the height the zoom and tilt give it (so terrain
+    // passing below never shortens the view), or more where the camera is
+    // actually higher above the terrain (lifted over a ridge, or looking down
+    // into a valley). It always reaches well past the screen center, grows at
+    // once and shrinks eased, so a ridge passing the screen center doesn't
+    // make distant terrain pop.
     const dist = cam.position.distanceTo(target);
     const clearance = this.cameraTerrain.clearance;
     const groundBelow = this.cameraTerrain.cameraGround ?? target.z;
     const heightAboveGround = Math.max(cam.position.z - groundBelow, clearance * 0.5);
     const zoomDist = this.cameraTerrain.zoomDistance;
-    const orbitHeight = Math.max(zoomDist * Math.cos(cc.controls.getPolarAngle()), zoomDist * 0.05);
-    const range = Math.max(orbitHeight * this.horizonDistance, dist * MIN_HORIZON_ORBITS);
+    const height = Math.max(
+      zoomDist * Math.cos(cc.controls.getPolarAngle()),
+      cam.position.z - Math.min(target.z, groundBelow),
+      zoomDist * 0.05,
+    );
+    const range = Math.max(height * this.horizonDistance, dist * MIN_HORIZON_ORBITS);
     let horizon = range;
     if (range < this.horizon && !this.teleported) {
       horizon = this.horizon + (range - this.horizon) * (1 - Math.exp(-dt / HORIZON_EASE_S));
@@ -485,9 +491,10 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
   }
 
   /**
-   * Visible range as a multiple of the orbit height: the camera's height
-   * above the terrain it looks at, at the current zoom and tilt (clamped to
-   * [4, 64]). Larger values show more distant terrain and use more tiles.
+   * Visible range as a multiple of the camera's height: the height the zoom
+   * and tilt give it above the terrain it looks at, or its actual height
+   * where that is more (clamped to [4, 64]). Larger values show more distant
+   * terrain and use more tiles.
    */
   setHorizonDistance(factor: number): this {
     this.horizonDistance = clamp(requireFinite(factor, 'horizonDistance'), 4, 64);
@@ -495,7 +502,7 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
     return this;
   }
 
-  /** Visible range as a multiple of the orbit height (see setHorizonDistance). */
+  /** Visible range as a multiple of the camera's height (see setHorizonDistance). */
   getHorizonDistance(): number { return this.horizonDistance; }
 
   /** Turn the atmospheric haze over distant terrain on or off. */

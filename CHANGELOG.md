@@ -8,7 +8,7 @@
 - **Adding a base layer no longer activates it**, except the first one or when `layerDisplay.visible === true`.
 - `getTileCount()` returns the number of tiles drawn (it previously always returned 1).
 - `getCenter()` returns the orbit target, the terrain at the screen center (0.2.x returned the center of the ground footprint).
-- **The camera keeps its height while panning and zooming** instead of riding up and down with the terrain at the screen center. The zoom follows the distance to that terrain (panning onto a mountain zooms in). The camera only rises where it would touch the terrain, or, smoothly, where moving brings the terrain ahead closer than half the zoom's distance. Past the obstacle it glides back down to the zoom it had, but never below its own height. The visible range follows the zoom, so it stays steady while the camera passes over relief.
+- **The camera keeps its height while panning and zooming** instead of riding up and down with the terrain at the screen center. The zoom follows the distance to that terrain (panning onto a mountain zooms in). The camera only rises where it would touch the terrain, or, smoothly, where moving brings the terrain ahead closer than half the zoom's distance. Past the obstacle it glides back down to the zoom it had, but never below its own height. The visible range never drops below what the zoom and tilt show, so terrain passing below doesn't shorten it, and reaches further while the camera is higher (lifted over a ridge, or above a deep valley).
 - `setView()` keeps the current pitch and bearing.
 - `'ready'` fires when the map starts; `'move'` now fires once per frame while the camera moves.
 - Default sun is north-west at 45° (cartographic convention); aspect defaults to the new `'cyclic'` ramp; slope is mapped in degrees over `slopeRange` (default 0–60°).
@@ -60,6 +60,6 @@
 - Touch panning with one finger, zoom-to-cursor, keyboard panning.
 - Sanitized HTML attributions with links; attribution overflow handling.
 - Controls refresh: the layer button and panel match the compass size; titles with other sources to choose from show a chevron that flips while their list is open; the selected source and buttons are shown at full strength instead of faded; the settings gear is always faintly visible; one type scale, two corner radii and the logo green as accent; lists and settings fade in like the side panels; the overlay groups are named Analysis and Layers.
-- `guiDisplay.glass`: optional frosted-glass controls (translucent, with the map blurred behind).
+- `guiDisplay.glass`: optional frosted-glass controls and menus (translucent, with the map blurred behind).
 - SSR-safe imports, `"sideEffects": false`, explicit `defineTreeletElements()`.
 - New options: `workerUrl`, `mapDisplay.drapeSlotSize`, `maxPixelRatio`, `lodQuality`, `morphWidth`, `renderOnDemand`, `tileCacheSize`, `horizonDistance`, `fog`; methods `setHorizonDistance()`, `setFog()`.

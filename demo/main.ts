@@ -13,9 +13,10 @@ const map = (window as any).__treelet = Treelet.map('map', {
   minZoom: 4,
   maxZoom: 18,
   mapDisplay: {
-    horizonDistance: 32,
+    horizonDistance: 24,
     atlasSegments: 64,
     antialias: true,
+    drapeSlotSize: 512,
   },
   guiDisplay: {
     enabled: true,
@@ -51,11 +52,10 @@ const osm = map.addDrapeLayer({
   layerName: 'OpenStreetMap (XYZ)',
   layerSource: new XYZSource({
     url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-    tileSize: 512,
-    maxZoom: 16,
+    tileSize: 256,
+    maxZoom: 19,
     attribution: '© OpenStreetMap contributors',
   }),
-  lodOffset: 2,
 });
 
 // =========================================================================
@@ -65,11 +65,10 @@ const satellite = map.addDrapeLayer({
   layerName: 'ESRI Satellite (XYZ)',
   layerSource: new XYZSource({
     url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-    tileSize: 512,
-    maxZoom: 16,
+    tileSize: 256,
+    maxZoom: 19,
     attribution: '© Esri, Maxar, Earthstar Geographics',
   }),
-  lodOffset: 2,
 });
 
 // =========================================================================
@@ -81,8 +80,8 @@ const basemapOrtho = map.addDrapeLayer({
   layerName: 'basemap.at Ortho (WMTS)',
   layerSource: new WMTSSource({
     url: 'https://maps.wien.gv.at/basemap/bmaporthofoto30cm/normal/google3857/{z}/{y}/{x}.jpeg',
-    tileSize: 512,
-    maxZoom: 16,
+    tileSize: 256,
+    maxZoom: 19,
     attribution: '© basemap.at',
   }),
 });

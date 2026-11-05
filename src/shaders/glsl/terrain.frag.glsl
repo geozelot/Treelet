@@ -10,10 +10,14 @@
 // the visible range: terrain dissolves into the sky instead of ending.
 
 void main() {
-  // Derivatives are taken in uniform control flow (before any branching).
-  vec2 drapeUV = vDrape.yz + vTileUV * vDrape.w;
-  vec2 dUVdx = dFdx(drapeUV);
-  vec2 dUVdy = dFdy(drapeUV);
+  // The drape is sampled first, in uniform control flow, with implicit
+  // derivatives: only those reliably get the GPU's anisotropic filtering
+  // (some drivers ignore it for textureGrad, which left flat ground seen at
+  // a low angle blurred while slopes stayed sharp).
+  vec4 drape = vec4(0.0);
+  if (uMode == 4 && uHasDrape != 0) {
+    drape = texture(uDrapeAtlas, vec3(vDrape.yz + vTileUV * vDrape.w, vDrape.x));
+  }
 
   Surface s = terrainSurface();
   float h = s.valid ? s.h : 0.0;
@@ -28,7 +32,7 @@ void main() {
   else if (uMode == 1) color = elevationMode(h, normal);
   else if (uMode == 2) color = slopeMode(normal);
   else if (uMode == 3) color = aspectMode(normal);
-  else color = textureMode(h, normal, drapeUV, dUVdx, dUVdy);
+  else color = textureMode(h, normal, drape);
 
   color = applyIsolineOverlay(color, scaled, fw);
 

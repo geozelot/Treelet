@@ -110,7 +110,6 @@ map.addDrapeLayer({
     tileSize: 256,
     maxZoom: 19,
   }),
-  lodOffset: 2, // fetch drape 1 zoom finer than elevation (4 sub-tiles per slot)
 });
 
 map.start();
@@ -163,10 +162,10 @@ Zoom follows the standard web-map scale: at zoom `z` the world spans `256 · 2^z
 | `worldScale` | `number` | `40075.02` | CRS meters to scene units scale |
 | `minPitch` | `number` | `25` | Minimum pitch (most tilted) in degrees |
 | `maxPitch` | `number` | `90` | Maximum pitch (top-down) in degrees |
-| `tileCacheSize` | `number` | `256` | Tiles kept in GPU memory (64–2048); up to 60% of them can be on screen. ~0.5 MB per tile, plus ~0.35 MB with a drape active |
+| `tileCacheSize` | `number` | `256` | Tiles kept in GPU memory (64–2048); up to 60% of them can be on screen. ~0.5 MB per tile, plus ~0.35 MB with a drape active (~1.4 MB with `drapeSlotSize: 512`) |
 | `atlasSize` | `number` | — | *Deprecated*: use `tileCacheSize`. Holds `(atlasSize / slotSize)²` tiles; the former default `4096` equals `tileCacheSize: 256` |
 | `slotSize` | `number` | `256` | Elevation texels per tile edge |
-| `drapeSlotSize` | `number` | `slotSize` | Drape pixels per tile edge |
+| `drapeSlotSize` | `number` | `slotSize` | Drape pixels per tile edge. Each tile fetches imagery as fine as this holds: with 256-px source tiles, `512` loads one zoom finer (4 source tiles per terrain tile), sharp on high-DPI screens at ~4× the drape memory and requests |
 | `maxInstances` | `number` | `512` | Tile budget per frame (capped at 60% of `tileCacheSize`) |
 | `maxConcurrentFetches` | `number` | `12` | Concurrent requests per layer |
 | `maxPixelRatio` | `number` | `2` | Device-pixel-ratio cap |
@@ -291,7 +290,7 @@ Drape layers render raster imagery onto the terrain mesh. Only one drape (extern
 |---|---|---|---|
 | `layerName` | `string` | *required* | Display name |
 | `layerSource` | `TileSource` | *required* | Tile source instance |
-| `lodOffset` | `1 \| 2 \| 3` | `1` | Drape source zoom = tile zoom + `lodOffset − 1` (2 = 4 sub-tiles, 3 = 16), capped at the source's `maxZoom` |
+| `lodOffset` | `1 \| 2 \| 3` | — | *Deprecated, ignored*: imagery detail follows `mapDisplay.drapeSlotSize` |
 | `layerDisplay` | `DrapeLayerDisplay` | `{}` | `{ visible?, opacity?, blendMode?, hillshadeStrength? }` |
 | `layerAttribution` | `string` | source attribution | Attribution text |
 | `minZoom` | `number` | `0` | Minimum zoom level |
@@ -397,7 +396,7 @@ Layers accept `TileSource` instances via the `layerSource` option. Construct sou
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `url` | `string` | *required* | Endpoint URL or template |
-| `tileSize` | `number` | `256` | Tile pixel size |
+| `tileSize` | `number` | `256` | Pixel size of the source's tiles (with `retina`, of the 1× tiles). Drapes use it to decide how many source tiles fill a slot until the first tile shows the real size; a mismatch is logged |
 | `minZoom` | `number` | `0` | Minimum zoom level |
 | `maxZoom` | `number` | `22` | Maximum zoom level |
 | `attribution` | `string` | `''` | Attribution text (simple HTML links allowed; sanitized) |

@@ -204,6 +204,8 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
   private horizonDistance: number;
   private fogEnabled: boolean;
   private horizon = Infinity;
+  /** Camera height above the terrain it passes over or looks at, eased (scales the visible range). */
+  private terrainHeight = NaN;
   private readonly sidePlanes = new Float64Array(16);
 
   private isRunning = false;
@@ -368,19 +370,25 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
     // camera's height: the height the zoom and tilt give it (so terrain
     // passing below never shortens the view), or more where the camera is
     // actually higher above the terrain (lifted over a ridge, or looking down
-    // into a valley). It always reaches well past the screen center, grows at
-    // once and shrinks eased, so a ridge passing the screen center doesn't
-    // make distant terrain pop.
+    // into a valley). That actual height is eased both ways, as the
+    // screen-center terrain jumps whenever a ridge passes it. The range
+    // always reaches well past the screen center, grows at once and shrinks
+    // eased, so distant terrain doesn't pop.
     const dist = cam.position.distanceTo(target);
     const clearance = this.cameraTerrain.clearance;
     const groundBelow = this.cameraTerrain.cameraGround ?? target.z;
     const heightAboveGround = Math.max(cam.position.z - groundBelow, clearance * 0.5);
     const zoomDist = this.cameraTerrain.zoomDistance;
-    const height = Math.max(
-      zoomDist * Math.cos(cc.controls.getPolarAngle()),
-      cam.position.z - Math.min(target.z, groundBelow),
-      zoomDist * 0.05,
-    );
+    const terrainHeight = cam.position.z - Math.min(target.z, groundBelow);
+    if (this.teleported || !Number.isFinite(this.terrainHeight)) {
+      this.terrainHeight = terrainHeight;
+    } else {
+      this.terrainHeight += (terrainHeight - this.terrainHeight) * (1 - Math.exp(-dt / HORIZON_EASE_S));
+      if (Math.abs(terrainHeight - this.terrainHeight) <= Math.abs(terrainHeight) * 0.01) this.terrainHeight = terrainHeight;
+    }
+    // Pitch from the camera itself: the controls' angle predates this frame's terrain adjustments.
+    const cosPitch = dist > 0 ? (cam.position.z - target.z) / dist : 1;
+    const height = Math.max(zoomDist * cosPitch, this.terrainHeight, zoomDist * 0.05);
     const range = Math.max(height * this.horizonDistance, dist * MIN_HORIZON_ORBITS);
     let horizon = range;
     if (range < this.horizon && !this.teleported) {
@@ -426,7 +434,7 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
       this.emit('zoom', { zoom });
     }
 
-    return needsRender || adjusted || horizon !== range;
+    return needsRender || adjusted || horizon !== range || this.terrainHeight !== terrainHeight;
   }
 
   /** Debounced end of a camera interaction. */

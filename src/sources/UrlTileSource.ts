@@ -28,6 +28,8 @@ export abstract class UrlTileSource implements TileSource {
   abstract readonly tileSize: number;
   abstract readonly minZoom: number;
   abstract readonly maxZoom: number;
+  /** 2 (or the `@Nx` factor) while the URL's `{r}` token adds a retina suffix, else 1. */
+  readonly pixelRatio: number;
 
   /** Context for optional template tokens ({accessToken}, {r}). */
   protected readonly templateContext: TemplateContext;
@@ -47,6 +49,8 @@ export abstract class UrlTileSource implements TileSource {
     if (typeof opts.retina === 'string') retina = opts.retina;
     else if (opts.retina === true && typeof devicePixelRatio !== 'undefined' && devicePixelRatio > 1) retina = '@2x';
     this.templateContext = { accessToken: opts.accessToken, retina };
+    const scale = /@(\d+(?:\.\d+)?)x/.exec(retina);
+    this.pixelRatio = retina && opts.url?.includes('{r}') ? (scale ? Number(scale[1]) : 2) : 1;
 
     if (opts.headers || opts.credentials || opts.referrerPolicy) {
       this.requestInit = {

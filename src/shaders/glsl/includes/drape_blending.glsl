@@ -3,13 +3,12 @@
 // sRGB here so blending (tuned in display space) and output stay in the same
 // space as the color ramps.
 
-vec3 textureMode(float h, vec3 normal, vec2 drapeUV, vec2 dUVdx, vec2 dUVdy) {
+vec3 textureMode(float h, vec3 normal, vec4 drape) {
   if (uHasDrape == 0) return elevationMode(h, normal);
 
   float alpha = 0.0;
   vec3 drapeColor = uDrapePlaceholder;
   if (vDrape.w > 0.0) {
-    vec4 drape = textureGrad(uDrapeAtlas, vec3(drapeUV, vDrape.x), dUVdx, dUVdy);
     drapeColor = sRGBTransferOETF(vec4(drape.rgb, 1.0)).rgb;
     alpha = drape.a * uDrapeOpacity;
   }

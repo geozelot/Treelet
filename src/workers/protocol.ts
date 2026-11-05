@@ -61,7 +61,8 @@ export interface DrapeRequest {
 }
 
 export type DrapeResponse =
-  | { status: 'ok'; levels: Uint8Array[] }
+  /** `imageSize`: pixel width of the source images (for the drape layer's slot math). */
+  | { status: 'ok'; levels: Uint8Array[]; imageSize: number }
   | { status: 'empty' };
 
 /** HTTP statuses that mean "this tile does not exist" rather than "try again". */

@@ -215,9 +215,10 @@ export const compassStyles = /* css */ `
 
   /* Glass: a blur only shows what lies inside its nearest blurred or
      translucent ancestor. So the slide-out itself neither blurs nor fades:
-     its frosted background sits on ::before, which fades with the content
-     (and the border and shadow by color), so the menus opening from it can
-     blur the map too. */
+     its frosted background and border sit on ::before (over the whole
+     border box; the slide's own border only keeps the layout), which fades
+     with the content and the shadow, so the menus opening from it can blur
+     the map too. */
   :host([glass]) .slide {
     isolation: isolate;
     opacity: 1;
@@ -226,19 +227,27 @@ export const compassStyles = /* css */ `
     backdrop-filter: none;
     border-color: transparent;
     box-shadow: none;
-    transition: transform 0.2s, border-color 0.2s, box-shadow 0.2s, visibility 0s 0.2s;
+    transition: transform 0.2s, box-shadow 0.2s, visibility 0s 0.2s;
   }
 
   :host([glass]) .slide::before {
     content: '';
     position: absolute;
-    inset: 0;
+    inset: -1px;
     z-index: -1;
+    box-sizing: border-box;
+    border-width: inherit;
+    border-style: inherit;
+    border-color: var(--border);
     border-radius: inherit;
     background: var(--surface-bg);
     -webkit-backdrop-filter: var(--surface-filter);
     backdrop-filter: var(--surface-filter);
   }
+
+  /* No border on the side joined to the box */
+  :host([glass]) .row[data-h="right"] > .slide::before { right: 0; }
+  :host([glass]) .row[data-h="left"] > .slide::before { left: 0; }
 
   :host([glass]) .slide::before,
   :host([glass]) .slide > * {
@@ -247,9 +256,8 @@ export const compassStyles = /* css */ `
   }
 
   :host([glass]) .row[data-h].open > .slide {
-    border-color: var(--border);
     box-shadow: var(--shadow);
-    transition: transform 0.2s, border-color 0.2s, box-shadow 0.2s, visibility 0s;
+    transition: transform 0.2s, box-shadow 0.2s, visibility 0s;
   }
 
   :host([glass]) .row.open > .slide::before,

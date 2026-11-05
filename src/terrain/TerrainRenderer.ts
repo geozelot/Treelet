@@ -72,7 +72,10 @@ export const INSTANCE_STRIDE = 17;
 /** Preferred minimum CDLOD range factor (wider, smoother morph zones). */
 const PREFERRED_RANGE_FACTOR = 4;
 
-/** Drape tiles uploaded per frame (each is a full mip chain, ~350 KB at 256²). */
+/**
+ * Drape tiles uploaded per frame at 256² slots (each a full mip chain,
+ * ~350 KB); fewer for larger slots, so a frame uploads about as many bytes.
+ */
 const DRAPE_UPLOADS_PER_FRAME = 8;
 
 /** In-flight requests no longer needed for this long are cancelled. */
@@ -164,6 +167,7 @@ export class TerrainRenderer {
   private drapeWriter: ArrayTextureWriter | null = null;
   private readonly slotSize: number;
   private readonly drapeSlotSize: number;
+  private readonly drapeUploadsPerFrame: number;
   private readonly budget: number;
   private budgetWarned = false;
   private exaggeration = 1;
@@ -235,6 +239,7 @@ export class TerrainRenderer {
     this.layerRegistry = options.layerRegistry;
     this.slotSize = options.slotSize;
     this.drapeSlotSize = options.drapeSlotSize;
+    this.drapeUploadsPerFrame = Math.max(1, Math.round(DRAPE_UPLOADS_PER_FRAME * (256 / options.drapeSlotSize) ** 2));
     this.lodQuality = options.lodQuality;
     this.morphWidth = Math.max(0.05, Math.min(0.5, options.morphWidth));
     this.overzoomLevels = Math.max(0, Math.round(Math.log2(options.slotSize / options.segments)));
@@ -349,7 +354,7 @@ export class TerrainRenderer {
     // ==== GPU uploads (data that arrived since the last frame) ====
     if (this.atlas.flush(this.elevWriter)) this.renderDirty = true;
     if (this.drapeAtlas && this.drapeWriter &&
-        this.drapeAtlas.flush(this.drapeWriter, DRAPE_UPLOADS_PER_FRAME, (key, gen) => this.atlas.gen(key) === gen)) {
+        this.drapeAtlas.flush(this.drapeWriter, this.drapeUploadsPerFrame, (key, gen) => this.atlas.gen(key) === gen)) {
       this.renderDirty = true;
     }
 
@@ -379,8 +384,10 @@ export class TerrainRenderer {
     const minLevel = Math.max(0, Math.min(src.minZoom, MAX_TILE_ZOOM));
     let maxLevel = Math.min(base.maxZoom, MAX_TILE_ZOOM, src.maxZoom + this.overzoomLevels);
     if (this.activeDrapeLayer && this.drapeVisible) {
+      // Tiles fine enough to show the drape's finest imagery (a slot holding
+      // finer source tiles needs correspondingly coarser terrain tiles).
       const d = this.activeDrapeLayer;
-      maxLevel = Math.max(maxLevel, Math.min(d.source.maxZoom, d.maxZoom, base.maxZoom, MAX_TILE_ZOOM));
+      maxLevel = Math.max(maxLevel, Math.min(d.finestTileZoom(this.drapeSlotSize), d.maxZoom, base.maxZoom, MAX_TILE_ZOOM));
     }
     maxLevel = Math.max(minLevel, Math.floor(maxLevel));
     this.lastMaxLevel = maxLevel;
@@ -790,7 +797,7 @@ export class TerrainRenderer {
       const drapeLimit = Math.max(1, Math.min(this.opts.maxConcurrentFetches, drapeLayer.source.maxConcurrency));
       for (const { tile, slot } of this.missingDrape) {
         if (!this.drapeChannel.canLaunch(tile.key)) continue;
-        const parts = this.buildDrapeParts(drapeLayer, tile.z, tile.x, tile.y);
+        const parts = drapeLayer.drapeParts(tile.z, tile.x, tile.y, this.drapeSlotSize);
         if (!parts) continue;
         const load = this.drapeChannel.load;
         if (load > 0 && load + parts.parts.length > drapeLimit) break;
@@ -851,52 +858,7 @@ export class TerrainRenderer {
 
   /** Source zoom for a tile's drape (−1 when the drape can't cover it). */
   private drapeZoomFor(z: number): number {
-    const d = this.activeDrapeLayer;
-    if (!d) return -1;
-    const src = d.source;
-    let ez = Math.min(z + d.lodOffset - 1, Math.max(z, src.maxZoom));
-    if (ez < src.minZoom) {
-      // Underzoom: composite finer source tiles, up to 4×4.
-      if (src.minZoom - z > 2) return -1;
-      ez = src.minZoom;
-    }
-    return ez;
-  }
-
-  /** Source images composited into one drape slot (sub-tiles and/or overzoom crop). */
-  private buildDrapeParts(d: DrapeLayer, z: number, x: number, y: number): { z: number; parts: DrapePart[] } | null {
-    const ez = this.drapeZoomFor(z);
-    if (ez < 0) return null;
-    const src = d.source;
-    const size = this.drapeSlotSize;
-    const parts: DrapePart[] = [];
-
-    if (ez <= z) {
-      // Same zoom, or overzoom: crop the sub-region from a coarser source tile.
-      const fz = Math.min(z, src.maxZoom);
-      const dz = z - fz;
-      const div = 2 ** dz;
-      parts.push({
-        url: src.getTileUrl({ z: fz, x: x >> dz, y: y >> dz }),
-        dx: 0, dy: 0, dSize: size,
-        crop: dz > 0 ? { x: (x % div) / div, y: (y % div) / div, w: 1 / div, h: 1 / div } : null,
-      });
-      return { z, parts };
-    }
-
-    // Finer source zoom: composite div×div sub-tiles.
-    const div = 2 ** (ez - z);
-    const sub = size / div;
-    for (let sy = 0; sy < div; sy++) {
-      for (let sx = 0; sx < div; sx++) {
-        parts.push({
-          url: src.getTileUrl({ z: ez, x: x * div + sx, y: y * div + sy }),
-          dx: sx * sub, dy: sy * sub, dSize: sub,
-          crop: null,
-        });
-      }
-    }
-    return { z: ez, parts };
+    return this.activeDrapeLayer?.sourceZoomFor(z, this.drapeSlotSize) ?? -1;
   }
 
   private launchDrape(d: DrapeLayer, key: number, slot: SlotInfo, ez: number, parts: DrapePart[]): void {
@@ -908,6 +870,7 @@ export class TerrainRenderer {
       await d.source.ensureReady();
       if (this.disposed || epoch !== this.drapeEpoch) return 'stale';
       const res = await this.workerPool.loadDrape({ id, parts, size, init: d.source.getRequestInit?.() });
+      if (res.status === 'ok') d.observeTileSize(res.imageSize);
       const drape = this.drapeAtlas;
       if (this.disposed || epoch !== this.drapeEpoch || !drape) return 'stale';
       // The elevation slot (and with it this drape layer) may have been reassigned.
@@ -966,7 +929,8 @@ export class TerrainRenderer {
     this.activeDrapeLayer = drapeLayer;
     this.drapeOpacity = opacity;
     if (!this.drapeAtlas) {
-      const anisotropy = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());
+      // Anisotropic filtering keeps imagery sharp on ground seen at a low angle.
+      const anisotropy = Math.min(16, this.renderer.capabilities.getMaxAnisotropy());
       this.drapeAtlas = new DrapeAtlas(this.drapeSlotSize, this.atlas.capacity, anisotropy);
       this.drapeWriter = new ArrayTextureWriter(this.renderer, this.drapeAtlas.texture);
     }

@@ -25,6 +25,13 @@ export interface TileSource {
   /** Tile pixel size (e.g. 256, 512). */
   readonly tileSize: number;
 
+  /**
+   * Image pixels per `tileSize` pixel, e.g. 2 for `@2x` retina tiles.
+   * Default 1. (Drapes measure the real image size once a tile has loaded;
+   * this only sets the first guess.)
+   */
+  readonly pixelRatio?: number;
+
   /** Minimum zoom level supported by this source. */
   readonly minZoom: number;
 

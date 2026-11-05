@@ -55,8 +55,8 @@ export interface GuiDisplayOptions {
   layerPosition?: UICorner;
   /**
    * Frosted-glass compass and layer controls, including the menus that open
-   * from them: translucent, with the map blurred behind. Costs some GPU time while the map redraws, so it is
-   * off by default. Default false.
+   * from them: translucent, with the map blurred behind. Costs some GPU time
+   * while the map redraws, so it is off by default. Default false.
    */
   glass?: boolean;
 }
@@ -82,7 +82,12 @@ export interface MapDisplayOptions {
   atlasSize?: number;
   /** Elevation tile slot resolution in pixels (power-of-two). Default 256. */
   slotSize?: number;
-  /** Drape imagery slot resolution in pixels (power-of-two). Default 256. */
+  /**
+   * Drape imagery pixels per tile edge (power-of-two). Each tile fetches
+   * imagery as fine as this holds: with 256-px source tiles, 512 loads one
+   * zoom finer (sharp on high-DPI screens, ~4× drape memory and requests).
+   * Default 256.
+   */
   drapeSlotSize?: number;
   /** Upper bound on tile instances rendered per frame. Default 512 (capped at 60% of tileCacheSize). */
   maxInstances?: number;

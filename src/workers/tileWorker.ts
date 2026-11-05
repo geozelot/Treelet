@@ -369,6 +369,7 @@ const api = {
         throw abortError();
       }
 
+      const imageSize = bitmaps.find((b) => b !== null)?.width ?? 0;
       const size = req.size;
       const ctx = getContext(size, size);
       ctx.clearRect(0, 0, size, size);
@@ -392,7 +393,7 @@ const api = {
       const image = ctx.getImageData(0, 0, size, size);
       const level0 = new Uint8Array(image.data.buffer, image.data.byteOffset, image.data.byteLength);
       const levels = buildMipChain(level0, size);
-      return Comlink.transfer({ status: 'ok' as const, levels }, levels.map((l) => l.buffer as ArrayBuffer));
+      return Comlink.transfer({ status: 'ok' as const, levels, imageSize }, levels.map((l) => l.buffer as ArrayBuffer));
     } finally {
       requestControllers.delete(req.id);
     }

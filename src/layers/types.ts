@@ -79,9 +79,10 @@ export interface DrapeLayerOptions {
   maxZoom?: number;
   layerDisplay?: DrapeLayerDisplay;
   layerAttribution?: string;
-  /** LOD offset for drape tiles relative to elevation tiles.
-   *  1 = same zoom as elevation (default). 2 = one zoom finer (4 sub-tiles).
-   *  3 = two zoom finer (16 sub-tiles). Clamped to source maxZoom. */
+  /**
+   * @deprecated Ignored. Drape tiles fetch as much detail as their slot
+   * holds; raise `mapDisplay.drapeSlotSize` (e.g. 512) for sharper imagery.
+   */
   lodOffset?: 1 | 2 | 3;
 }
 

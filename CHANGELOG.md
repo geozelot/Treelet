@@ -14,6 +14,7 @@
 - Default sun is north-west at 45° (cartographic convention); aspect defaults to the new `'cyclic'` ramp; slope is mapped in degrees over `slopeRange` (default 0–60°).
 - WMTS KVP and WMS query values are URL-encoded.
 - `TerrainRenderer`, the atlases and `TilePool` were rewritten; their internal APIs changed.
+- A `mapDisplay.drapeSlotSize` larger than the drape source's tiles now fills each slot with finer source tiles (e.g. `512` with 256-px tiles: 4 requests per terrain tile instead of 1 enlarged tile). Mind public tile servers' usage policies.
 - `mapDisplay.atlasSize` is deprecated in favour of `mapDisplay.tileCacheSize` (a tile count). `atlasSize` still works and maps to `(atlasSize / slotSize)²` tiles, with a console warning.
 
 ### Fixed
@@ -45,6 +46,8 @@
 - Drape overzoom crops below one source pixel threw; teleports polluted prefetch; terrain following was frame-rate dependent.
 - The camera could pass into the terrain when tilted and moved into a mountain (only the ground straight below it was checked, against whatever data was loaded there, and the orbit sank back as the target dropped behind a ridge). A clearance sphere around the camera now contains the near plane, fast moves are checked along their path so the camera is carried over ridges, and rotating into a slope lifts the camera while it keeps looking at the target.
 - Documented-but-missing behaviour: `accessToken` was ignored, `tileload`/`tileunload`/`zoom` events never fired.
+- Drape imagery on flat ground seen at a low angle was blurred while slopes at the same distance stayed sharp: the shader sampled with explicit gradients (`textureGrad`), for which some GPU drivers skip anisotropic filtering. It now samples with implicit derivatives (in uniform control flow), and anisotropy goes up to 16× where the GPU supports it.
+- Drape imagery near the camera was blurrier than the source allows: `lodOffset` fetched 4×/16× finer source tiles and then shrank them into the same 256-px slot. Each terrain tile now fetches exactly the detail its slot holds (one source tile per tile by default, or finer ones with a larger `mapDisplay.drapeSlotSize`, e.g. `512` for sharp imagery on high-DPI screens), based on the source's real image size (measured from the first tile; retina `{r}` tiles count double until then). `lodOffset` is deprecated and ignored.
 
 ### Added
 

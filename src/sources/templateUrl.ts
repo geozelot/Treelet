@@ -20,6 +20,14 @@ export interface CompiledTemplate {
   tokens: string[];
 }
 
+/** Values for optional template tokens. */
+export interface TemplateContext {
+  /** Substituted for `{accessToken}` / `{token}`. */
+  accessToken?: string;
+  /** Substituted for `{r}` (e.g. '@2x' on high-DPI displays, '' otherwise). */
+  retina?: string;
+}
+
 /**
  * Split a URL template with `{token}` placeholders into literal parts
  * and token names for fast per-tile concatenation.
@@ -39,15 +47,31 @@ export function splitTemplate(template: string): CompiledTemplate {
   return { parts, tokens };
 }
 
+/** Bing-style quadkey for a tile ('' at zoom 0). */
+export function tileQuadkey(coord: TileCoord): string {
+  let key = '';
+  for (let i = coord.z; i > 0; i--) {
+    const mask = 1 << (i - 1);
+    let digit = 0;
+    if (coord.x & mask) digit += 1;
+    if (coord.y & mask) digit += 2;
+    key += digit;
+  }
+  return key;
+}
+
 /**
  * Expand a pre-compiled URL template for a specific tile coordinate.
- * Handles `{z}`, `{x}`, `{y}`, and optional `{s}` subdomain rotation.
+ *
+ * Tokens: `{z}`, `{x}`, `{y}`, `{-y}` (TMS row), `{s}` (subdomain),
+ * `{quadkey}`, `{r}` (retina suffix), `{accessToken}` / `{token}`.
  */
 export function expandTemplate(
   parts: string[],
   tokens: string[],
   coord: TileCoord,
   subdomains: string[],
+  context?: TemplateContext,
 ): string {
   let url = parts[0];
   for (let i = 0; i < tokens.length; i++) {
@@ -55,8 +79,13 @@ export function expandTemplate(
     if (t === 'z') url += coord.z;
     else if (t === 'x') url += coord.x;
     else if (t === 'y') url += coord.y;
+    else if (t === '-y') url += (1 << coord.z) - 1 - coord.y;
     else if (t === 's' && subdomains.length > 0) {
       url += subdomains[Math.abs(coord.x + coord.y) % subdomains.length];
+    } else if (t === 'quadkey') url += tileQuadkey(coord);
+    else if (t === 'r') url += context?.retina ?? '';
+    else if ((t === 'accessToken' || t === 'token') && context?.accessToken !== undefined) {
+      url += encodeURIComponent(context.accessToken);
     } else if (!_warnedTokens.has(t)) {
       _warnedTokens.add(t);
       console.warn(`treelet: unknown URL template token {${t}}`);
@@ -64,4 +93,18 @@ export function expandTemplate(
     url += parts[i + 1];
   }
   return url;
+}
+
+/** Whether a compiled template contains an access-token placeholder. */
+export function hasTokenPlaceholder(tokens: string[]): boolean {
+  return tokens.includes('accessToken') || tokens.includes('token');
+}
+
+/** Append a query parameter to a URL (handles existing query strings and fragments). */
+export function appendQueryParam(url: string, name: string, value: string): string {
+  const hash = url.indexOf('#');
+  const base = hash >= 0 ? url.slice(0, hash) : url;
+  const frag = hash >= 0 ? url.slice(hash) : '';
+  const sep = base.includes('?') ? (base.endsWith('?') || base.endsWith('&') ? '' : '&') : '?';
+  return `${base}${sep}${encodeURIComponent(name)}=${encodeURIComponent(value)}${frag}`;
 }

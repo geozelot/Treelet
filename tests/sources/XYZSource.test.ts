@@ -96,6 +96,20 @@ describe('XYZSource.getTileUrl', () => {
 // Lifecycle + scheduling
 // ---------------------------------------------------------------------------
 
+describe('XYZSource.pixelRatio', () => {
+  it('is 1 without a retina suffix in use', () => {
+    expect(new XYZSource({ url: 'https://t/{z}/{x}/{y}.png' }).pixelRatio).toBe(1);
+    // A suffix the template doesn't use doesn't change the images.
+    expect(new XYZSource({ url: 'https://t/{z}/{x}/{y}.png', retina: '@2x' }).pixelRatio).toBe(1);
+  });
+
+  it('follows the {r} suffix', () => {
+    expect(new XYZSource({ url: 'https://t/{z}/{x}/{y}{r}.png', retina: '@2x' }).pixelRatio).toBe(2);
+    expect(new XYZSource({ url: 'https://t/{z}/{x}/{y}{r}.png', retina: '@3x' }).pixelRatio).toBe(3);
+    expect(new XYZSource({ url: 'https://t/{z}/{x}/{y}{r}.png', retina: '_hd' }).pixelRatio).toBe(2);
+  });
+});
+
 describe('XYZSource lifecycle', () => {
   it('ensureReady resolves immediately (no network)', async () => {
     const src = new XYZSource({ url: '{z}/{x}/{y}' });

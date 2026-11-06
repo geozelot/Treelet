@@ -16,15 +16,18 @@ The library is designed to be easily extendable - via registry or plugin package
 ##
 #### Rendering & Performance:
 
-- **Single draw call rendering** - All visible tiles in one instanced GPU call from a unified atlas
-- **Adaptive LOD with geomorphing** - Camera-driven quadtree selects per-tile detail; vertices blend smoothly between LOD levels
-- **Vertex displacement** - Displaces shared grid mesh per-instance using vertex texture fetch (VTF)
+- **Single draw call rendering** - All visible tiles in one instanced GPU call from texture-array atlases
+- **Screen-space LOD with CDLOD geomorphing** - Tile detail follows on-screen size at any zoom, tilt or viewport; vertices morph continuously into the coarser level, so LOD boundaries are watertight and never pop
+- **Seamless, true-to-scale relief** - Shared tile edges are stitched on load; heights are Mercator-corrected so slope, aspect and hillshade are accurate at every latitude
+- **High-precision rendering** - Floating render origin and adaptive clip planes keep street-level zooms stable anywhere on the globe
+- **Off-main-thread data pipeline** - Fetch, decode, resampling and mipmapping run in workers; failed tiles back off instead of retrying in a loop
+- **Render on demand** - No GPU work while the view and data are idle
 
 ##
 ### [Live Demo](https://geozelot.github.io/Treelet/)
 
 ##
-### Current Features (v0.2.0):
+### Current Features (v0.3.0):
 
 - #### **Data Sources:**
   - **XYZ** - _Slippy map_ | TMS
@@ -42,10 +45,15 @@ The library is designed to be easily extendable - via registry or plugin package
 
 
 - #### Hypsometric overlays:
-  - **Elevation** - topographic coloring
-  - **Slope** - slope angle coloring
-  - **Aspect** - aspect angle coloring
-  - **Isoline** - isoline overlay
+  - **Elevation** - topographic coloring (fixed or auto range)
+  - **Slope** - slope angle in degrees
+  - **Aspect** - downslope bearing (cyclic ramp)
+  - **Isoline** - contour overlay computed from the DEM per pixel
+
+- #### Inspection:
+  - **Elevation readout** - `getElevation(lngLat)`
+  - **Terrain picking** - `pick(x, y)`
+  - **Elevation profiles** - `getElevationProfile(from, to)`
 
 ###
 ###
@@ -61,7 +69,7 @@ npm install @geozelot/treelet three
 
 ### CDN / Script Tag
 
-For direct browser use without a bundler, use the **standalone** build which bundles Three.js:
+For direct browser use without a bundler, use the **standalone** build which bundles Three.js and inlines the tile worker (no extra files to serve):
 
 ```html
 <script src="https://unpkg.com/@geozelot/treelet/dist/treelet.cdn.standalone.js"></script>
@@ -89,7 +97,7 @@ map.addBaseLayer({
   layerName: 'AWS Terrain',
   layerSource: new XYZSource({
     url: 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png',
-    tileSize: 512,
+    tileSize: 256,
     maxZoom: 15,
   }),
   decoder: 'terrarium',
@@ -99,10 +107,9 @@ map.addDrapeLayer({
   layerName: 'OpenStreetMap',
   layerSource: new XYZSource({
     url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-    tileSize: 512,
+    tileSize: 256,
     maxZoom: 19,
   }),
-  lodOffset: 2, // fetch drape 1 zoom finer than elevation (4 sub-tiles per slot)
 });
 
 map.start();
@@ -138,20 +145,37 @@ Library version string (static).
 | `initCenter` | `LngLat` | *required* | Initial map center `{ lng, lat }` |
 | `initZoom` | `number` | *required* | Initial zoom level |
 | `minZoom` | `number` | `0` | Minimum allowed zoom |
-| `maxZoom` | `number` | `20` | Maximum allowed zoom |
+| `maxZoom` | `number` | `20` | Maximum allowed zoom (≤ 22) |
 | `mapDisplay` | `MapDisplayOptions` | `{}` | Rendering options (see below) |
 | `guiDisplay` | `GuiDisplayOptions` | `{}` | UI widget options (see below) |
-| `workerCount` | `number` | `navigator.hardwareConcurrency` | Web Worker pool size |
+| `workerCount` | `number` | cores − 1, clamped to 1–4 | Web Worker pool size |
+| `workerUrl` | `string \| URL` | inlined | URL of `dist/treelet.worker.js`, for CSPs without `worker-src blob:` |
+
+Zoom follows the standard web-map scale: at zoom `z` the world spans `256 · 2^z` CSS pixels at the orbit target, as in Leaflet or Mapbox. Zoom is fractional. Options are validated on construction; invalid values throw a descriptive error.
 
 ##### MapDisplayOptions
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `atlasSegments` | `number` | `64` | Mesh subdivisions per tile |
+| `atlasSegments` | `number` | `64` | Mesh subdivisions per tile (even, ≤ `slotSize`) |
 | `antialias` | `boolean` | `true` | WebGL antialiasing |
 | `worldScale` | `number` | `40075.02` | CRS meters to scene units scale |
 | `minPitch` | `number` | `25` | Minimum pitch (most tilted) in degrees |
 | `maxPitch` | `number` | `90` | Maximum pitch (top-down) in degrees |
+| `tileCacheSize` | `number` | `256` | Tiles kept in GPU memory (64–2048); up to 60% of them can be on screen. ~0.5 MB per tile, plus ~0.35 MB with a drape active (~1.4 MB with `drapeSlotSize: 512`) |
+| `atlasSize` | `number` | — | *Deprecated*: use `tileCacheSize`. Holds `(atlasSize / slotSize)²` tiles; the former default `4096` equals `tileCacheSize: 256` |
+| `slotSize` | `number` | `256` | Elevation texels per tile edge |
+| `drapeSlotSize` | `number` | `slotSize` | Drape pixels per tile edge. Each tile fetches imagery as fine as this holds: with 256-px source tiles, `512` loads one zoom finer (4 source tiles per terrain tile), sharp on high-DPI screens at ~4× the drape memory and requests |
+| `maxInstances` | `number` | `512` | Tile budget per frame (capped at 60% of `tileCacheSize`) |
+| `maxConcurrentFetches` | `number` | `12` | Concurrent requests per layer |
+| `maxPixelRatio` | `number` | `2` | Device-pixel-ratio cap |
+| `lodQuality` | `number` | `1` | LOD multiplier: > 1 finer tiles, < 1 coarser |
+| `morphWidth` | `number` | `0.3` | Fraction of each LOD range used for geomorphing |
+| `horizonDistance` | `number` | `16` | Visible range as a multiple of the camera's height (what the zoom and tilt give it above the terrain it looks at, or its actual height where that is more; 4–64); terrain fades into the horizon there |
+| `fog` | `boolean` | `true` | Atmospheric haze over distant terrain; when `false`, terrain stays clear and only blends into the horizon over the last 20% of the range |
+| `renderOnDemand` | `boolean` | `true` | Render only when the view, data or settings change |
+
+The defaults fit a typical view in well under the tile budget at any screen size. Treelet logs a one-time note when a view needs more tiles than `tileCacheSize` allows (it then reduces distant detail rather than leaving holes). To raise the limit, set a larger `tileCacheSize`, e.g. `512`; memory grows with it.
 
 ##### GuiDisplayOptions
 
@@ -160,6 +184,9 @@ Library version string (static).
 | `enabled` | `boolean` | `true` | Show compass + layer panel |
 | `compassPosition` | `UICorner` | `'top-right'` | Compass widget corner |
 | `layerPosition` | `UICorner` | `'bottom-right'` | Layer panel corner |
+| `glass` | `boolean` | `false` | Frosted-glass controls (translucent, map blurred behind); costs some GPU time while the map redraws |
+
+The controls open on mouse hover, on a tap (touch screens; a tap elsewhere closes them) and with the keyboard (Tab to a control, Escape to close). On a touch screen the first tap on the compass opens its panel and the next one resets the orientation. On narrow maps the compass panel drops its Map and Viewport sections and the layer panel shrinks to fit.
 
 ---
 
@@ -171,15 +198,36 @@ The main map class. Extends `EventEmitter`.
 
 | Method | Returns | Description |
 |---|---|---|
-| `setView(center, zoom)` | `this` | Set map center and zoom |
-| `getCenter()` | `LngLat` | Get current map center |
-| `getZoom()` | `number` | Get current zoom level |
+| `setView(center, zoom)` | `this` | Set map center and zoom (keeps pitch and bearing) |
+| `getCenter()` | `LngLat` | Get the orbit target (the point the camera looks at) |
+| `getZoom()` | `number` | Get current (fractional) zoom |
 | `getBounds()` | `{ sw, ne } \| null` | Get visible bounding box |
-| `getTileCount()` | `number` | Get number of cached tiles |
+| `getTileCount()` | `number` | Number of terrain tiles drawn in the last frame |
+| `getStats()` | `TreeletStats` | Tiles, atlas use, pending and failed requests |
+| `setLodQuality(q)` | `this` | Change the LOD multiplier at runtime |
+| `setHorizonDistance(factor)` | `this` | Visible range as a multiple of the camera's height (4–64) |
+| `getHorizonDistance()` | `number` | Get the visible range factor |
+| `setFog(enabled)` | `this` | Toggle atmospheric haze over distant terrain |
+| `requestRender()` | `this` | Force a redraw (with `renderOnDemand`) |
+
+#### Inspection
+
+| Method | Returns | Description |
+|---|---|---|
+| `getElevation(lngLat)` | `number \| null` | Elevation in meters from the finest loaded tile |
+| `pick(x, y)` | `TerrainPick \| null` | Terrain hit `{ lngLat, elevation }` under container-relative pixel `(x, y)` |
+| `getElevationProfile(from, to, samples?)` | `ProfileSample[]` | `{ lngLat, distance, elevation }` samples along a line (distance in meters) |
+
+```ts
+map.on('moveend', () => {
+  const pick = map.pick(200, 150);
+  if (pick) console.log(`${pick.elevation.toFixed(1)} m`, pick.lngLat);
+});
+```
 
 #### Base Layers
 
-Only one base layer is active at a time. The active base layer provides elevation data for the terrain mesh.
+Only one base layer is active at a time. The active base layer provides elevation data for the terrain mesh. The first layer added becomes active; later ones only become active with `setActiveBaseLayer()` or `layerDisplay: { visible: true }`.
 
 | Method | Returns | Description |
 |---|---|---|
@@ -195,11 +243,11 @@ Only one base layer is active at a time. The active base layer provides elevatio
 | `layerName` | `string` | *required* | Display name |
 | `layerSource` | `TileSource` | *required* | Tile source instance (`XYZSource`, `WMTSSource`, etc.) |
 | `decoder` | `DecoderName \| ElevationDecoder` | `'terrain-rgb'` | Elevation decoder |
-| `layerDisplay` | `BaseLayerDisplay` | `{}` | `{ visible?, exaggeration? }` |
+| `layerDisplay` | `BaseLayerDisplay` | `{}` | `{ visible?, exaggeration? }` (`visible: true` activates the layer on add) |
 | `terrainDisplay` | `TerrainDisplay` | `{}` | Isoline, color ramp defaults (see below) |
 | `layerAttribution` | `string` | source attribution | Attribution text |
 | `minZoom` | `number` | `0` | Minimum zoom level |
-| `maxZoom` | `number` | `22` | Maximum zoom level |
+| `maxZoom` | `number` | `22` | Maximum zoom level (≤ 22) |
 
 ##### TerrainDisplay
 
@@ -208,10 +256,11 @@ Only one base layer is active at a time. The active base layer provides elevatio
 | `isoplethInterval` | `number` | `100` | Contour line spacing in meters |
 | `isolineStrength` | `number` | `1.5` | Contour line thickness |
 | `isolineColor` | `[r, g, b]` | `[0.12, 0.08, 0.04]` | Contour color (0-1 each) |
-| `rampInterpolationRange` | `[min, max]` | `[0, 4000]` | Elevation range for color mapping |
+| `rampInterpolationRange` | `[min, max] \| 'auto'` | `[0, 4000]` | Elevation range for color mapping; `'auto'` fits the visible data |
+| `slopeRange` | `[min, max]` | `[0, 60]` | Slope range in degrees for slope coloring |
 | `rampDefaultElevation` | `ColorRamp` | `'hypsometric'` | Default ramp for elevation mode |
 | `rampDefaultSlope` | `ColorRamp` | `'viridis'` | Default ramp for slope mode |
-| `rampDefaultAspect` | `ColorRamp` | `'inferno'` | Default ramp for aspect mode |
+| `rampDefaultAspect` | `ColorRamp` | `'cyclic'` | Default ramp for aspect mode |
 
 #### Drape Layers
 
@@ -241,7 +290,7 @@ Drape layers render raster imagery onto the terrain mesh. Only one drape (extern
 |---|---|---|---|
 | `layerName` | `string` | *required* | Display name |
 | `layerSource` | `TileSource` | *required* | Tile source instance |
-| `lodOffset` | `1 \| 2 \| 3` | `1` | Drape zoom offset vs elevation (2 = 4 sub-tiles, 3 = 16) |
+| `lodOffset` | `1 \| 2 \| 3` | — | *Deprecated, ignored*: imagery detail follows `mapDisplay.drapeSlotSize` |
 | `layerDisplay` | `DrapeLayerDisplay` | `{}` | `{ visible?, opacity?, blendMode?, hillshadeStrength? }` |
 | `layerAttribution` | `string` | source attribution | Attribution text |
 | `minZoom` | `number` | `0` | Minimum zoom level |
@@ -255,8 +304,8 @@ Elevation-derived visualization modes:
 |---|---|
 | `'wireframe'` | Mesh wireframe (normals-colored or flat white) |
 | `'elevation'` | Elevation-colored with lighting |
-| `'slope'` | Slope angle visualization |
-| `'aspect'` | Cardinal direction coloring |
+| `'slope'` | Slope angle in degrees (true scale, unaffected by exaggeration) |
+| `'aspect'` | Downslope bearing (0° = north), flat ground in neutral gray |
 | `'contours'` | Elevation coloring with contour line overlay |
 
 #### Visualization
@@ -265,6 +314,10 @@ Elevation-derived visualization modes:
 |---|---|---|
 | `setColorRamp(ramp)` | `this` | Set color ramp for current BaseDrape mode |
 | `getColorRamp()` | `ColorRamp` | Get current color ramp |
+| `setElevationRange(range)` | `this` | Elevation ramp range `[min, max]` in meters, or `'auto'` |
+| `getElevationRange()` | `[min, max] \| 'auto'` | Get elevation ramp range |
+| `setSlopeRange(min, max)` | `this` | Slope ramp range in degrees |
+| `getSlopeRange()` | `[min, max]` | Get slope ramp range |
 | `setExaggeration(value)` | `this` | Set vertical exaggeration on active base layer |
 | `setExaggeration(handle, value)` | `this` | Set exaggeration on a specific base layer |
 | `getExaggeration()` | `number` | Get exaggeration factor |
@@ -276,9 +329,9 @@ Elevation-derived visualization modes:
 | `getIsolineColor()` | `[r, g, b]` | Get contour color |
 | `setWireframeWhite(white)` | `this` | Toggle wireframe flat-white mode |
 | `getWireframeWhite()` | `boolean` | Get wireframe white state |
-| `setSunAzimuth(degrees)` | `this` | Set sun azimuth for hillshade lighting |
+| `setSunAzimuth(degrees)` | `this` | Set sun azimuth for hillshade lighting (default 315°, north-west) |
 | `getSunAzimuth()` | `number` | Get sun azimuth |
-| `setSunAltitude(degrees)` | `this` | Set sun altitude for hillshade lighting |
+| `setSunAltitude(degrees)` | `this` | Set sun altitude for hillshade lighting (default 45°) |
 | `getSunAltitude()` | `number` | Get sun altitude |
 
 ##### ColorRamp
@@ -289,8 +342,11 @@ Elevation-derived visualization modes:
 | `'viridis'` | Purple, teal, yellow (perceptually uniform) |
 | `'inferno'` | Black, purple, orange, white (high contrast) |
 | `'grayscale'` | Black to white |
+| `'cyclic'` | Hue wheel for circular data (aspect default) |
 
 #### Camera
+
+The camera keeps its height while you pan or zoom. The orbit target is the terrain at the screen center, so the zoom follows the distance to it: panning onto a mountain zooms in. The camera only rises where it would otherwise touch the terrain (at once, so the terrain never cuts into the view), or, smoothly and keeping its pitch, where moving brings the terrain at the screen center closer than half the zoom's distance. Rotating into a mountain lifts the camera over it, still looking at the same point. Once past the obstacle, the camera glides back down until it shows your zoom again, but never below the height you were at, so it doesn't dive into valleys.
 
 | Method | Returns | Description |
 |---|---|---|
@@ -306,23 +362,25 @@ Elevation-derived visualization modes:
 |---|---|---|
 | `start()` | `this` | Begin rendering and tile loading |
 | `stop()` | `this` | Pause rendering |
-| `destroy()` | `void` | Clean up all resources |
+| `destroy()` | `void` | Release all resources, including the WebGL context (idempotent) |
 
 #### Events
 
 ```ts
-map.on('ready', () => { /* initial tiles loaded */ });
-map.on('move', ({ center }) => { /* camera moving */ });
+map.on('ready', () => { /* map started */ });
+map.on('move', ({ center }) => { /* every frame the camera moves */ });
+map.on('tileerror', ({ coord, layer, error }) => { /* request failed; retried with backoff */ });
 ```
 
 | Event | Data | Description |
 |---|---|---|
-| `'ready'` | `{}` | Initial tiles loaded |
-| `'zoom'` | `{ zoom }` | Zoom level changed |
-| `'move'` | `{ center: LngLat }` | Camera moving |
-| `'moveend'` | `{ center, zoom }` | Camera movement complete |
-| `'tileload'` | `{ coord: TileCoord }` | Tile loaded |
-| `'tileunload'` | `{ coord: TileCoord }` | Tile unloaded |
+| `'ready'` | `{}` | Map started |
+| `'zoom'` | `{ zoom }` | Zoom changed |
+| `'move'` | `{ center: LngLat }` | Camera moved (once per frame) |
+| `'moveend'` | `{ center, zoom }` | Camera movement settled (debounced) |
+| `'tileload'` | `{ coord: TileCoord }` | Elevation tile loaded |
+| `'tileunload'` | `{ coord: TileCoord }` | Elevation tile evicted |
+| `'tileerror'` | `{ coord, layer, error }` | Tile request failed (`layer`: `'elevation' \| 'drape'`) |
 | `'layeradd'` | `{ id }` | Layer added |
 | `'layerremove'` | `{ id }` | Layer removed |
 | `'layerchange'` | `{}` | Layer configuration changed |
@@ -338,15 +396,22 @@ Layers accept `TileSource` instances via the `layerSource` option. Construct sou
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `url` | `string` | *required* | Endpoint URL or template |
-| `tileSize` | `number` | `256` | Tile pixel size |
+| `tileSize` | `number` | `256` | Pixel size of the source's tiles (with `retina`, of the 1× tiles). Drapes use it to decide how many source tiles fill a slot until the first tile shows the real size; a mismatch is logged |
 | `minZoom` | `number` | `0` | Minimum zoom level |
 | `maxZoom` | `number` | `22` | Maximum zoom level |
-| `attribution` | `string` | `''` | Attribution text |
-| `accessToken` | `string` | - | Access token appended to requests |
+| `attribution` | `string` | `''` | Attribution text (simple HTML links allowed; sanitized) |
+| `accessToken` | `string` | - | Substituted for `{accessToken}`, otherwise appended as `access_token=` |
+| `headers` | `Record<string, string>` | - | Extra request headers (e.g. `Authorization`) |
+| `credentials` | `RequestCredentials` | `'same-origin'` | Fetch credentials mode |
+| `referrerPolicy` | `ReferrerPolicy` | - | Fetch referrer policy |
+| `retina` | `boolean \| string` | `''` | Value for `{r}`: `true` → `'@2x'` on high-DPI screens |
+| `maxConcurrency` | `number` | `12` | Concurrent requests for this source |
+
+Tiles answering **404 / 410 / 204** (or an empty body) are treated as nonexistent: elevation renders at sea level and drapes fall back to coarser imagery. Other failures are retried with exponential backoff (1 s → 60 s), never in a loop.
 
 #### XYZ Source
 
-Standard slippy-map tiles with `{z}/{x}/{y}` URL placeholders.
+Standard slippy-map tiles. Placeholders: `{z}`, `{x}`, `{y}`, `{-y}` (TMS row), `{s}` (subdomain), `{quadkey}` (Bing), `{r}` (retina suffix), `{accessToken}`.
 
 ```ts
 import { XYZSource } from '@geozelot/treelet';
@@ -397,6 +462,29 @@ const source = new WMTSSource({
 | `format` | `string` | `'image/png'` | Image format |
 | `subdomains` | `string[]` | `[]` | Subdomain rotation via `{s}` |
 
+#### WMS Source (plugin)
+
+```ts
+// Source lives in the repository under plugins/source/wms (not part of the npm bundle)
+import { WMSSource } from './plugins/source/wms';
+
+const source = new WMSSource({
+  url: 'https://example.com/geoserver/wms',
+  layers: 'dem',
+  crs: 'EPSG:4326',
+  version: '1.3.0', // lat/lon axis order for EPSG:4326
+});
+```
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `layers` | `string` | *required* | WMS layer list |
+| `styles` | `string` | `''` | WMS styles |
+| `format` | `string` | `'image/png'` | Image format |
+| `crs` | `string` | `'EPSG:3857'` | `EPSG:3857`, `EPSG:900913`, `EPSG:4326` or `CRS:84` |
+| `version` | `'1.1.1' \| '1.3.0'` | `'1.1.1'` | WMS version |
+| `transparent` | `boolean` | `true` | Request transparent images |
+
 ---
 
 ### Elevation Decoders
@@ -409,9 +497,11 @@ Built-in decoders for common DEM tile formats:
 | `'mapbox'` | Alias for `terrain-rgb` | 0.1 m |
 | `'terrarium'` | `R×256 + G + B/256 - 32768` | ~0.004 m |
 
+Pixels with alpha 0 are treated as **nodata** for every decoder. Images are decoded with color management and premultiplication disabled, so encoded RGB values reach the decoder bit-exact.
+
 #### Custom Decoder
 
-Pass a decoder function directly, or register one globally by name:
+A decoder receives the tile's RGBA pixels and returns one elevation per pixel (meters, `NaN` for nodata). Decoders run inside the workers: they must be self-contained pure functions (they are serialized and compiled there, so the page's CSP must allow `unsafe-eval` for custom decoders).
 
 ```ts
 import { registerDecoder, XYZSource } from '@geozelot/treelet';
@@ -420,11 +510,15 @@ import { registerDecoder, XYZSource } from '@geozelot/treelet';
 map.addBaseLayer({
   layerName: 'Custom DEM',
   layerSource: new XYZSource({ url: '...' }),
-  decoder: (r, g, b, a) => r * 100 + g,
+  decoder: (pixels, width, height) => {
+    const out = new Float32Array(width * height);
+    for (let i = 0; i < out.length; i++) out[i] = pixels[i * 4] * 10 - 500;
+    return out;
+  },
 });
 
 // Or register globally by name for reuse
-registerDecoder('myformat', (r, g, b, a) => r * 100 + g);
+registerDecoder('myformat', (pixels, width, height) => { /* ... */ return new Float32Array(width * height); });
 map.addBaseLayer({
   layerName: 'Custom DEM',
   layerSource: new XYZSource({ url: '...' }),
@@ -443,10 +537,17 @@ interface TileCoord { z: number; x: number; y: number }
 interface TileBounds { west: number; south: number; east: number; north: number }
 
 type BaseDrapeMode = 'wireframe' | 'elevation' | 'slope' | 'aspect' | 'contours';
-type ColorRamp = 'hypsometric' | 'viridis' | 'inferno' | 'grayscale';
+type ColorRamp = 'hypsometric' | 'viridis' | 'inferno' | 'grayscale' | 'cyclic';
 type BlendMode = 'normal' | 'hillshade' | 'softlight';
-type DecoderType = 'terrain-rgb' | 'mapbox' | 'terrarium' | 'custom';
+type DecoderName = 'terrain-rgb' | 'mapbox' | 'terrarium';
 type UICorner = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right';
+
+interface TerrainPick { lngLat: LngLat; elevation: number }
+interface ProfileSample { lngLat: LngLat; distance: number; elevation: number | null }
+interface TreeletStats {
+  tiles: number; drawCalls: number; atlasUsed: number; atlasCapacity: number;
+  drapeTiles: number; pendingElevation: number; pendingDrape: number; failedTiles: number;
+}
 ```
 
 ---
@@ -469,6 +570,7 @@ For advanced use, Treelet re-exports its internal building blocks:
 | `RawRGBDecoder`, `MapboxDecoder`, `TerrariumDecoder` | Built-in decoder instances |
 | `registerDecoder()`, `resolveDecoder()` | Decoder registration and lookup |
 | `TreeletPanel`, `TreeletCompass`, `TreeletAttribution` | UI components |
+| `defineTreeletElements()` | Register the UI custom elements (done automatically by `Treelet`) |
 
 ---
 
@@ -476,29 +578,33 @@ For advanced use, Treelet re-exports its internal building blocks:
 
 | Input | Action |
 |---|---|
-| Left-click drag | Pan |
-| Scroll wheel | Zoom |
-| Right-click drag | Orbit (rotate + tilt) |
+| Left-click drag / one-finger drag | Pan |
+| Scroll wheel / pinch | Zoom (towards the cursor) |
+| Right-click drag / two-finger rotate | Orbit (rotate + tilt) |
+| Arrow keys (canvas focused) | Pan |
 | Compass click | Reset orientation |
 
 ## Bundles
 
-Treelet ships two minified bundles:
+Treelet ships three minified files:
 
 | File | Format | Three.js | Use case |
 |---|---|---|---|
 | `treelet.es.js` | ESM | External | Bundlers (Vite, Webpack, Rollup) |
 | `treelet.cdn.standalone.js` | IIFE | Included | `<script>` tag, CDN, no dependencies |
+| `treelet.worker.js` | ESM worker | - | Optional: self-hosted worker for strict CSP (`workerUrl`) |
 
-**Slim** (`treelet.es.js`) - ~140 KB minified. Three.js is a peer dependency; install it alongside treelet via npm. Best for projects that already use Three.js or want control over the Three.js version.
+**Slim** (`treelet.es.js`) - ~240 KB minified. Three.js is a peer dependency; install it alongside treelet via npm. Best for projects that already use Three.js or want control over the Three.js version.
 
-**Standalone** (`treelet.cdn.standalone.js`) - ~580 KB minified. Bundles only the Three.js modules treelet actually uses (tree-shaken). Drop-in ready for CDN or direct `<script>` tag usage - zero external dependencies.
+**Standalone** (`treelet.cdn.standalone.js`) - ~665 KB minified. Bundles only the Three.js modules treelet actually uses (tree-shaken). Drop-in ready for CDN or direct `<script>` tag usage - zero external dependencies.
 
-Both bundles require the `tileWorker` asset file (`dist/assets/tileWorker-*.js`) to be served from the same origin.
+Both bundles **inline the tile worker** and start it from a `blob:` URL, so nothing else needs to be served and they work from any CDN or bundler. If your Content-Security-Policy does not allow `worker-src blob:`, serve `dist/treelet.worker.js` from your own origin and pass its URL as `workerUrl`.
+
+The package is side-effect free (`"sideEffects": false`) and safe to import during server-side rendering; the map itself needs a browser.
 
 ## Browser Support
 
-Modern browsers with **WebGL2** and **Web Workers**. Requires ES2020+.
+Modern browsers with **WebGL2**, module **Web Workers** and **OffscreenCanvas** (Chrome/Edge 80+, Firefox 105+, Safari 16.4+). Requires ES2022.
 
 
 ## License

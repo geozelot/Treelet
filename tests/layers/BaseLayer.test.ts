@@ -211,7 +211,7 @@ describe('BaseLayer display defaults', () => {
     expect(layer.terrainDisplay.rampInterpolationRange).toEqual([0, 4000]);
     expect(layer.terrainDisplay.rampDefaultElevation).toBe('hypsometric');
     expect(layer.terrainDisplay.rampDefaultSlope).toBe('viridis');
-    expect(layer.terrainDisplay.rampDefaultAspect).toBe('inferno');
+    expect(layer.terrainDisplay.rampDefaultAspect).toBe('cyclic');
   });
 
   it('overrides selected terrainDisplay fields while keeping the rest at defaults', () => {

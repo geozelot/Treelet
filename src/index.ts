@@ -19,6 +19,9 @@ export type {
   BlendMode,
   UICorner,
   TreeletEventMap,
+  TerrainPick,
+  ProfileSample,
+  TreeletStats,
 } from './core/types';
 
 // Re-export core classes
@@ -30,7 +33,7 @@ export { CameraController } from './scene/CameraController';
 export type { CameraState } from './scene/CameraController';
 
 // Re-export source architecture
-export type { TileSource } from './sources/TileSource';
+export type { TileSource, TileRequestInit } from './sources/TileSource';
 export type { TileSourceOptions, XYZSourceOptions, WMTSSourceOptions } from './sources/types';
 export { UrlTileSource } from './sources/UrlTileSource';
 export { XYZSource } from './sources/XYZSource';
@@ -69,3 +72,4 @@ export {
 export { TreeletPanel } from './ui/TreeletPanel';
 export { TreeletCompass } from './ui/TreeletCompass';
 export { TreeletAttribution } from './ui/TreeletAttribution';
+export { defineTreeletElements } from './ui/elements';

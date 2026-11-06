@@ -6,6 +6,9 @@
 // ============================================================================
 
 import type { TileCoord } from '../core/types';
+import type { TileRequestInit } from '../workers/protocol';
+
+export type { TileRequestInit } from '../workers/protocol';
 
 /**
  * Core interface for all tile data sources.
@@ -21,6 +24,13 @@ export interface TileSource {
 
   /** Tile pixel size (e.g. 256, 512). */
   readonly tileSize: number;
+
+  /**
+   * Image pixels per `tileSize` pixel, e.g. 2 for `@2x` retina tiles.
+   * Default 1. (Drapes measure the real image size once a tile has loaded;
+   * this only sets the first guess.)
+   */
+  readonly pixelRatio?: number;
 
   /** Minimum zoom level supported by this source. */
   readonly minZoom: number;
@@ -44,9 +54,14 @@ export interface TileSource {
    * Scheduling hints for the fetch pipeline.
    *
    * `maxConcurrentFetches` - caps parallel tile fetches for this source.
-   * `deferWrites` - when true, atlas writes are queued and drained at a
-   *   capped rate per frame to avoid main-thread stalls from burst-completing
-   *   fetches (e.g. byte-range sources hitting a single server).
+   * `deferWrites` - retained for compatibility; ignored since decoding and
+   *   resampling moved into the workers (atlas writes are now cheap copies).
    */
   getSchedulingHints(): { maxConcurrentFetches: number; deferWrites: boolean };
+
+  /**
+   * Optional request options (headers, credentials, referrer policy) applied
+   * to every tile fetch. Must be structured-cloneable (sent to workers).
+   */
+  getRequestInit?(): TileRequestInit | undefined;
 }

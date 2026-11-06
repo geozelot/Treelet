@@ -94,8 +94,8 @@ describe('WMTSSource KVP mode', () => {
     expect(url).toContain('VERSION=1.0.0');
     expect(url).toContain('LAYER=dem');
     expect(url).toContain('STYLE=default');
-    expect(url).toContain('TILEMATRIXSET=EPSG:3857');
-    expect(url).toContain('FORMAT=image/png');
+    expect(url).toContain('TILEMATRIXSET=EPSG%3A3857');
+    expect(url).toContain('FORMAT=image%2Fpng');
     expect(url).toContain('TILEMATRIX=5');
     expect(url).toContain('TILEROW=11');
     expect(url).toContain('TILECOL=9');
@@ -112,7 +112,7 @@ describe('WMTSSource KVP mode', () => {
     const url = src.getTileUrl({ z: 0, x: 0, y: 0 });
     expect(url).toContain('STYLE=grey');
     expect(url).toContain('TILEMATRIXSET=GoogleMapsCompatible');
-    expect(url).toContain('FORMAT=image/jpeg');
+    expect(url).toContain('FORMAT=image%2Fjpeg');
   });
 
   it('uses "&" as separator when the base URL already contains a query string', () => {

@@ -1,49 +1,49 @@
 // ============================================================================
 // treelet.js - Instanced Terrain Renderer
 //
-// Main orchestrator for the instanced terrain system.
-// Renders ALL visible tiles in a single instanced draw call
-// from a unified hierarchical atlas.
+// Orchestrates the terrain pipeline and renders ALL visible tiles in a single
+// instanced draw call.
 //
-// Architecture:
-//   Camera move → update(nadir, zoom)
-//     → TilePool: LOD selection, instance buffer build
-//     → UnifiedAtlas: touch visible tiles (LRU), advance frame
-//     → InstancedBufferGeometry: upload per-instance attributes
-//     → GPU: single drawArraysInstanced → VTF displacement, per-pixel normals
+// Per frame (update):
+//   GPU flush   → uploads elevation layers / stitched edges / drape mip chains
+//                 that arrived since the last frame
+//   TilePool    → CDLOD selection (screen-space error, budget-fitted)
+//   Instances   → own data, ancestor fallback, geomorph parent and drape refs,
+//                 relative to a floating render origin (float32-safe)
+//   Pump        → launch / cancel fetches by priority, respecting backoff
 //
-// Tile fetching:
-//   fetchTiles() → TilePool.missingTiles (sorted by distance)
-//     → WorkerPool: fetch + decode → Float32Array
-//     → UnifiedAtlas: allocate slot, write elevation data
+// Fetching (FetchChannel + WorkerPool):
+//   Elevation: worker fetch → decode → resample → ElevationAtlas.write (+stitch)
+//   Drape:     worker fetch → composite → mips → DrapeAtlas.write
+// Completions only mark state dirty and request a render; they never re-enter
+// the scheduler synchronously, so failures can't spin.
 // ============================================================================
 
 import {
   Mesh,
   InstancedBufferGeometry,
-  InstancedBufferAttribute,
+  InstancedInterleavedBuffer,
+  InterleavedBufferAttribute,
   DynamicDrawUsage,
-  Vector3,
   type ShaderMaterial,
   type WebGLRenderer,
+  type Vector3,
 } from 'three';
-import type { TileCoord, ShaderMode, BlendMode, ColorRamp, WorldPoint } from '../core/types';
+import type { TileCoord, ShaderMode, BlendMode, ColorRamp, TreeletStats } from '../core/types';
 import type { TileGrid } from '../tiles/TileGrid';
 import type { WorkerPool } from '../workers/WorkerPool';
-import type { SceneManager } from '../scene/SceneManager';
 import type { LayerRegistry } from '../layers/LayerRegistry';
+import type { BaseLayer } from '../layers/BaseLayer';
 import type { DrapeLayer } from '../layers/DrapeLayer';
-import { packTileKey, parseTileKey, tileKeyStr, NO_TILE_KEY } from '../tiles/TileIndex';
-import { buildTileGrid, TILE_GRID_RESOLUTION } from './TileGeometry';
-import { UnifiedAtlas, type SourceRegion } from './UnifiedAtlas';
-import { UnifiedDrapeAtlas } from './UnifiedDrapeAtlas';
-import { TilePool, INSTANCE_FLOATS } from './TilePool';
-import {
-  DEFAULT_ATLAS_SIZE,
-  DEFAULT_SLOT_SIZE,
-  DEFAULT_MAX_INSTANCES,
-  DEFAULT_MAX_CONCURRENT_FETCHES,
-} from '../core/constants';
+import type { DrapePart } from '../workers/protocol';
+import { packTileKey, tileKeyStr, parseTileKey, NO_TILE_KEY } from '../tiles/TileIndex';
+import { MAX_TILE_ZOOM, ATLAS_VISIBLE_FRACTION } from '../core/constants';
+import { buildTileGrid } from './TileGeometry';
+import { ElevationAtlas, type SlotInfo } from './ElevationAtlas';
+import { DrapeAtlas } from './DrapeAtlas';
+import { ArrayTextureWriter } from './ArrayTextureWriter';
+import { TilePool, type SelectedTile, type CullRegion, type HeightBounds } from './TilePool';
+import { FetchChannel } from './FetchChannel';
 import {
   createTerrainMaterial,
   setTerrainMode,
@@ -54,311 +54,273 @@ import {
   setTerrainIsolineColor,
   setTerrainBaseWhite,
   setTerrainElevationRange,
-  setTerrainElevationScale,
+  setTerrainSlopeRange,
+  setTerrainExaggeration,
   setTerrainSunDirection,
   setTerrainAtlas,
   setTerrainDrape,
   setTerrainDrapeBlendMode,
   setTerrainHillshadeStrength,
   setTerrainDrapePlaceholder,
-  setTerrainMorphWidth,
+  setTerrainView,
+  setTerrainFog,
 } from '../shaders/TerrainMaterial';
 
-/** Time budget (ms) for deferred elevation tile writes per animation frame.
- *  Used for sources where fetches burst-complete simultaneously.
- *  Each write involves a ~5-15ms bilinear resample; 8ms leaves headroom
- *  for rendering within a 16.67ms frame budget at 60 FPS. */
-const WRITE_BUDGET_MS = 8;
+/** Floats per instance: world(2) size(1) elev(4) parent(4) drape(4) morph(2). */
+export const INSTANCE_STRIDE = 17;
 
-/** Prefetch lookahead multiplier: extend extent by velocity × this many frames. */
+/** Preferred minimum CDLOD range factor (wider, smoother morph zones). */
+const PREFERRED_RANGE_FACTOR = 4;
+
+/**
+ * Drape tiles uploaded per frame at 256² slots (each a full mip chain,
+ * ~350 KB); fewer for larger slots, so a frame uploads about as many bytes.
+ */
+const DRAPE_UPLOADS_PER_FRAME = 8;
+
+/** In-flight requests no longer needed for this long are cancelled. */
+const STALE_REQUEST_GRACE_MS = 400;
+
+/** Minimum interval between aggregated fetch-error log lines per pipeline. */
+const ERROR_LOG_INTERVAL_MS = 5000;
+
+/** Prefetch lookahead: camera motion is extrapolated this many frames ahead. */
 const PREFETCH_LOOKAHEAD_FRAMES = 10;
 
-/** Base margin (in tile widths) added to frustum planes to compensate for
- *  terrain elevation displacement and far-corner horizon-clamping jitter.
- *  ~10% of the visible extent at typical views. */
-const FRUSTUM_BASE_MARGIN_TILES = 3;
+/** Uncovered tiles first load their ancestor this many levels up: one
+ *  request then fills a whole region (e.g. the horizon after a fast pan). */
+const COARSE_FALLBACK_LEVELS = 3;
 
-/** A sub-tile that hasn't been launched yet (stored in CompositeTracker). */
-interface PendingSubTile {
-  subKey: number;
-  regionX: number;
-  regionY: number;
-  subSize: number;
-  fetchFn: () => Promise<ImageBitmap | null>;
+/** Assumed elevation range (meters) of tiles with no loaded data or ancestor. */
+const UNKNOWN_MIN_ELEVATION_M = -500;
+const UNKNOWN_MAX_ELEVATION_M = 9000;
+
+export interface TerrainRendererOptions {
+  tileGrid: TileGrid;
+  workerPool: WorkerPool;
+  renderer: WebGLRenderer;
+  layerRegistry: LayerRegistry;
+  metersToScene: number;
+  segments: number;
+  /** Tiles held in GPU memory (elevation, and drape imagery when active). */
+  tileCacheSize: number;
+  slotSize: number;
+  drapeSlotSize: number;
+  maxInstances: number;
+  maxConcurrentFetches: number;
+  lodQuality: number;
+  morphWidth: number;
+  /** Ask the host to render (and call update) on the next animation frame. */
+  requestRender: () => void;
+  onTileLoad?: (coord: TileCoord) => void;
+  onTileUnload?: (coord: TileCoord) => void;
+  onTileError?: (coord: TileCoord, layer: 'elevation' | 'drape', error: string) => void;
 }
 
-/** Tracks in-flight sub-tile composites for a single elevation slot (lodOffset > 1). */
-interface CompositeTracker {
-  /** Sub-tiles currently in-flight. */
-  inflight: number;
-  /** Sub-tiles that have completed (success or failure). */
-  completed: number;
-  /** Total sub-tiles needed for this slot (divisor²). */
-  total: number;
-  /** Sub-tiles not yet launched (waiting for concurrency slots). */
-  pending: PendingSubTile[];
-  /** Atlas slot pixel coordinates (shared with elevation). */
-  atlasX: number;
-  atlasY: number;
-  tilePixels: number;
-  /** The target drape zoom level for this composite. */
-  effectiveZ: number;
+/** Camera state for one frame (world units). */
+export interface FrameView {
+  cameraX: number;
+  cameraY: number;
+  cameraZ: number;
+  targetX: number;
+  targetY: number;
+  targetZ: number;
+  /** Camera zoom (layer visibility bounds). */
+  zoom: number;
+  /** Vertical focal length in CSS pixels: (viewport height / 2) / tan(fov / 2). */
+  focalLength: number;
+  exaggeration: number;
+  /** Visible range: ground distance from the camera where terrain ends (fully hazed). */
+  horizon: number;
+  /** The camera's four side planes in world space, inward: (nx, ny, nz, d) × 4. */
+  frustum: Float64Array;
+  /** The view jumped (setView): don't extrapolate motion. */
+  teleported: boolean;
+}
+
+interface ErrorLog {
+  count: number;
+  lastLogged: number;
+  latest: string;
 }
 
 export class TerrainRenderer {
-  private readonly tileGrid: TileGrid;
-  private readonly workerPool: WorkerPool;
-  private readonly layerRegistry: LayerRegistry;
-  private readonly sceneManager: SceneManager;
-  private readonly glRenderer: WebGLRenderer;
-  private readonly metersToScene: number;
-
-  /** Configurable atlas and performance parameters. */
-  private readonly atlasSize: number;
-  private readonly slotSize: number;
-  private readonly maxInstances: number;
-  private readonly maxConcurrentFetches: number;
-
-  /** Unified elevation atlas. */
-  private readonly atlas: UnifiedAtlas;
-
-  /** Tile LOD selection and instance buffer manager. */
-  private readonly tilePool: TilePool;
-
-  /** The single instanced mesh containing all visible terrain tiles. */
   readonly mesh: Mesh;
-
-  /** Material for the instanced mesh. */
   readonly material: ShaderMaterial;
 
-  /** Instanced geometry with per-instance attributes. */
-  private readonly instancedGeo: InstancedBufferGeometry;
+  private readonly opts: TerrainRendererOptions;
+  private readonly tileGrid: TileGrid;
+  private readonly workerPool: WorkerPool;
+  private readonly renderer: WebGLRenderer;
+  private readonly layerRegistry: LayerRegistry;
 
-  // Per-instance attribute buffers (flat Float32Arrays)
-  private readonly aTileWorld: InstancedBufferAttribute;
-  private readonly aTileScale: InstancedBufferAttribute;
-  private readonly aAtlasCoord: InstancedBufferAttribute;
-  private readonly aTileLod: InstancedBufferAttribute;
-  private readonly aParentAtlas: InstancedBufferAttribute;
-  private readonly aNeighborLod: InstancedBufferAttribute;
+  private readonly geometry: InstancedBufferGeometry;
+  private readonly instanceBuffer: InstancedInterleavedBuffer;
+  private readonly instanceData: Float32Array;
+  private readonly prevInstanceData: Float32Array;
+  private instanceCount = 0;
+  private prevInstanceCount = -1;
 
-  /** Previous base zoom for detecting zoom level changes. */
-  private lastBaseZoom = -1;
+  private readonly atlas: ElevationAtlas;
+  private readonly elevWriter: ArrayTextureWriter;
+  private drapeAtlas: DrapeAtlas | null = null;
+  private drapeWriter: ArrayTextureWriter | null = null;
+  private readonly slotSize: number;
+  private readonly drapeSlotSize: number;
+  private readonly drapeUploadsPerFrame: number;
+  private readonly budget: number;
+  private budgetWarned = false;
+  private exaggeration = 1;
+  /** Levels beyond the source's max zoom that still add geometric detail. */
+  private readonly overzoomLevels: number;
 
-  /**
-   * Monotonic epoch for stale fetch detection.
-   * Incremented on reload() (base layer change).
-   */
-  private fetchEpoch = 0;
+  private readonly tilePool: TilePool;
+  private readonly elevChannel: FetchChannel;
+  private readonly drapeChannel: FetchChannel;
+  private elevEpoch = 0;
+  private drapeEpoch = 0;
 
-  /** Pending tile fetches (by numeric tile key). */
-  private readonly pendingTiles = new Set<number>();
-
-  /** Write queue: fetched elevation data waiting to be written to the atlas.
-   *  Drained up to MAX_WRITES_PER_FRAME per animation frame to spread
-   *  the cost of bilinear resampling across frames.
-   *  Uses index-based drain (_writeHead) to avoid O(n) Array.shift(). */
-  private readonly pendingWrites: Array<{
-    key: number;
-    elevations: Float32Array;
-    width: number;
-    height: number;
-    epoch: number;
-    overzoom: { dz: number; relX: number; relY: number } | null;
-  }> = [];
-
-  /** Read cursor into pendingWrites (entries before this index are consumed). */
-  private _writeHead = 0;
-
-  /** Keys of tiles in the write queue (prevents re-fetching tiles that
-   *  have been fetched but not yet written to the atlas). */
-  private readonly queuedWriteKeys = new Set<number>();
-
-  /** Currently active drape layer. */
   private activeDrapeLayer: DrapeLayer | null = null;
+  private drapeOpacity = 1;
+  private drapeVisible = false;
 
-  /** Unified drape atlas (created lazily when a drape layer is activated). */
-  private drapeAtlas: UnifiedDrapeAtlas | null = null;
+  /** Floating render origin (world units, float64). */
+  private originX = 0;
+  private originY = 0;
 
-  /** Pending drape tile fetches (by numeric tile key).
-   *  For lodOffset > 1, individual sub-tile keys are added (not the parent key). */
-  private readonly pendingDrapeTiles = new Set<number>();
+  private lodQuality: number;
+  private morphWidth: number;
+  private autoRange = false;
+  private lastAutoMin = NaN;
+  private lastAutoMax = NaN;
 
-  /** In-flight composite drape slots (lodOffset > 1).
-   *  Keyed by elevation tile key → tracker with remaining sub-tile count. */
-  private readonly _compositeParents = new Map<number, CompositeTracker>();
+  /** Something changed that requires a render (uniforms, uploads, instances). */
+  private renderDirty = true;
+  /** Last selection's level bounds (for CPU elevation sampling). */
+  private lastMaxLevel = 0;
+  private prevCamX = NaN;
+  private prevCamY = NaN;
 
-  /** Effective drape zoom at which each tile's drape was loaded.
-   *  Used to detect when a zoom transition makes the existing drape stale
-   *  (e.g. a former center-ring tile needs composite at finer resolution).
-   *  The old canvas data stays visible until the new composite overwrites it. */
-  private readonly _drapeEffectiveZ = new Map<number, number>();
+  /** Missing tiles, nearest first; tiles with nothing to draw (no ancestor) come first. */
+  private readonly missingElev: SelectedTile[] = [];
+  private readonly missingElevCovered: SelectedTile[] = [];
+  private readonly missingParents: number[] = [];
+  private readonly missingFallback = new Set<number>();
+  /** Missing drapes; tiles showing the bare placeholder come before those with a coarse fallback. */
+  private readonly missingDrape: Array<{ tile: SelectedTile; slot: SlotInfo }> = [];
+  private readonly missingDrapeCovered: Array<{ tile: SelectedTile; slot: SlotInfo }> = [];
+  private readonly neededElev = new Set<number>();
+  private readonly neededDrape = new Set<number>();
+  private readonly cull: CullRegion = {
+    minX: 0, minY: 0, maxX: 0, maxY: 0, radius: Infinity, planes: null, prefetch: null,
+  };
+  private readonly planes = new Float64Array(16);
+  private readonly prefetch = new Float64Array(5);
 
-  /** Microtask-coalesced fetchDrapeTiles re-trigger flag.
-   *  When multiple fetch completions fire in the same microtask,
-   *  only the first schedules a fetchDrapeTiles() call — the rest are no-ops.
-   *  This collapses N completion callbacks into a single O(visibleTiles) scan. */
-  private _drapeFetchQueued = false;
+  /** Tile events waiting to be delivered outside of atlas/scheduler code. */
+  private readonly tileEvents: Array<{ type: 'load' | 'unload'; coord: TileCoord }> = [];
+  private tileEventsQueued = false;
 
-  /** Previous camera position for velocity-based prefetch. */
-  private prevNadirX = 0;
-  private prevNadirY = 0;
+  private wakeTimer: ReturnType<typeof setTimeout> | null = null;
+  private wakeAt = Infinity;
+  private readonly errorLogs: Record<'elevation' | 'drape', ErrorLog> = {
+    elevation: { count: 0, lastLogged: -Infinity, latest: '' },
+    drape: { count: 0, lastLogged: -Infinity, latest: '' },
+  };
 
-  /** Reusable extent objects to avoid per-frame allocation. */
-  private readonly _extentMin: WorldPoint = { x: 0, y: 0 };
-  private readonly _extentMax: WorldPoint = { x: 0, y: 0 };
+  private readonly themeCleanup: () => void;
+  private disposed = false;
 
-  /** Pre-allocated frustum planes for per-frame trapezoid culling.
-   *  Copied from FrustumCalculator output so the margin adjustment
-   *  doesn't mutate the calculator's internal buffer. */
-  private readonly _frustumPlanes = new Float32Array(12);
-
-  /** Fingerprint of the last instance buffer uploaded to the GPU.
-   *  Used to skip redundant per-attribute scatter + upload when neither
-   *  the visible tile set nor any atlas coordinates have changed. */
-  private _lastInstanceHash = 0;
-  /** Uint32 view over TilePool.instanceData for fast integer hashing.
-   *  Allocated lazily in uploadInstanceData() (TilePool's Float32Array
-   *  isn't available at construction). */
-  private _instanceU32: Uint32Array | null = null;
-
-  /** Reusable point for elevation sampling (avoids per-frame allocation). */
-  private readonly _samplePoint: WorldPoint = { x: 0, y: 0 };
-
-  /** Cleanup handle for the OS theme listener (drape placeholder color). */
-  private readonly _themeCleanup: () => void;
-
-  /** Treelet-level zoom bounds: hard camera clamp (outer envelope).
-   *  Nothing exceeds this range - the camera cannot zoom outside these bounds.
-   *  Set once at construction from the Treelet init options. */
-  private readonly baseMinZoom: number;
-  private readonly baseMaxZoom: number;
-
-  /** Effective zoom bounds (intersection of map + active layer visibility bounds).
-   *  Controls how far the quadtree subdivides for LOD selection. */
-  private effectiveMinZoom: number;
-  private effectiveMaxZoom: number;
-
-  constructor(
-    tileGrid: TileGrid,
-    workerPool: WorkerPool,
-    sceneManager: SceneManager,
-    layerRegistry: LayerRegistry,
-    metersToScene: number,
-    minZoom: number = 2,
-    maxZoom: number = 15,
-    tileSegments: number = TILE_GRID_RESOLUTION,
-    atlasSize: number = DEFAULT_ATLAS_SIZE,
-    slotSize: number = DEFAULT_SLOT_SIZE,
-    maxInstances: number = DEFAULT_MAX_INSTANCES,
-    maxConcurrentFetches: number = DEFAULT_MAX_CONCURRENT_FETCHES,
-  ) {
-    this.tileGrid = tileGrid;
-    this.workerPool = workerPool;
-    this.sceneManager = sceneManager;
-    this.layerRegistry = layerRegistry;
-    this.glRenderer = sceneManager.renderer;
-    this.metersToScene = metersToScene;
-    this.atlasSize = atlasSize;
-    this.slotSize = slotSize;
-    this.maxInstances = maxInstances;
-    this.maxConcurrentFetches = maxConcurrentFetches;
-    this.baseMinZoom = minZoom;
-    this.baseMaxZoom = maxZoom;
-    this.effectiveMinZoom = minZoom;
-    this.effectiveMaxZoom = maxZoom;
+  constructor(options: TerrainRendererOptions) {
+    this.opts = options;
+    this.tileGrid = options.tileGrid;
+    this.workerPool = options.workerPool;
+    this.renderer = options.renderer;
+    this.layerRegistry = options.layerRegistry;
+    this.slotSize = options.slotSize;
+    this.drapeSlotSize = options.drapeSlotSize;
+    this.drapeUploadsPerFrame = Math.max(1, Math.round(DRAPE_UPLOADS_PER_FRAME * (256 / options.drapeSlotSize) ** 2));
+    this.lodQuality = options.lodQuality;
+    this.morphWidth = Math.max(0.05, Math.min(0.5, options.morphWidth));
+    this.overzoomLevels = Math.max(0, Math.round(Math.log2(options.slotSize / options.segments)));
 
     // ==== Atlas ====
-    this.atlas = new UnifiedAtlas(atlasSize, slotSize);
-
-    // Wire eviction callback: always clear stale drape pixels and tracking.
-    // The slot will be immediately filled with ancestor drape data (correct
-    // sub-region blit) in fetchAndWriteElevation after the elevation write.
-    this.atlas.onSlotEvicted = (evictedKey) => {
-      if (this.drapeAtlas) {
-        const coords = this.atlas.getCoordsPixels(evictedKey);
-        if (coords) {
-          this.drapeAtlas.clearSlot(coords.atlasX, coords.atlasY, coords.tilePixels);
-        }
-        this.drapeAtlas.evictTile(evictedKey);
-      }
-      // Cancel any in-flight composite for this slot (sub-tile results would
-      // write into the now-reallocated slot belonging to a different tile).
-      this._compositeParents.delete(evictedKey);
-      this._drapeEffectiveZ.delete(evictedKey);
+    let capacity = options.tileCacheSize;
+    const gl = this.renderer.getContext() as WebGL2RenderingContext;
+    const maxLayers = gl.getParameter(gl.MAX_ARRAY_TEXTURE_LAYERS) as number | null;
+    if (maxLayers && capacity > maxLayers) {
+      console.warn(`treelet: atlas capacity ${capacity} exceeds MAX_ARRAY_TEXTURE_LAYERS (${maxLayers}); clamping`);
+      capacity = maxLayers;
+    }
+    this.atlas = new ElevationAtlas(options.slotSize, capacity);
+    this.elevWriter = new ArrayTextureWriter(this.renderer, this.atlas.texture);
+    this.atlas.onEvict = (slot) => {
+      this.drapeAtlas?.evict(slot.key);
+      // Never call user code from inside an allocation: a handler that
+      // reloads or switches layers would corrupt the slot being assigned.
+      this.queueTileEvent('unload', slot.z, slot.x, slot.y);
     };
 
-    // ==== Tile Pool ====
-    this.tilePool = new TilePool(tileGrid, this.atlas, minZoom, maxZoom, maxInstances);
+    this.budget = Math.max(16, Math.min(options.maxInstances, Math.floor(capacity * ATLAS_VISIBLE_FRACTION)));
 
-    // ==== Shared tile geometry ====
-    // Clamp to atlas slot size - more segments than texels is wasted geometry
-    const clampedSegments = Math.min(tileSegments, slotSize);
-    const baseGeo = buildTileGrid(clampedSegments);
+    this.tilePool = new TilePool(this.tileGrid);
+    const settled = () => this.markDirty();
+    this.elevChannel = new FetchChannel({
+      onSettled: settled,
+      onError: (key, err) => this.reportError('elevation', key, err),
+    });
+    this.drapeChannel = new FetchChannel({
+      onSettled: settled,
+      onError: (key, err) => this.reportError('drape', key, err),
+    });
 
     // ==== Instanced geometry ====
-    this.instancedGeo = new InstancedBufferGeometry();
-    this.instancedGeo.index = baseGeo.index;
-    this.instancedGeo.setAttribute('position', baseGeo.getAttribute('position'));
-    this.instancedGeo.setAttribute('uv', baseGeo.getAttribute('uv'));
+    const baseGeo = buildTileGrid(options.segments);
+    this.geometry = new InstancedBufferGeometry();
+    this.geometry.index = baseGeo.index;
+    this.geometry.setAttribute('position', baseGeo.getAttribute('position'));
+    this.geometry.setAttribute('uv', baseGeo.getAttribute('uv'));
 
-    // Allocate per-instance attribute buffers
-    const worldBuf = new Float32Array(maxInstances * 2);
-    const scaleBuf = new Float32Array(maxInstances);
-    const atlasBuf = new Float32Array(maxInstances * 3);
-    const lodBuf = new Float32Array(maxInstances);
-    const parentBuf = new Float32Array(maxInstances * 3);
-    const neighborBuf = new Float32Array(maxInstances);
-
-    this.aTileWorld = new InstancedBufferAttribute(worldBuf, 2);
-    this.aTileScale = new InstancedBufferAttribute(scaleBuf, 1);
-    this.aAtlasCoord = new InstancedBufferAttribute(atlasBuf, 3);
-    this.aTileLod = new InstancedBufferAttribute(lodBuf, 1);
-    this.aParentAtlas = new InstancedBufferAttribute(parentBuf, 3);
-    this.aNeighborLod = new InstancedBufferAttribute(neighborBuf, 1);
-
-    // Dynamic: updated every frame
-    this.aTileWorld.setUsage(DynamicDrawUsage);
-    this.aTileScale.setUsage(DynamicDrawUsage);
-    this.aAtlasCoord.setUsage(DynamicDrawUsage);
-    this.aTileLod.setUsage(DynamicDrawUsage);
-    this.aParentAtlas.setUsage(DynamicDrawUsage);
-    this.aNeighborLod.setUsage(DynamicDrawUsage);
-
-    this.instancedGeo.setAttribute('iTileWorld', this.aTileWorld);
-    this.instancedGeo.setAttribute('iTileScale', this.aTileScale);
-    this.instancedGeo.setAttribute('iAtlasCoord', this.aAtlasCoord);
-    this.instancedGeo.setAttribute('iTileLod', this.aTileLod);
-    this.instancedGeo.setAttribute('iParentAtlas', this.aParentAtlas);
-    this.instancedGeo.setAttribute('iNeighborLod', this.aNeighborLod);
-
-    // Start with zero instances
-    this.instancedGeo.instanceCount = 0;
+    this.instanceData = new Float32Array(this.budget * INSTANCE_STRIDE);
+    this.prevInstanceData = new Float32Array(this.budget * INSTANCE_STRIDE);
+    this.instanceBuffer = new InstancedInterleavedBuffer(this.instanceData, INSTANCE_STRIDE, 1);
+    this.instanceBuffer.setUsage(DynamicDrawUsage);
+    const buf = this.instanceBuffer;
+    this.geometry.setAttribute('iTileWorld', new InterleavedBufferAttribute(buf, 2, 0));
+    this.geometry.setAttribute('iTileScale', new InterleavedBufferAttribute(buf, 1, 2));
+    this.geometry.setAttribute('iElev', new InterleavedBufferAttribute(buf, 4, 3));
+    this.geometry.setAttribute('iParent', new InterleavedBufferAttribute(buf, 4, 7));
+    this.geometry.setAttribute('iDrape', new InterleavedBufferAttribute(buf, 4, 11));
+    this.geometry.setAttribute('iMorph', new InterleavedBufferAttribute(buf, 2, 15));
+    this.geometry.instanceCount = 0;
 
     // ==== Material ====
     this.material = createTerrainMaterial({
-      metersToScene,
-      atlasSize,
+      metersToScene: options.metersToScene,
+      worldScale: this.tileGrid.worldScale,
+      slotSize: options.slotSize,
+      gridSize: options.segments,
     });
     setTerrainAtlas(this.material, this.atlas.texture);
 
     // Theme-aware drape placeholder: white (light) / dark grey (dark)
-    const darkMq = window.matchMedia('(prefers-color-scheme: dark)');
-    const applyPlaceholder = (dark: boolean) => {
-      const c = dark ? 0.18 : 1.0;
-      setTerrainDrapePlaceholder(this.material, c, c, c);
+    const darkMq = typeof window !== 'undefined' && window.matchMedia
+      ? window.matchMedia('(prefers-color-scheme: dark)')
+      : null;
+    const applyPlaceholder = () => {
+      const c = darkMq?.matches ? 0.18 : 1.0;
+      if (setTerrainDrapePlaceholder(this.material, c, c, c)) this.markRender();
     };
-    applyPlaceholder(darkMq.matches);
-    const themeHandler = () => applyPlaceholder(darkMq.matches);
-    darkMq.addEventListener('change', themeHandler);
-    this._themeCleanup = () => darkMq.removeEventListener('change', themeHandler);
+    applyPlaceholder();
+    darkMq?.addEventListener('change', applyPlaceholder);
+    this.themeCleanup = () => darkMq?.removeEventListener('change', applyPlaceholder);
 
     // ==== Mesh ====
-    this.mesh = new Mesh(this.instancedGeo, this.material);
-    this.mesh.frustumCulled = false; // We do our own LOD / frustum logic
-    sceneManager.addTileMesh(this.mesh);
+    this.mesh = new Mesh(this.geometry, this.material);
+    this.mesh.frustumCulled = false; // LOD selection does the culling
+    this.mesh.matrixAutoUpdate = false;
+    this.mesh.updateMatrix();
 
-    // Clean up template geometry (data is copied into instancedGeo)
     baseGeo.dispose();
   }
 
@@ -367,1092 +329,774 @@ export class TerrainRenderer {
   // =========================================================================
 
   /**
-   * Recompute effective zoom bounds for the TilePool quadtree.
-   *
-   * The map-level baseMinZoom/baseMaxZoom is the hard camera clamp - enforced
-   * by the camera controller so zoom never leaves that range. It is NOT used
-   * as a TilePool ceiling because TilePool.update() computes
-   * `maxLod = floor(zoom) + 1`, which is one level finer than the camera zoom.
-   * Capping at baseMaxZoom would prevent that +1 from ever exceeding the
-   * source's data range, blocking overzoom entirely.
-   *
-   * Instead the TilePool ceiling comes from the layer visibility bounds
-   * (layer.maxZoom, default 22). The camera clamp naturally limits how far
-   * the quadtree subdivides - zoom ≤ baseMaxZoom → maxLod ≤ baseMaxZoom + 1.
-   *
-   * Source data availability beyond the upper end (overzoom) is handled by
-   * BaseLayer.getOverzoomRegion — finer tiles get URLs clamped to the
-   * source's maxZoom and extract sub-regions from the parent image.
-   *
-   * Underzoom has no analogous mechanism: there is no way to synthesize a
-   * coarser tile when the source only publishes fine zooms. To prevent
-   * tiles being requested below `source.minZoom` (which would 404), the
-   * floor takes the maximum of the map clamp, the layer visibility bound,
-   * and the source's own minZoom.
+   * Run LOD selection, GPU uploads and fetch scheduling for one frame.
+   * Returns true when the frame needs to be rendered.
    */
-  private updateEffectiveZoomBounds(): void {
-    const baseLayer = this.layerRegistry.getActiveBaseLayer();
-    if (baseLayer) {
-      this.effectiveMinZoom = Math.max(
-        this.baseMinZoom,
-        baseLayer.minZoom,
-        baseLayer.source.minZoom,
-      );
-      this.effectiveMaxZoom = baseLayer.maxZoom;
-    } else {
-      this.effectiveMinZoom = this.baseMinZoom;
-      this.effectiveMaxZoom = this.baseMaxZoom;
+  update(view: FrameView): boolean {
+    if (this.disposed) return false;
+
+    const base = this.layerRegistry.getActiveBaseLayer();
+    if (!base || view.zoom < base.minZoom || view.zoom > base.maxZoom) {
+      if (this.geometry.instanceCount !== 0) {
+        this.geometry.instanceCount = 0;
+        this.instanceCount = 0;
+        this.prevInstanceCount = -1;
+        this.renderDirty = true;
+      }
+      return this.consumeRenderDirty();
     }
-    this.tilePool.setZoomRange(this.effectiveMinZoom, this.effectiveMaxZoom);
+
+    this.exaggeration = view.exaggeration;
+    if (setTerrainExaggeration(this.material, view.exaggeration)) this.renderDirty = true;
+    this.updateDrapeVisibility(view.zoom);
+    const now = performance.now();
+
+    // ==== GPU uploads (data that arrived since the last frame) ====
+    if (this.atlas.flush(this.elevWriter)) this.renderDirty = true;
+    if (this.drapeAtlas && this.drapeWriter &&
+        this.drapeAtlas.flush(this.drapeWriter, this.drapeUploadsPerFrame, (key, gen) => this.atlas.gen(key) === gen)) {
+      this.renderDirty = true;
+    }
+
+    // ==== Floating origin ====
+    const dx = view.cameraX - view.targetX;
+    const dy = view.cameraY - view.targetY;
+    const dz = view.cameraZ - view.targetZ;
+    const orbitDist = Math.max(Math.sqrt(dx * dx + dy * dy + dz * dz), 1e-9);
+    if (Math.abs(view.targetX - this.originX) > orbitDist * 2 ||
+        Math.abs(view.targetY - this.originY) > orbitDist * 2) {
+      this.originX = view.targetX;
+      this.originY = view.targetY;
+      this.mesh.position.set(this.originX, this.originY, 0);
+      this.mesh.updateMatrix();
+    }
+    setTerrainView(
+      this.material,
+      this.originY,
+      view.cameraX - this.originX,
+      view.cameraY - this.originY,
+      view.cameraZ,
+      view.targetZ,
+    );
+
+    // ==== LOD selection ====
+    const src = base.source;
+    const minLevel = Math.max(0, Math.min(src.minZoom, MAX_TILE_ZOOM));
+    let maxLevel = Math.min(base.maxZoom, MAX_TILE_ZOOM, src.maxZoom + this.overzoomLevels);
+    if (this.activeDrapeLayer && this.drapeVisible) {
+      // Tiles fine enough to show the drape's finest imagery (a slot holding
+      // finer source tiles needs correspondingly coarser terrain tiles).
+      const d = this.activeDrapeLayer;
+      maxLevel = Math.max(maxLevel, Math.min(d.finestTileZoom(this.drapeSlotSize), d.maxZoom, base.maxZoom, MAX_TILE_ZOOM));
+    }
+    maxLevel = Math.max(minLevel, Math.floor(maxLevel));
+    this.lastMaxLevel = maxLevel;
+
+    this.computeCullRegion(view, orbitDist);
+    const rangeFactor = Math.max(PREFERRED_RANGE_FACTOR, (view.focalLength * this.lodQuality) / this.slotSize);
+    const tiles = this.tilePool.select({
+      cameraX: view.cameraX,
+      cameraY: view.cameraY,
+      cameraZ: view.cameraZ,
+      refZ: view.targetZ,
+      rangeFactor,
+      minLevel,
+      maxLevel,
+      morphWidth: this.morphWidth,
+      budget: this.budget,
+      cull: this.cull,
+      heightBounds: this.heightBounds,
+    });
+    if (!this.budgetWarned && (this.tilePool.truncated || this.tilePool.rangeFactor < rangeFactor * 0.999)) {
+      this.budgetWarned = true;
+      const limit = this.budget < this.opts.maxInstances
+        ? `mapDisplay.tileCacheSize (now ${this.atlas.capacity}; ${ATLAS_VISIBLE_FRACTION * 100}% of it can be on screen)`
+        : `mapDisplay.maxInstances (now ${this.opts.maxInstances})`;
+      console.info(`treelet: this view needs more than ${this.budget} tiles, so distant detail was reduced. Raise ${limit} for full detail.`);
+    }
+
+    // ==== Instances ====
+    this.buildInstances(tiles, base);
+    if (this.uploadInstances()) {
+      this.renderDirty = true;
+      if (this.autoRange) this.updateAutoRange(tiles);
+    }
+
+    // ==== Fetch scheduling ====
+    this.pump(base, now);
+
+    return this.consumeRenderDirty() ||
+      this.atlas.hasPendingUploads ||
+      (this.drapeAtlas?.hasPendingUploads ?? false);
   }
 
-  /**
-   * Per-frame update: LOD selection, instance buffer build, transitions.
-   * Lightweight - safe to call every animation frame.
-   */
-  updateFrame(
-    nadirX: number,
-    nadirY: number,
-    zoom: number,
-    exaggeration: number,
-  ): void {
-    // Sync LOD bounds from map clamp ∩ active layer visibility
-    this.updateEffectiveZoomBounds();
-
-    // Layer visibility: hide terrain when camera zoom is outside the layer's bounds
-    const baseLayer = this.layerRegistry.getActiveBaseLayer();
-    if (baseLayer && (zoom < baseLayer.minZoom || zoom > baseLayer.maxZoom)) {
-      this.instancedGeo.instanceCount = 0;
-      return;
-    }
-
-    const baseZoom = Math.floor(zoom) + 1;
-    const zoomChanged = baseZoom !== this.lastBaseZoom;
-
-    // Advance atlas LRU frame counter
-    this.atlas.advanceFrame();
-
-    // ==== Drain pending elevation writes (budget-limited) ====
-    this.drainPendingWrites();
-
-    // ==== Zoom change: keep both atlas data (ancestor fallback handles continuity) ====
-    if (zoomChanged) {
-      this.lastBaseZoom = baseZoom;
-      // Old drape data persists - ancestor UV fallback samples it naturally.
-      // Eviction callback handles slot cleanup when elevation reallocates.
-      // Clear stale pending keys so they don't block maxConcurrentFetches.
-      // The per-frame stall recovery below restarts the fetch chain.
-      this.pendingDrapeTiles.clear();
-      this._compositeParents.clear();
-      // Don't clear _drapeEffectiveZ here: the per-tile zoom records let
-      // fetchDrapeTiles() detect stale-resolution drape and seamlessly
-      // re-fetch at the new neededZ without clearing loadedTiles (which
-      // would break fillDrapeFromAncestor and cause placeholder flashes).
-    }
-
-    // ==== Visible extent + prefetch ====
-    const tileSize = this.tileGrid.getTileSize(Math.max(2, baseZoom));
-    const extentHalf = tileSize * 16;
-    const extentMin = this._extentMin;
-    const extentMax = this._extentMax;
-    extentMin.x = nadirX - extentHalf;
-    extentMin.y = nadirY - extentHalf;
-    extentMax.x = nadirX + extentHalf;
-    extentMax.y = nadirY + extentHalf;
-
-    // Extend extent in camera movement direction for prefetch
-    const velX = nadirX - this.prevNadirX;
-    const velY = nadirY - this.prevNadirY;
-    if (velX !== 0 || velY !== 0) {
-      const lookX = velX * PREFETCH_LOOKAHEAD_FRAMES;
-      const lookY = velY * PREFETCH_LOOKAHEAD_FRAMES;
-      if (lookX > 0) extentMax.x += lookX; else extentMin.x += lookX;
-      if (lookY > 0) extentMax.y += lookY; else extentMin.y += lookY;
-    }
-    this.prevNadirX = nadirX;
-    this.prevNadirY = nadirY;
-
-    // ==== Frustum plane culling (tight trapezoid for tilted views) ====
-    // Compute 2D half-planes from the ground-plane frustum trapezoid.
-    // At top-down view, returns null → TilePool uses AABB-only culling.
-    const extent = this.sceneManager.getVisibleExtent();
-    let frustumPlanes: Float32Array | null = null;
-    if (extent) {
-      const srcPlanes = this.sceneManager.getVisibleFrustumPlanes(extent);
-      if (srcPlanes) {
-        // Copy into our buffer so we can adjust margins without mutating
-        // the FrustumCalculator's reusable array.
-        this._frustumPlanes.set(srcPlanes);
-        frustumPlanes = this._frustumPlanes;
-
-        // Base margin: pad the frustum outward by a few tile widths to
-        // compensate for two effects the flat ground-plane model misses:
-        //  1. Terrain elevation displacement — tiles whose 2D AABB lies
-        //     just outside the frustum can have geometry displaced upward
-        //     into the viewport by the VTF shader (especially near edge).
-        //  2. Far-corner instability — the artificial horizon clamp makes
-        //     the far frustum plane jitter when the camera angle changes
-        //     slightly. A buffer absorbs these small shifts.
-        // 3 tile widths ≈ 10% of the ~32-tile-wide extent, preserving
-        // the majority of the culling benefit at steep tilt.
-        const baseMargin = tileSize * FRUSTUM_BASE_MARGIN_TILES;
-        for (let p = 0; p < 4; p++) {
-          frustumPlanes[p * 3 + 2] += baseMargin;
-        }
-
-        // Widen further by the prefetch lookahead distance.
-        // This keeps tiles slightly outside the current frustum (in the
-        // direction of camera motion) in the quadtree so they get fetched,
-        // while still culling tiles far outside on the perpendicular axis.
-        const speed = Math.sqrt(velX * velX + velY * velY);
-        if (speed > 0) {
-          const planeMargin = speed * PREFETCH_LOOKAHEAD_FRAMES;
-          for (let p = 0; p < 4; p++) {
-            frustumPlanes[p * 3 + 2] += planeMargin;
-          }
-        }
-      }
-    }
-
-    // ==== TilePool: LOD selection + instance buffer ====
-    this.tilePool.update(nadirX, nadirY, zoom, extentMin, extentMax, frustumPlanes);
-
-    // ==== Pin all visible tiles to protect from LRU eviction ====
-    // Without this, atlas-saturated views cause evict→re-fetch flicker.
-    // When all slots are pinned, new tile allocations gracefully return
-    // null and retry when view changes free up slots.
-    this.atlas.clearPins();
-    const visibleTiles = this.tilePool.visibleTiles;
-    for (const tile of visibleTiles) {
-      if (tile.atlas) this.atlas.pin(tile.key);
-      // Also pin parents (needed for geomorphing blend)
-      if (tile.parentKey !== NO_TILE_KEY) this.atlas.pin(tile.parentKey);
-    }
-
-    // ==== Upload instance data to GPU attributes ====
-    this.uploadInstanceData();
-
-    // ==== Elevation atlas: GPU upload ====
-    // Sub-region upload via raw gl.texSubImage2D (~256KB per dirty slot).
-    this.atlas.uploadDirtySlots(this.glRenderer);
-
-    // ==== Elevation stall recovery ====
-    // If no elevation fetches are in-flight but tiles still need loading,
-    // restart the fetch chain. This handles the initial load (scheduleTiles
-    // fires via setTimeout before the first updateFrame populates missingTiles)
-    // and rapid zoom transitions that clear pending state.
-    if (this.pendingTiles.size === 0 && this.tilePool.missingTiles.length > 0) {
-      this.fetchElevationTiles();
-    }
-
-    // ==== Drape atlas: sub-region GPU upload ====
-    // Upload only the changed 256×256 slots (~256KB each) instead of the
-    // full 4096² canvas (~64MB). Eliminates frame stalls during tile loading.
-    if (this.drapeAtlas) {
-      this.drapeAtlas.uploadDirtySlots(this.glRenderer);
-
-      // Stall recovery: if drape is active but fetch pipeline has stalled
-      // (0 pending, yet tiles still need drape), restart the chain.
-      // This handles rapid zoom transitions where pendingDrapeTiles.clear()
-      // kills the re-triggering chain before all tiles are covered.
-      // Quick check: only invoke fetchDrapeTiles if at least one visible
-      // tile with atlas data is missing drape - avoids redundant work
-      // every frame when all tiles are already draped.
-      if (this.activeDrapeLayer && this.drapeAtlas && this.pendingDrapeTiles.size === 0) {
-        let hasMissingDrape = false;
-        const dLayer = this.activeDrapeLayer;
-        const dOffset = dLayer.lodOffset - 1;
-        const dMaxZ = dLayer.source?.maxZoom ?? Infinity;
-        for (const tile of visibleTiles) {
-          if (!tile.atlas || this._compositeParents.has(tile.key) ||
-              tile.coord.z < dLayer.minZoom || tile.coord.z > dLayer.maxZoom) continue;
-          if (!this.drapeAtlas.hasTile(tile.key)) {
-            hasMissingDrape = true;
-            break;
-          }
-          // Also detect stale-resolution drape that needs composite upgrade
-          if (dOffset > 0 && tile.coord.z < this.lastBaseZoom) {
-            const needed = Math.min(tile.coord.z + dOffset, this.lastBaseZoom, dMaxZ);
-            if ((this._drapeEffectiveZ.get(tile.key) ?? 0) < needed) {
-              hasMissingDrape = true;
-              break;
-            }
-          }
-        }
-        if (hasMissingDrape) {
-          this.fetchDrapeTiles();
-        }
-      }
-    }
-
-    // ==== Exaggeration ====
-    this.setExaggeration(exaggeration);
-  }
-
-  // =========================================================================
-  // Tile fetching
-  // =========================================================================
-
-  /**
-   * Fetch missing elevation tiles. Called from debounced camera callback.
-   */
-  fetchTiles(): void {
-    this.fetchElevationTiles();
-    this.fetchDrapeTiles();
-  }
-
-  /**
-   * Fetch missing elevation tiles. Called from debounced camera callback.
-   */
-  private fetchElevationTiles(): void {
-    const baseLayer = this.layerRegistry.getActiveBaseLayer();
-    if (!baseLayer) return;
-
-    const hints = baseLayer.source.getSchedulingHints();
-
-    // Fetch visible tiles first (sorted by distance), then parent tiles for geomorphing
-    const queues = [this.tilePool.missingTiles, this.tilePool.missingParentTiles];
-
-    for (const queue of queues) {
-      for (const tile of queue) {
-        if (this.pendingTiles.size >= hints.maxConcurrentFetches) return;
-        if (this.pendingTiles.has(tile.key)) continue;
-        if (this.atlas.hasTile(tile.key)) continue;
-        if (this.queuedWriteKeys.has(tile.key)) continue;
-
-        this.pendingTiles.add(tile.key);
-
-        // Snapshot coord values: pool tiles are reused each frame, so async
-        // closures must capture primitives (not the mutable coord object).
-        const coord: TileCoord = { z: tile.coord.z, x: tile.coord.x, y: tile.coord.y };
-        const key = tile.key;
-
-        // Capture overzoom info: if this tile is beyond the source's max zoom,
-        // the fetch URL will be clamped to source max but we need to extract
-        // only the sub-region that corresponds to this child tile.
-        const overzoom = baseLayer.getOverzoomRegion(coord);
-
-        this.fetchAndWriteElevation(key, hints.deferWrites, overzoom, async () => {
-          await baseLayer.source.ensureReady();
-          const url = baseLayer.getTileUrl(coord);
-          const proxy = this.workerPool.getProxy();
-          // decoderSource is null for built-ins (terrain-rgb/mapbox/terrarium)
-          // and the function source for anything else, so workers can compile
-          // + cache custom/registered decoders they don't know natively.
-          return proxy.fetchDecodeElevation(
-            url,
-            baseLayer.decoderType,
-            baseLayer.decoderSource ?? undefined,
-          );
-        });
-      }
-    }
-  }
-
-  /**
-   * Fetch missing drape imagery tiles. Mirrors elevation fetching but
-   * writes ImageBitmaps into the unified drape atlas via canvas blitting.
-   *
-   * When the active drape layer has lodOffset > 1, non-center LOD rings
-   * fetch finer sub-tiles and composite them into each atlas slot. The
-   * center ring (already at finest zoom) uses the standard single-tile path.
-   */
-  private fetchDrapeTiles(): void {
-    if (!this.activeDrapeLayer || !this.drapeAtlas) return;
-
-    const drapeLayer = this.activeDrapeLayer;
-    const drapeSource = drapeLayer.source;
-    const offset = drapeLayer.lodOffset - 1; // 0 = no composite, 1 = 4 sub-tiles, 2 = 16
-
-    // Priority 1: drain pending sub-tiles from existing composites.
-    // Sub-tiles that couldn't be launched due to concurrency limits are
-    // queued in the tracker and launched here as slots free up.
-    this.drainPendingSubTiles();
-    if (this.pendingDrapeTiles.size >= this.maxConcurrentFetches) return;
-
-    // Priority 2: iterate visible tiles for new fetches
-    for (const tile of this.tilePool.visibleTiles) {
-      if (!tile.atlas) continue; // No elevation data → skip drape too
-
-      // Skip tiles outside the drape layer's visibility bounds
-      if (tile.coord.z < drapeLayer.minZoom || tile.coord.z > drapeLayer.maxZoom) continue;
-
-      // lodOffset controls how many rings match center resolution:
-      //   lodOffset=2 → ring 2 matches center, rings 3+ each get +1 boost
-      //   lodOffset=3 → rings 2+3 match center, ring 4 gets +2 boost
-      // Cap at lastBaseZoom so no ring fetches finer than center (wasteful).
-      const useComposite = offset > 0
-        && tile.coord.z < this.lastBaseZoom; // not center ring
-      const neededZ = useComposite
-        ? Math.min(tile.coord.z + offset, this.lastBaseZoom, drapeSource.maxZoom)
-        : tile.coord.z;
-
-      if (this.drapeAtlas.hasTile(tile.key)) {
-        // Already loaded: skip unless composite resolution is stale.
-        // On zoom-in, tiles that were center ring (single-tile drape at z=N)
-        // become ring 2+ and need composite at z=N+1. Using >= avoids
-        // downgrading tiles that already have finer-than-needed drape.
-        if (this._drapeEffectiveZ.get(tile.key)! >= neededZ) continue;
-        // Stale: effective zoom needs upgrading → fall through to re-fetch.
-        // Old canvas data stays on GPU until new composite is fully complete.
-      }
-      if (this._compositeParents.has(tile.key)) continue; // composite in progress
-      if (this.pendingDrapeTiles.size >= this.maxConcurrentFetches) break;
-
-      // Get the elevation atlas slot pixel coords for this tile (drape mirrors them)
-      const slotPixels = this.atlas.getCoordsPixels(tile.key);
-      if (!slotPixels) continue;
-
-      const { atlasX, atlasY, tilePixels } = slotPixels;
-
-      // Snapshot coord: pool tiles are reused each frame.
-      const coord: TileCoord = { z: tile.coord.z, x: tile.coord.x, y: tile.coord.y };
-      const key = tile.key;
-
-      if (useComposite) {
-        // Composite path: fetch finer sub-tiles, capped at center zoom
-        const actualOffset = neededZ - coord.z;
-
-        if (actualOffset > 0) {
-          this.fetchCompositeSubTiles(
-            key, coord, atlasX, atlasY, tilePixels, actualOffset, neededZ, drapeSource,
-          );
-          continue;
-        }
-        // actualOffset === 0 → source maxZoom reached, fall through to single-tile
-      }
-
-      // Single-tile path (standard): one fetch per elevation slot
-      if (this.pendingDrapeTiles.has(key)) continue;
-
-      this.pendingDrapeTiles.add(key);
-
-      // Clamp to source maxZoom for drape overzoom (mirrors BaseLayer.getTileUrl)
-      const srcMaxZ = drapeSource.maxZoom;
-      const clampedZ = Math.min(coord.z, srcMaxZ);
-      const dz = coord.z - clampedZ;
-      const fetchCoord: TileCoord = {
-        z: clampedZ,
-        x: coord.x >> dz,
-        y: coord.y >> dz,
-      };
-
-      this.fetchAndWriteDrape(key, atlasX, atlasY, tilePixels, neededZ, async () => {
-        const url = drapeSource.getTileUrl(fetchCoord);
-        const response = await fetch(url);
-        if (!response.ok) return null;
-        const blob = await response.blob();
-
-        // Overzoom: extract sub-region from the parent tile image
-        if (dz > 0) {
-          const fullImage = await createImageBitmap(blob);
-          const divisor = 1 << dz;
-          const subW = fullImage.width / divisor;
-          const subH = fullImage.height / divisor;
-          const relX = coord.x % divisor;
-          const relY = coord.y % divisor;
-          const cropped = await createImageBitmap(fullImage,
-            relX * subW, relY * subH, subW, subH);
-          fullImage.close();
-          return cropped;
-        }
-
-        return createImageBitmap(blob);
-      });
-    }
-  }
-
-  /**
-   * Schedule a fetchDrapeTiles() call via microtask coalescing.
-   * Multiple calls within the same event task (e.g. several fetch completions
-   * resolving simultaneously) collapse into a single fetchDrapeTiles()
-   * invocation, avoiding redundant O(visibleTiles) scans.
-   *
-   * Used by async completion callbacks (finally blocks) instead of calling
-   * fetchDrapeTiles() directly. Synchronous entry points (stall recovery,
-   * public API, drainPendingWrites) still call fetchDrapeTiles() directly
-   * for immediate response.
-   */
-  private scheduleDrapeFetch(): void {
-    if (this._drapeFetchQueued) return;
-    this._drapeFetchQueued = true;
+  /** Deliver tile load/unload events asynchronously (after the current operation). */
+  private queueTileEvent(type: 'load' | 'unload', z: number, x: number, y: number): void {
+    if (type === 'load' ? !this.opts.onTileLoad : !this.opts.onTileUnload) return;
+    this.tileEvents.push({ type, coord: { z, x, y } });
+    if (this.tileEventsQueued) return;
+    this.tileEventsQueued = true;
     queueMicrotask(() => {
-      this._drapeFetchQueued = false;
-      this.fetchDrapeTiles();
+      this.tileEventsQueued = false;
+      const events = this.tileEvents.splice(0);
+      if (this.disposed) return;
+      for (const e of events) {
+        if (e.type === 'load') this.opts.onTileLoad?.(e.coord);
+        else this.opts.onTileUnload?.(e.coord);
+      }
     });
   }
 
-  /**
-   * Prepare a composite drape slot (lodOffset > 1): build the list of
-   * sub-tiles, create a tracker, and launch as many as concurrency allows.
-   * Remaining sub-tiles are stored in the tracker's `pending` array and
-   * drained incrementally by `drainPendingSubTiles()`.
-   */
-  private fetchCompositeSubTiles(
-    parentKey: number,
-    parentCoord: TileCoord,
-    atlasX: number,
-    atlasY: number,
-    tilePixels: number,
-    actualOffset: number,
-    effectiveZ: number,
-    drapeSource: { getTileUrl(coord: TileCoord): string; maxZoom: number },
-  ): void {
-    const divisor = 1 << actualOffset;
-    const subCount = divisor * divisor;
-    const subSize = tilePixels / divisor;
-    const fineZ = parentCoord.z + actualOffset;
-
-    // Build all sub-tile descriptors
-    const allSubTiles: PendingSubTile[] = [];
-    for (let sy = 0; sy < divisor; sy++) {
-      for (let sx = 0; sx < divisor; sx++) {
-        const subCoord: TileCoord = {
-          z: fineZ,
-          x: parentCoord.x * divisor + sx,
-          y: parentCoord.y * divisor + sy,
-        };
-
-        // Apply drape overzoom clamping to sub-tile
-        const srcMaxZ = drapeSource.maxZoom;
-        const clampedSubZ = Math.min(subCoord.z, srcMaxZ);
-        const subDz = subCoord.z - clampedSubZ;
-        const fetchSubCoord: TileCoord = {
-          z: clampedSubZ,
-          x: subCoord.x >> subDz,
-          y: subCoord.y >> subDz,
-        };
-
-        const regionX = sx * subSize;
-        const regionY = sy * subSize;
-        const subKey = packTileKey(subCoord.z, subCoord.x, subCoord.y);
-
-        // Capture overzoom state for the fetch closure
-        const capturedDz = subDz;
-        const capturedSubCoord = subCoord;
-
-        allSubTiles.push({
-          subKey,
-          regionX,
-          regionY,
-          subSize,
-          fetchFn: async () => {
-            const url = drapeSource.getTileUrl(fetchSubCoord);
-            const response = await fetch(url);
-            if (!response.ok) return null;
-            const blob = await response.blob();
-
-            if (capturedDz > 0) {
-              const fullImage = await createImageBitmap(blob);
-              const ozDivisor = 1 << capturedDz;
-              const subW = fullImage.width / ozDivisor;
-              const subH = fullImage.height / ozDivisor;
-              const relX = capturedSubCoord.x % ozDivisor;
-              const relY = capturedSubCoord.y % ozDivisor;
-              const cropped = await createImageBitmap(fullImage,
-                relX * subW, relY * subH, subW, subH);
-              fullImage.close();
-              return cropped;
-            }
-
-            return createImageBitmap(blob);
-          },
-        });
-      }
-    }
-
-    // Create tracker with all sub-tiles pending
-    const tracker: CompositeTracker = {
-      inflight: 0,
-      completed: 0,
-      total: subCount,
-      pending: allSubTiles,
-      atlasX,
-      atlasY,
-      tilePixels,
-      effectiveZ,
-    };
-    this._compositeParents.set(parentKey, tracker);
-
-    // Launch as many sub-tiles as concurrency allows
-    this.launchPendingSubTiles(parentKey, tracker);
+  private consumeRenderDirty(): boolean {
+    const d = this.renderDirty;
+    this.renderDirty = false;
+    return d;
   }
 
-  /**
-   * Launch pending sub-tiles from a single composite tracker,
-   * up to the concurrency limit.
-   */
-  private launchPendingSubTiles(parentKey: number, tracker: CompositeTracker): void {
-    while (tracker.pending.length > 0 && this.pendingDrapeTiles.size < this.maxConcurrentFetches) {
-      const sub = tracker.pending.shift()!;
-      tracker.inflight++;
-      this.pendingDrapeTiles.add(sub.subKey);
-      this.fetchAndWriteDrapeSubTile(
-        parentKey, sub.subKey,
-        tracker.atlasX, tracker.atlasY,
-        sub.regionX, sub.regionY, sub.subSize,
-        sub.fetchFn,
-      );
-    }
+  /** Mark state changed by async work and ask for a frame. */
+  private markDirty(): void {
+    if (this.disposed) return;
+    this.renderDirty = true;
+    this.opts.requestRender();
   }
 
-  /**
-   * Drain pending (un-launched) sub-tiles from all active composite trackers.
-   * Called at the start of fetchDrapeTiles() to resume partially-launched
-   * composites as concurrency slots free up.
-   */
-  private drainPendingSubTiles(): void {
-    for (const [parentKey, tracker] of this._compositeParents) {
-      if (tracker.pending.length === 0) continue;
-      this.launchPendingSubTiles(parentKey, tracker);
-      if (this.pendingDrapeTiles.size >= this.maxConcurrentFetches) return;
-    }
+  /** Mark a render-only change (uniform) and ask for a frame. */
+  private markRender(): void {
+    this.markDirty();
   }
 
-  /**
-   * Fetch drape imagery and write into the unified drape atlas.
-   */
-  private async fetchAndWriteDrape(
-    key: number,
-    atlasX: number,
-    atlasY: number,
-    tilePixels: number,
-    effectiveZ: number,
-    fetchFn: () => Promise<ImageBitmap | null>,
-  ): Promise<void> {
-    const epoch = this.fetchEpoch;
-    try {
-      const image = await fetchFn();
-      if (!image) return;
-
-      if (epoch !== this.fetchEpoch) { image.close(); return; }
-      if (!this.pendingDrapeTiles.has(key)) { image.close(); return; }
-      if (!this.drapeAtlas) { image.close(); return; }
-
-      // Verify elevation slot still belongs to this tile (may have been evicted
-      // and reallocated to a different tile during the async fetch).
-      if (!this.atlas.hasTile(key)) { image.close(); return; }
-
-      this.drapeAtlas.writeTile(key, image, atlasX, atlasY, tilePixels);
-      this._drapeEffectiveZ.set(key, effectiveZ);
-      image.close();
-    } catch (e) {
-      console.warn(`treelet: drape tile fetch failed [${tileKeyStr(key)}]`, e);
-    } finally {
-      if (epoch === this.fetchEpoch) {
-        this.pendingDrapeTiles.delete(key);
-        // Re-trigger to start next batch of drape fetches (coalesced
-        // via microtask to avoid redundant scans during burst completions).
-        this.scheduleDrapeFetch();
+  private updateDrapeVisibility(zoom: number): void {
+    const d = this.activeDrapeLayer;
+    const visible = d !== null && this.drapeAtlas !== null && zoom >= d.minZoom && zoom <= d.maxZoom;
+    if (visible !== this.drapeVisible) {
+      this.drapeVisible = visible;
+      if (setTerrainDrape(this.material, visible ? this.drapeAtlas!.texture : null, this.drapeOpacity)) {
+        this.renderDirty = true;
       }
     }
   }
 
   /**
-   * Fetch a single drape sub-tile and write it into a sub-region of the
-   * parent's atlas slot. Used by the lodOffset composite path.
-   *
-   * When all sub-tiles for a parent slot complete (success or failure),
-   * the composite tracker marks the slot as loaded and queues one GPU upload.
+   * Horizon circle + camera side planes, plus a lookahead that widens only
+   * the planes the camera is moving toward, so tiles about to come into view
+   * are already loading.
    */
-  private async fetchAndWriteDrapeSubTile(
-    parentKey: number,
-    subKey: number,
-    atlasX: number, atlasY: number,
-    subX: number, subY: number,
-    subSize: number,
-    fetchFn: () => Promise<ImageBitmap | null>,
-  ): Promise<void> {
-    const epoch = this.fetchEpoch;
-    try {
-      const image = await fetchFn();
-      if (!image) return;
-
-      if (epoch !== this.fetchEpoch) { image.close(); return; }
-      if (!this.drapeAtlas) { image.close(); return; }
-      if (!this.atlas.hasTile(parentKey)) { image.close(); return; }
-
-      this.drapeAtlas.writeSubRegion(image, atlasX, atlasY, subX, subY, subSize);
-      image.close();
-    } catch (e) {
-      console.warn(`treelet: drape sub-tile fetch failed [${tileKeyStr(subKey)}]`, e);
-    } finally {
-      if (epoch === this.fetchEpoch) {
-        this.pendingDrapeTiles.delete(subKey);
-
-        // Update composite tracker (success or failure path)
-        const tracker = this._compositeParents.get(parentKey);
-        if (tracker) {
-          tracker.inflight--;
-          tracker.completed++;
-
-          if (tracker.completed >= tracker.total) {
-            // All sub-tiles done → mark loaded + queue single GPU upload
-            this._compositeParents.delete(parentKey);
-            if (this.drapeAtlas && this.atlas.hasTile(parentKey)) {
-              this.drapeAtlas.markLoadedAndDirty(
-                parentKey, tracker.atlasX, tracker.atlasY, tracker.tilePixels);
-              this._drapeEffectiveZ.set(parentKey, tracker.effectiveZ);
-            }
-          }
-          // Remaining pending sub-tiles (if any) will be launched
-          // by drainPendingSubTiles() in the next fetchDrapeTiles() call.
-        }
-
-        // Re-trigger to start next batch of drape fetches (coalesced
-        // via microtask to avoid redundant scans during burst completions).
-        this.scheduleDrapeFetch();
-      }
+  private computeCullRegion(view: FrameView, orbitDist: number): void {
+    const c = this.cull;
+    let vx = 0;
+    let vy = 0;
+    if (!view.teleported && Number.isFinite(this.prevCamX)) {
+      vx = (view.cameraX - this.prevCamX) * PREFETCH_LOOKAHEAD_FRAMES;
+      vy = (view.cameraY - this.prevCamY) * PREFETCH_LOOKAHEAD_FRAMES;
+      const limit = orbitDist * 0.5;
+      const speed = Math.sqrt(vx * vx + vy * vy);
+      if (speed > limit * 8) { vx = 0; vy = 0; } // jump, not motion
+      else if (speed > limit) { vx *= limit / speed; vy *= limit / speed; }
     }
+    this.prevCamX = view.cameraX;
+    this.prevCamY = view.cameraY;
+
+    // Small fixed margin against tiles flickering at the screen edges.
+    const margin = orbitDist * 0.01;
+    const r = view.horizon + margin;
+    c.radius = r;
+    this.planes.set(view.frustum);
+    for (let i = 3; i < 16; i += 4) this.planes[i] += margin;
+    c.planes = this.planes;
+
+    const speed = Math.sqrt(vx * vx + vy * vy);
+    if (speed > 0) {
+      // Where the frustum will be: n·(p − v) + d ≥ 0, i.e. d grows by −n·v.
+      const f = this.planes;
+      for (let i = 0; i < 4; i++) this.prefetch[i] = Math.max(0, -(f[i * 4] * vx + f[i * 4 + 1] * vy));
+      this.prefetch[4] = speed;
+      c.prefetch = this.prefetch;
+    } else {
+      c.prefetch = null;
+    }
+    const rr = r + speed;
+    c.minX = view.cameraX - rr;
+    c.maxX = view.cameraX + rr;
+    c.minY = view.cameraY - rr;
+    c.maxY = view.cameraY + rr;
   }
 
   /**
-   * Combined update + fetch for initial load, layer change, forced refresh.
+   * Height range of a tile in scene units for frustum culling: from its own
+   * data, else its nearest loaded ancestor (padded: coarse data flattens
+   * peaks), else a range that covers any terrain on Earth.
    */
-  update(nadirX: number, nadirY: number, zoom: number, exaggeration: number): void {
-    this.updateFrame(nadirX, nadirY, zoom, exaggeration);
-    this.fetchTiles();
-  }
+  private readonly heightBounds: HeightBounds = (z, x, y, south, north, out) => {
+    let lo = UNKNOWN_MIN_ELEVATION_M;
+    let hi = UNKNOWN_MAX_ELEVATION_M;
+    for (let az = z, ax = x, ay = y; az >= 0; az--, ax >>= 1, ay >>= 1) {
+      const slot = this.atlas.get(packTileKey(az, ax, ay));
+      if (!slot) continue;
+      lo = slot.min;
+      hi = slot.max;
+      if (az < z) {
+        const pad = (hi - lo) * 0.25 + 100;
+        lo -= pad;
+        hi += pad;
+      }
+      break;
+    }
+    // Mercator scales heights by cosh(y·2π/W), growing away from the equator.
+    const w = (2 * Math.PI) / this.tileGrid.worldScale;
+    const kFar = Math.cosh(Math.max(Math.abs(south), Math.abs(north)) * w);
+    const kNear = south < 0 && north > 0 ? 1 : Math.cosh(Math.min(Math.abs(south), Math.abs(north)) * w);
+    const s = this.opts.metersToScene * this.exaggeration;
+    out[0] = lo * (lo < 0 ? kFar : kNear) * s;
+    out[1] = hi * (hi > 0 ? kFar : kNear) * s;
+  };
 
-  /**
-   * Fetch elevation data and write into the atlas.
-   *
-   * @param deferWrite  When true (COG sources), the write is queued and
-   *   drained by drainPendingWrites() at a capped rate per frame to avoid
-   *   burst-completing fetches from blocking the main thread. When false
-   *   (URL-based sources), the write happens immediately in the callback
-   *   for maximum throughput - URL fetches naturally stagger across CDN
-   *   servers and don't create problematic bursts.
-   */
-  private async fetchAndWriteElevation(
-    key: number,
-    deferWrite: boolean,
-    overzoom: { dz: number; relX: number; relY: number } | null,
-    fetchFn: () => Promise<{ elevations: Float32Array; width: number; height: number } | null>,
-  ): Promise<void> {
-    const epoch = this.fetchEpoch;
-    try {
-      const result = await fetchFn();
-      if (!result) return;
+  // =========================================================================
+  // Instance buffer
+  // =========================================================================
 
-      // Discard if epoch changed (reload/zoom change)
-      if (epoch !== this.fetchEpoch) return;
-      if (!this.pendingTiles.has(key)) return;
+  private buildInstances(tiles: readonly SelectedTile[], base: BaseLayer): void {
+    const atlas = this.atlas;
+    const drape = this.drapeVisible ? this.drapeAtlas : null;
+    atlas.clearPins();
+    this.missingElev.length = 0;
+    this.missingElevCovered.length = 0;
+    this.missingParents.length = 0;
+    this.missingFallback.clear();
+    this.missingDrape.length = 0;
+    this.missingDrapeCovered.length = 0;
+    this.neededElev.clear();
+    this.neededDrape.clear();
 
-      if (deferWrite) {
-        // COG: queue for budget-limited per-frame drain
-        this.queuedWriteKeys.add(key);
-        this.pendingWrites.push({
-          key,
-          elevations: result.elevations,
-          width: result.width,
-          height: result.height,
-          epoch,
-          overzoom,
-        });
+    const buf = this.instanceData;
+    const minLevel = Math.max(0, base.source.minZoom);
+    let n = 0;
+
+    for (const t of tiles) {
+      this.neededElev.add(t.key);
+
+      // ---- Elevation: own data or nearest loaded ancestor ----
+      let eLayer: number, eOx: number, eOy: number, eScale: number;
+      const own = atlas.get(t.key);
+      if (own) {
+        atlas.pin(t.key);
+        atlas.touch(t.key);
+        eLayer = own.layer; eOx = 0; eOy = 0; eScale = 1;
       } else {
-        // URL-based: write immediately (original behavior)
-        this.writeElevationToAtlas(key, result.elevations, result.width, result.height, overzoom);
+        const anc = this.findAncestor(t.z, t.x, t.y, minLevel);
+        if (!anc) {
+          this.missingElev.push(t);
+          const fz = Math.max(minLevel, t.z - COARSE_FALLBACK_LEVELS);
+          if (fz < t.z) {
+            const fallback = packTileKey(fz, t.x >> (t.z - fz), t.y >> (t.z - fz));
+            this.missingFallback.add(fallback);
+            this.neededElev.add(fallback);
+          }
+          continue; // nothing to draw yet
+        }
+        this.missingElevCovered.push(t);
+        const div = 2 ** (t.z - anc.z);
+        eLayer = anc.layer;
+        eOx = (t.x % div) / div;
+        eOy = (t.y % div) / div;
+        eScale = 1 / div;
       }
-    } catch (e) {
-      console.warn(`treelet: elevation tile fetch failed [${tileKeyStr(key)}]`, e);
-    } finally {
-      if (epoch === this.fetchEpoch) {
-        this.pendingTiles.delete(key);
-        // Re-trigger to start next batch of fetches.
-        // For immediate writes, also trigger drape fetching - this tile
-        // now has elevation data and can accept drape imagery.
-        this.fetchElevationTiles();
-        if (!deferWrite) this.scheduleDrapeFetch();
+
+      // ---- Geomorph parent ----
+      let pLayer = 0, pOx = 0, pOy = 0, pScale = 0;
+      if (t.needsParent && t.parentKey !== NO_TILE_KEY) {
+        this.neededElev.add(t.parentKey);
+        const parent = atlas.get(t.parentKey);
+        if (parent) {
+          atlas.pin(t.parentKey);
+          atlas.touch(t.parentKey);
+          pLayer = parent.layer;
+          pOx = (t.x & 1) * 0.5;
+          pOy = (t.y & 1) * 0.5;
+          pScale = 0.5;
+        } else {
+          this.missingParents.push(t.parentKey);
+          const anc = this.findAncestor(t.z - 1, t.x >> 1, t.y >> 1, minLevel);
+          if (anc) {
+            const div = 2 ** (t.z - anc.z);
+            pLayer = anc.layer;
+            pOx = (t.x % div) / div;
+            pOy = (t.y % div) / div;
+            pScale = 1 / div;
+          }
+        }
+      }
+
+      // ---- Drape: own imagery or nearest ancestor with imagery ----
+      let dLayer = 0, dOx = 0, dOy = 0, dScale = 0;
+      if (drape) {
+        if (own && drape.has(t.key, own.gen)) {
+          dLayer = own.layer; dScale = 1;
+        } else {
+          const anc = this.findDrapeAncestor(t.z, t.x, t.y, minLevel);
+          if (anc) {
+            const div = 2 ** (t.z - anc.z);
+            dLayer = anc.layer;
+            dOx = (t.x % div) / div;
+            dOy = (t.y % div) / div;
+            dScale = 1 / div;
+          }
+        }
+        if (own) {
+          const ez = this.drapeZoomFor(t.z);
+          if (ez >= 0 && drape.loadedZoom(t.key, own.gen) < ez) {
+            this.neededDrape.add(t.key);
+            (dScale > 0 ? this.missingDrapeCovered : this.missingDrape).push({ tile: t, slot: own });
+          }
+        }
+      }
+
+      const o = n * INSTANCE_STRIDE;
+      buf[o] = t.centerX - this.originX;
+      buf[o + 1] = t.centerY - this.originY;
+      buf[o + 2] = t.size;
+      buf[o + 3] = eLayer; buf[o + 4] = eOx; buf[o + 5] = eOy; buf[o + 6] = eScale;
+      buf[o + 7] = pLayer; buf[o + 8] = pOx; buf[o + 9] = pOy; buf[o + 10] = pScale;
+      buf[o + 11] = dLayer; buf[o + 12] = dOx; buf[o + 13] = dOy; buf[o + 14] = dScale;
+      buf[o + 15] = t.morphStart;
+      buf[o + 16] = t.morphEnd;
+      n++;
+    }
+    this.instanceCount = n;
+    // Fetch order: uncovered first, then covered (each list is nearest first).
+    for (const t of this.missingElevCovered) this.missingElev.push(t);
+    for (const d of this.missingDrapeCovered) this.missingDrape.push(d);
+  }
+
+  /** Nearest loaded ancestor (z−1, z−2, …) with elevation data; pins it. */
+  private findAncestor(z: number, x: number, y: number, minLevel: number): SlotInfo | null {
+    let az = z - 1, ax = x >> 1, ay = y >> 1;
+    while (az >= minLevel && az >= 0) {
+      const key = packTileKey(az, ax, ay);
+      const slot = this.atlas.get(key);
+      if (slot) {
+        this.atlas.pin(key);
+        this.atlas.touch(key);
+        return slot;
+      }
+      ax >>= 1; ay >>= 1; az--;
+    }
+    return null;
+  }
+
+  /** Nearest ancestor with resident drape imagery; pins its slot. */
+  private findDrapeAncestor(z: number, x: number, y: number, minLevel: number): SlotInfo | null {
+    const drape = this.drapeAtlas;
+    if (!drape) return null;
+    let az = z - 1, ax = x >> 1, ay = y >> 1;
+    while (az >= minLevel && az >= 0) {
+      const key = packTileKey(az, ax, ay);
+      const slot = this.atlas.get(key);
+      if (slot && drape.has(key, slot.gen)) {
+        this.atlas.pin(key);
+        this.atlas.touch(key);
+        return slot;
+      }
+      ax >>= 1; ay >>= 1; az--;
+    }
+    return null;
+  }
+
+  /** Upload the instance buffer if it changed. Returns true when it did. */
+  private uploadInstances(): boolean {
+    const n = this.instanceCount;
+    const len = n * INSTANCE_STRIDE;
+    const cur = this.instanceData;
+    const prev = this.prevInstanceData;
+    let changed = n !== this.prevInstanceCount;
+    if (!changed) {
+      for (let i = 0; i < len; i++) {
+        if (cur[i] !== prev[i]) { changed = true; break; }
       }
     }
+    if (!changed) return false;
+
+    prev.set(cur.subarray(0, len));
+    this.prevInstanceCount = n;
+    this.instanceBuffer.clearUpdateRanges();
+    if (len > 0) this.instanceBuffer.addUpdateRange(0, len);
+    this.instanceBuffer.needsUpdate = true;
+    this.geometry.instanceCount = n;
+    return true;
   }
 
-  /**
-   * Write fetched elevation data into the atlas and fill ancestor drape.
-   * Shared by both the immediate (URL) and deferred (COG) write paths.
-   */
-  private writeElevationToAtlas(
-    key: number,
-    elevations: Float32Array,
-    width: number,
-    height: number,
-    overzoom?: { dz: number; relX: number; relY: number } | null,
-  ): void {
-    // Compute source sub-region for overzoom tiles: extract only the
-    // portion of the parent tile that covers this child tile's extent.
-    let region: SourceRegion | undefined;
-    if (overzoom) {
-      const divisor = 1 << overzoom.dz;
-      const subW = width / divisor;
-      const subH = height / divisor;
-      region = {
-        x: overzoom.relX * subW,
-        y: overzoom.relY * subH,
-        w: subW,
-        h: subH,
-      };
+  private updateAutoRange(tiles: readonly SelectedTile[]): void {
+    let min = Infinity;
+    let max = -Infinity;
+    for (const t of tiles) {
+      const slot = this.atlas.get(t.key);
+      if (!slot || slot.empty) continue;
+      if (slot.min < min) min = slot.min;
+      if (slot.max > max) max = slot.max;
     }
-
-    const coords = this.atlas.allocateAndWrite(key, elevations, width, height, region);
-    if (!coords) return; // Atlas saturated - tile stays in missing list, retries later
-
-    // Fill the drape slot with the ancestor's correct sub-region so it shows
-    // a low-res but geographically correct drape while the actual tile loads.
-    if (this.drapeAtlas && !this.drapeAtlas.hasTile(key)) {
-      this.fillDrapeFromAncestor(key, coords.atlasX, coords.atlasY, coords.tilePixels);
+    if (!Number.isFinite(min) || !Number.isFinite(max)) return;
+    if (max - min < 1) max = min + 1;
+    if (min !== this.lastAutoMin || max !== this.lastAutoMax) {
+      this.lastAutoMin = min;
+      this.lastAutoMax = max;
+      if (setTerrainElevationRange(this.material, min, max)) this.renderDirty = true;
     }
   }
 
-  /**
-   * Drain the pending write queue: process up to MAX_WRITES_PER_FRAME entries.
-   * Each write involves a ~5-15ms bilinear resample, so we cap per-frame cost
-   * to keep the frame budget under control during COG tile bursts.
-   *
-   * Called once per frame from updateFrame(), after atlas.advanceFrame().
-   */
-  private drainPendingWrites(): void {
-    if (this._writeHead >= this.pendingWrites.length) return;
+  // =========================================================================
+  // Fetch scheduling
+  // =========================================================================
 
-    const start = performance.now();
-    let wroteAny = false;
+  private pump(base: BaseLayer, now: number): void {
+    if (this.disposed) return;
 
-    while (this._writeHead < this.pendingWrites.length) {
-      const entry = this.pendingWrites[this._writeHead++];
-      this.queuedWriteKeys.delete(entry.key);
+    // ---- Elevation ----
+    for (const key of this.neededElev) this.elevChannel.touch(key);
+    this.elevChannel.cancelStale(STALE_REQUEST_GRACE_MS);
 
-      // Skip stale entries (epoch changed since fetch completed)
-      if (entry.epoch !== this.fetchEpoch) continue;
+    const elevLimit = Math.max(1, Math.min(
+      this.opts.maxConcurrentFetches,
+      base.source.getSchedulingHints().maxConcurrentFetches,
+    ));
 
-      this.writeElevationToAtlas(entry.key, entry.elevations, entry.width, entry.height, entry.overzoom);
-      wroteAny = true;
+    const tryElevation = (z: number, x: number, y: number, key: number): boolean => {
+      if (this.atlas.has(key)) return true;
+      if (this.elevChannel.failures.isEmpty(key)) {
+        // Known nonexistent: synthesize the flat tile without a request.
+        if (this.atlas.writeEmpty(z, x, y)) this.renderDirty = true;
+        return true;
+      }
+      if (this.elevChannel.load >= elevLimit) return false;
+      if (this.atlas.available <= this.elevChannel.size) return false;
+      if (!this.elevChannel.canLaunch(key)) return true;
+      this.launchElevation(base, z, x, y, key);
+      return true;
+    };
 
-      // Check time budget after each write - stop if we'd risk exceeding it
-      if (performance.now() - start >= WRITE_BUDGET_MS) break;
+    let open = true;
+    for (const key of this.missingFallback) {
+      const { z, x, y } = parseTileKey(key);
+      if (!(open = tryElevation(z, x, y, key))) break;
+    }
+    if (open) {
+      for (const t of this.missingElev) {
+        if (!(open = tryElevation(t.z, t.x, t.y, t.key))) break;
+      }
+    }
+    if (open) {
+      for (const key of this.missingParents) {
+        const { z, x, y } = parseTileKey(key);
+        if (!tryElevation(z, x, y, key)) break;
+      }
     }
 
-    // Compact: once fully drained, reset to avoid unbounded growth
-    if (this._writeHead >= this.pendingWrites.length) {
-      this.pendingWrites.length = 0;
-      this._writeHead = 0;
+    // ---- Drape ----
+    const drapeLayer = this.activeDrapeLayer;
+    if (drapeLayer && this.drapeAtlas && this.drapeVisible) {
+      for (const key of this.neededDrape) this.drapeChannel.touch(key);
+      this.drapeChannel.cancelStale(STALE_REQUEST_GRACE_MS);
+      const drapeLimit = Math.max(1, Math.min(this.opts.maxConcurrentFetches, drapeLayer.source.maxConcurrency));
+      for (const { tile, slot } of this.missingDrape) {
+        if (!this.drapeChannel.canLaunch(tile.key)) continue;
+        const parts = drapeLayer.drapeParts(tile.z, tile.x, tile.y, this.drapeSlotSize);
+        if (!parts) continue;
+        const load = this.drapeChannel.load;
+        if (load > 0 && load + parts.parts.length > drapeLimit) break;
+        this.launchDrape(drapeLayer, tile.key, slot, parts.z, parts.parts);
+      }
     }
 
-    // Trigger drape fetch once after the drain batch - these tiles now have
-    // elevation data and can accept drape imagery. Avoids calling
-    // fetchDrapeTiles() after every single write (was O(writes × visibleTiles)).
-    if (wroteAny) this.fetchDrapeTiles();
+    this.scheduleWake(now);
   }
 
-  /**
-   * Force re-fetch all tiles (e.g., after base layer change).
-   */
+  /** Wake up when the earliest backed-off tile becomes eligible again. */
+  private scheduleWake(now: number): void {
+    const next = Math.min(
+      this.elevChannel.failures.nextRetryAt(now) ?? Infinity,
+      this.drapeChannel.failures.nextRetryAt(now) ?? Infinity,
+    );
+    if (!Number.isFinite(next) || next >= this.wakeAt) return;
+    if (this.wakeTimer !== null) clearTimeout(this.wakeTimer);
+    this.wakeAt = next;
+    this.wakeTimer = setTimeout(() => {
+      this.wakeTimer = null;
+      this.wakeAt = Infinity;
+      this.markDirty();
+    }, Math.max(0, next - now) + 5);
+  }
+
+  private launchElevation(base: BaseLayer, z: number, x: number, y: number, key: number): void {
+    const epoch = this.elevEpoch;
+    const coord: TileCoord = { z, x, y };
+    const size = this.slotSize;
+    this.elevChannel.launch(key, async (id) => {
+      await base.source.ensureReady();
+      if (this.disposed || epoch !== this.elevEpoch) return 'stale';
+      const url = base.getTileUrl(coord);
+      const oz = base.getOverzoomRegion(coord);
+      const region = oz
+        ? { x: oz.relX / 2 ** oz.dz, y: oz.relY / 2 ** oz.dz, w: 1 / 2 ** oz.dz, h: 1 / 2 ** oz.dz }
+        : null;
+      const res = await this.workerPool.loadElevation({
+        id,
+        url,
+        decoderType: base.decoderType,
+        decoderSource: base.decoderSource ?? undefined,
+        region,
+        size,
+        init: base.source.getRequestInit?.(),
+      });
+      if (this.disposed || epoch !== this.elevEpoch) return 'stale';
+      if (res.status === 'empty') {
+        if (!this.atlas.writeEmpty(z, x, y)) return 'stale';
+        return 'empty';
+      }
+      if (!this.atlas.write(z, x, y, res.data, res.min, res.max, res.texelsPerPixel)) return 'stale';
+      this.queueTileEvent('load', z, x, y);
+      return 'ok';
+    }, (id) => this.workerPool.cancel(id));
+  }
+
+  /** Source zoom for a tile's drape (−1 when the drape can't cover it). */
+  private drapeZoomFor(z: number): number {
+    return this.activeDrapeLayer?.sourceZoomFor(z, this.drapeSlotSize) ?? -1;
+  }
+
+  private launchDrape(d: DrapeLayer, key: number, slot: SlotInfo, ez: number, parts: DrapePart[]): void {
+    const epoch = this.drapeEpoch;
+    const gen = slot.gen;
+    const layer = slot.layer;
+    const size = this.drapeSlotSize;
+    this.drapeChannel.launch(key, async (id) => {
+      await d.source.ensureReady();
+      if (this.disposed || epoch !== this.drapeEpoch) return 'stale';
+      const res = await this.workerPool.loadDrape({ id, parts, size, init: d.source.getRequestInit?.() });
+      if (res.status === 'ok') d.observeTileSize(res.imageSize);
+      const drape = this.drapeAtlas;
+      if (this.disposed || epoch !== this.drapeEpoch || !drape) return 'stale';
+      // The elevation slot (and with it this drape layer) may have been reassigned.
+      if (this.atlas.gen(key) !== gen) return 'stale';
+      if (res.status === 'empty') {
+        drape.writeEmpty(key, gen, ez);
+        return 'empty';
+      }
+      drape.write(key, layer, gen, ez, res.levels);
+      return 'ok';
+    }, (id) => this.workerPool.cancel(id), parts.length);
+  }
+
+  private reportError(layer: 'elevation' | 'drape', key: number, err: unknown): void {
+    if (this.disposed) return;
+    const msg = err instanceof Error ? err.message : String(err);
+    const coord = parseTileKey(key);
+    this.opts.onTileError?.(coord, layer, msg);
+    const log = this.errorLogs[layer];
+    log.count++;
+    log.latest = `${tileKeyStr(key)}: ${msg}`;
+    const now = performance.now();
+    if (now - log.lastLogged >= ERROR_LOG_INTERVAL_MS) {
+      console.warn(
+        `treelet: ${log.count} ${layer} tile request(s) failed (latest ${log.latest}); retrying with backoff`,
+      );
+      log.lastLogged = now;
+      log.count = 0;
+    }
+  }
+
+  // =========================================================================
+  // Layer lifecycle
+  // =========================================================================
+
+  /** Drop all terrain data and refetch (base layer changed). */
   reload(): void {
-    this.fetchEpoch++;
+    if (this.disposed) return;
+    this.elevEpoch++;
+    this.elevChannel.clear();
+    for (const slot of this.atlas.slots()) this.queueTileEvent('unload', slot.z, slot.x, slot.y);
     this.atlas.clear();
-    this.pendingTiles.clear();
-    this.pendingWrites.length = 0;
-    this._writeHead = 0;
-    this.queuedWriteKeys.clear();
-    if (this.drapeAtlas) this.drapeAtlas.clear();
-    this.pendingDrapeTiles.clear();
-    this._compositeParents.clear();
-    this._drapeEffectiveZ.clear();
-    this.lastBaseZoom = -1;
-    // Force the next frame to re-upload the instance buffer even if the
-    // tile set happens to hash to the same value as before the reload.
-    this._lastInstanceHash = 0;
-
-    // Recompute zoom bounds for the (potentially new) active layer
-    this.updateEffectiveZoomBounds();
+    this.resetDrapeState();
+    this.prevInstanceCount = -1;
+    this.lastAutoMin = NaN;
+    this.lastAutoMax = NaN;
+    this.markDirty();
   }
-
-  // =========================================================================
-  // Drape layer management
-  // =========================================================================
 
   setActiveDrape(drapeLayer: DrapeLayer | null, opacity: number = 1.0): void {
+    if (this.disposed) return;
     if (!drapeLayer) {
       this.clearDrapes();
       return;
     }
-
     this.activeDrapeLayer = drapeLayer;
-
-    // Create drape atlas lazily
+    this.drapeOpacity = opacity;
     if (!this.drapeAtlas) {
-      this.drapeAtlas = new UnifiedDrapeAtlas(this.atlasSize, this.slotSize);
-    } else {
-      this.drapeAtlas.clear();
+      // Anisotropic filtering keeps imagery sharp on ground seen at a low angle.
+      const anisotropy = Math.min(16, this.renderer.capabilities.getMaxAnisotropy());
+      this.drapeAtlas = new DrapeAtlas(this.drapeSlotSize, this.atlas.capacity, anisotropy);
+      this.drapeWriter = new ArrayTextureWriter(this.renderer, this.drapeAtlas.texture);
     }
-    this.pendingDrapeTiles.clear();
-    this._compositeParents.clear();
-    this._drapeEffectiveZ.clear();
-    setTerrainDrape(this.material, this.drapeAtlas.texture, opacity);
+    this.resetDrapeState();
+    // Unbind until the next frame re-evaluates visibility for the new layer;
+    // otherwise a layer hidden at the current zoom would keep the old binding
+    // and draw every tile in the placeholder color.
+    this.drapeVisible = false;
+    setTerrainDrape(this.material, null);
+    this.markDirty();
   }
 
   setDrapeOpacity(opacity: number): void {
-    if (this.activeDrapeLayer && this.drapeAtlas) {
-      setTerrainDrape(this.material, this.drapeAtlas.texture, opacity);
+    this.drapeOpacity = opacity;
+    if (this.drapeVisible && this.drapeAtlas &&
+        setTerrainDrape(this.material, this.drapeAtlas.texture, opacity)) {
+      this.markRender();
     }
   }
 
   clearDrapes(): void {
     this.activeDrapeLayer = null;
-    this.pendingDrapeTiles.clear();
-    this._compositeParents.clear();
-    this._drapeEffectiveZ.clear();
+    this.resetDrapeState();
     if (this.drapeAtlas) {
       this.drapeAtlas.dispose();
       this.drapeAtlas = null;
+      this.drapeWriter = null;
     }
+    this.drapeVisible = false;
     setTerrainDrape(this.material, null);
+    this.markDirty();
+  }
+
+  private resetDrapeState(): void {
+    this.drapeEpoch++;
+    this.drapeChannel.clear();
+    this.drapeAtlas?.clear();
+  }
+
+  /** Re-upload GPU state after a WebGL context restore. */
+  onContextRestored(): void {
+    if (this.disposed) return;
+    this.atlas.markAllDirty();
+    // Drape imagery has no CPU copy: refetch it.
+    this.resetDrapeState();
+    this.prevInstanceCount = -1;
+    this.markDirty();
   }
 
   // =========================================================================
   // Material State Delegation
   // =========================================================================
 
-  setMode(mode: ShaderMode): void {
-    setTerrainMode(this.material, mode);
+  private apply(changed: boolean): void {
+    if (changed) this.markRender();
   }
 
-  setColorRamp(ramp: ColorRamp): void {
-    setTerrainColorRamp(this.material, ramp);
-  }
-
-  setWireframe(enabled: boolean): void {
-    setTerrainWireframe(this.material, enabled);
-  }
-
-  setIsolineEnabled(enabled: boolean): void {
-    setTerrainIsolineEnabled(this.material, enabled);
-  }
-
+  setMode(mode: ShaderMode): void { this.apply(setTerrainMode(this.material, mode)); }
+  setColorRamp(ramp: ColorRamp): void { this.apply(setTerrainColorRamp(this.material, ramp)); }
+  setWireframe(enabled: boolean): void { this.apply(setTerrainWireframe(this.material, enabled)); }
+  setIsolineEnabled(enabled: boolean): void { this.apply(setTerrainIsolineEnabled(this.material, enabled)); }
   setIsolineSettings(interval: number, thickness?: number): void {
-    setTerrainIsolineSettings(this.material, interval, thickness);
+    this.apply(setTerrainIsolineSettings(this.material, interval, thickness));
   }
-
-  setIsolineColor(r: number, g: number, b: number): void {
-    setTerrainIsolineColor(this.material, r, g, b);
-  }
-
-  setBaseWhite(enabled: boolean): void {
-    setTerrainBaseWhite(this.material, enabled);
-  }
+  setIsolineColor(r: number, g: number, b: number): void { this.apply(setTerrainIsolineColor(this.material, r, g, b)); }
+  setBaseWhite(enabled: boolean): void { this.apply(setTerrainBaseWhite(this.material, enabled)); }
+  setSunDirection(dir: Vector3): void { this.apply(setTerrainSunDirection(this.material, dir)); }
+  setDrapeBlendMode(mode: BlendMode): void { this.apply(setTerrainDrapeBlendMode(this.material, mode)); }
+  setHillshadeStrength(strength: number): void { this.apply(setTerrainHillshadeStrength(this.material, strength)); }
+  setSlopeRange(min: number, max: number): void { this.apply(setTerrainSlopeRange(this.material, min, max)); }
 
   setElevationRange(min: number, max: number): void {
-    setTerrainElevationRange(this.material, min, max);
+    this.autoRange = false;
+    this.apply(setTerrainElevationRange(this.material, min, max));
   }
 
-  setElevationScale(metersToScene: number): void {
-    setTerrainElevationScale(this.material, metersToScene);
-  }
-
-  setExaggeration(exaggeration: number): void {
-    this.mesh.scale.z = exaggeration;
-  }
-
-  setSunDirection(dir: Vector3): void {
-    setTerrainSunDirection(this.material, dir);
+  /** Derive the color-ramp range from the visible tiles' data. */
+  setAutoElevationRange(): void {
+    this.autoRange = true;
+    this.lastAutoMin = NaN;
+    this.lastAutoMax = NaN;
+    this.prevInstanceCount = -1; // force a refresh on the next frame
+    this.markRender();
   }
 
   setMorphWidth(width: number): void {
-    setTerrainMorphWidth(this.material, width);
+    this.morphWidth = Math.max(0.05, Math.min(0.5, width));
+    this.markRender();
   }
 
-  setDrapeBlendMode(mode: BlendMode): void {
-    setTerrainDrapeBlendMode(this.material, mode);
+  setLodQuality(quality: number): void {
+    this.lodQuality = Math.max(0.25, Math.min(4, quality));
+    this.markRender();
   }
 
-  setHillshadeStrength(strength: number): void {
-    setTerrainHillshadeStrength(this.material, strength);
+  /** Haze toward the horizon (sRGB color, camera distances). */
+  setFog(color: readonly number[], start: number, end: number): void {
+    if (setTerrainFog(this.material, color, start, end)) this.renderDirty = true;
   }
 
-  /** Get the number of draw calls (always 1 for instanced rendering). */
-  getDrawCallCount(): number {
-    return 1;
+  // =========================================================================
+  // Queries
+  // =========================================================================
+
+  /** Changes whenever loaded elevation data changes (sampled heights may differ). */
+  get elevationVersion(): number {
+    return this.atlas.version;
   }
 
-  /** Get the current number of visible tile instances. */
+  /** Number of tile instances drawn in the last frame. */
   getInstanceCount(): number {
-    return this.tilePool.instanceCount;
+    return this.geometry.instanceCount;
+  }
+
+  getStats(): TreeletStats {
+    return {
+      tiles: this.geometry.instanceCount,
+      drawCalls: this.geometry.instanceCount > 0 ? 1 : 0,
+      atlasUsed: this.atlas.size,
+      atlasCapacity: this.atlas.capacity,
+      drapeTiles: this.drapeAtlas?.size ?? 0,
+      pendingElevation: this.elevChannel.size,
+      pendingDrape: this.drapeChannel.size,
+      failedTiles: this.elevChannel.failures.erroredCount + this.drapeChannel.failures.erroredCount,
+    };
   }
 
   /**
-   * Sample elevation at a world-plane coordinate from the CPU-side atlas.
-   * Walks zoom levels downward from the finest loaded to find available data.
-   * @returns Elevation in meters, or null if no tile data covers this point.
+   * Elevation in meters at a world-plane point from the CPU atlas copy,
+   * using the finest loaded tile. Returns null where no data is loaded.
    */
-  sampleElevationAtWorld(worldX: number, worldY: number, zoom: number): number | null {
-    const startZ = Math.min(Math.floor(zoom) + 1, this.effectiveMaxZoom);
-    const point = this._samplePoint;
-    point.x = worldX;
-    point.y = worldY;
-
-    for (let z = startZ; z >= this.effectiveMinZoom; z--) {
-      const coord = this.tileGrid.worldToTile(point, z);
-      const key = packTileKey(z, coord.x, coord.y);
-      if (!this.atlas.hasTile(key)) continue;
-
-      // Compute local UV within this tile
-      const tl = this.tileGrid.tileToWorldTL(coord);
-      const tileSize = this.tileGrid.getTileSize(z);
-      const u = (worldX - tl.x) / tileSize;
-      const v = (tl.y - worldY) / tileSize;
-
-      const elev = this.atlas.sampleElevation(key, u, v);
-      if (elev !== null) return elev;
+  sampleElevationAtWorld(worldX: number, worldY: number): number | null {
+    if (this.disposed) return null;
+    const W = this.tileGrid.worldScale;
+    const u = (worldX + W / 2) / W;
+    const v = (W / 2 - worldY) / W;
+    if (!(u >= 0 && u < 1 && v >= 0 && v < 1)) return null;
+    for (let z = this.lastMaxLevel; z >= 0; z--) {
+      const n = 2 ** z;
+      const tx = Math.floor(u * n);
+      const ty = Math.floor(v * n);
+      const key = packTileKey(z, tx, ty);
+      if (!this.atlas.has(key)) continue;
+      const h = this.atlas.sample(key, u * n - tx, v * n - ty);
+      if (h !== null) return h;
     }
-
     return null;
   }
 
   dispose(): void {
-    this._themeCleanup();
+    if (this.disposed) return;
+    this.disposed = true;
+    this.elevEpoch++;
+    this.drapeEpoch++;
+    this.elevChannel.clear();
+    this.drapeChannel.clear();
+    if (this.wakeTimer !== null) clearTimeout(this.wakeTimer);
+    this.wakeTimer = null;
+    this.themeCleanup();
     this.atlas.dispose();
-    if (this.drapeAtlas) this.drapeAtlas.dispose();
-    this.instancedGeo.dispose();
+    this.drapeAtlas?.dispose();
+    this.drapeAtlas = null;
+    this.drapeWriter = null;
+    this.activeDrapeLayer = null;
+    this.geometry.dispose();
     this.material.dispose();
     this.mesh.removeFromParent();
-  }
-
-  // =========================================================================
-  // Private: Drape ancestor fallback
-  // =========================================================================
-
-  /**
-   * Fill a drape slot with the correct sub-region of the nearest ancestor's
-   * drape imagery. Walks z-1, z-2, ... until an ancestor with drape data is
-   * found, then blits its sub-quadrant (upscaled) into the destination slot.
-   *
-   * This mirrors the elevation ancestor fallback in TilePool.buildInstanceBuffer
-   * and provides a low-res but geographically correct drape while the tile's
-   * actual drape loads asynchronously.
-   */
-  private fillDrapeFromAncestor(
-    key: number,
-    atlasX: number,
-    atlasY: number,
-    tilePixels: number,
-  ): void {
-    if (!this.drapeAtlas) return;
-
-    const { z, x, y } = parseTileKey(key);
-
-    // Walk up the ancestor chain to find the nearest tile with drape data
-    let az = z - 1, ax = x >> 1, ay = y >> 1;
-    while (az >= 0) {
-      const ancestorKey = packTileKey(az, ax, ay);
-
-      if (this.drapeAtlas.hasTile(ancestorKey)) {
-        const ancestorSlot = this.atlas.getCoordsPixels(ancestorKey);
-        if (ancestorSlot) {
-          // Compute the sub-region within the ancestor that covers this tile
-          const zDiff = z - az;
-          const divisor = 1 << zDiff;
-          const subSize = ancestorSlot.tilePixels / divisor;
-          const relX = x % divisor;
-          const relY = y % divisor;
-          const srcX = ancestorSlot.atlasX + relX * subSize;
-          const srcY = ancestorSlot.atlasY + relY * subSize;
-
-          // Blit the ancestor's sub-region (upscaled) into the new slot
-          this.drapeAtlas.blitRegion(srcX, srcY, subSize, atlasX, atlasY, tilePixels);
-          return;
-        }
-      }
-
-      ax = ax >> 1;
-      ay = ay >> 1;
-      az--;
-    }
-    // No ancestor with drape found - slot stays transparent (placeholder)
-  }
-
-  // =========================================================================
-  // Private: Instance buffer upload
-  // =========================================================================
-
-  /**
-   * Fingerprint the first `count` instances of TilePool.instanceData using
-   * FNV-1a-style mixing over the uint32 bit-patterns of the Float32 values.
-   *
-   * Cheap enough to run every frame (O(count * INSTANCE_FLOATS) = ~5000 ops
-   * at max capacity) and exact enough to catch any float change — no false
-   * collisions within a single render session.
-   */
-  private computeInstanceHash(count: number): number {
-    if (count === 0) return 0;
-    if (!this._instanceU32) {
-      this._instanceU32 = new Uint32Array(this.tilePool.instanceData.buffer);
-    }
-    const u32 = this._instanceU32;
-    const n = count * INSTANCE_FLOATS;
-    // Seed with count so 0-instance and N-instance never collide
-    let h = (2166136261 ^ count) | 0;
-    for (let i = 0; i < n; i++) {
-      h = Math.imul(h ^ u32[i], 16777619);
-    }
-    return h | 0;
-  }
-
-  /**
-   * Scatter TilePool's flat instance buffer into per-attribute
-   * InstancedBufferAttributes and flag them for GPU upload.
-   *
-   * Skips the scatter + upload entirely if the instance data hasn't changed
-   * since the previous upload (stationary camera, stable atlas state).
-   * For a 60 FPS idle scene this eliminates ~22KB of vertex attribute traffic
-   * and six dirty-flag checks per frame.
-   */
-  private uploadInstanceData(): void {
-    const count = this.tilePool.instanceCount;
-
-    // Fast path: if neither the instance set nor any of its attributes
-    // changed, the previous upload is still correct on the GPU.
-    const hash = this.computeInstanceHash(count);
-    if (hash === this._lastInstanceHash && this.instancedGeo.instanceCount === count) {
-      return;
-    }
-    this._lastInstanceHash = hash;
-
-    const src = this.tilePool.instanceData;
-
-    const worldArr = this.aTileWorld.array as Float32Array;
-    const scaleArr = this.aTileScale.array as Float32Array;
-    const atlasArr = this.aAtlasCoord.array as Float32Array;
-    const lodArr = this.aTileLod.array as Float32Array;
-    const parentArr = this.aParentAtlas.array as Float32Array;
-    const neighborArr = this.aNeighborLod.array as Float32Array;
-
-    // Scatter interleaved instance data into per-attribute buffers.
-    // Layout: [worldXY(2), scale(1), atlasUVS(3), lod(1), parentUVS(3), neighborLod(1)]
-    for (let i = 0; i < count; i++) {
-      const off = i * INSTANCE_FLOATS;
-      const i2 = i * 2;
-      const i3 = i * 3;
-
-      worldArr[i2]     = src[off];
-      worldArr[i2 + 1] = src[off + 1];
-      scaleArr[i]      = src[off + 2];
-      atlasArr[i3]     = src[off + 3];
-      atlasArr[i3 + 1] = src[off + 4];
-      atlasArr[i3 + 2] = src[off + 5];
-      lodArr[i]        = src[off + 6];
-      parentArr[i3]     = src[off + 7];
-      parentArr[i3 + 1] = src[off + 8];
-      parentArr[i3 + 2] = src[off + 9];
-      neighborArr[i]   = src[off + 10];
-    }
-
-    // Flag all attributes for GPU upload
-    this.aTileWorld.needsUpdate = true;
-    this.aTileScale.needsUpdate = true;
-    this.aAtlasCoord.needsUpdate = true;
-    this.aTileLod.needsUpdate = true;
-    this.aParentAtlas.needsUpdate = true;
-    this.aNeighborLod.needsUpdate = true;
-
-    this.instancedGeo.instanceCount = count;
   }
 }

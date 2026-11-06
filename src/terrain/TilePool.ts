@@ -1,593 +1,312 @@
 // ============================================================================
-// treelet.js - Tile Pool
+// treelet.js - Tile Selection (CDLOD)
 //
-// Determines which tiles are visible, assigns LOD levels based on camera
-// distance, and builds the per-instance attribute buffer for the single
-// instanced draw call. Manages tile fetch prioritization.
+// Screen-space-error driven quadtree selection in the spirit of CDLOD
+// (Strugar 2010). A tile of level z is refined when the camera is closer
+// than K·size(z+1) to its footprint, where K follows from the viewport's
+// focal length so every tile covers a roughly constant number of screen
+// pixels at any zoom, tilt or viewport size.
 //
-// LOD selection is a pure function of camera distance - deterministic,
-// no GPU feedback pass, no readback stalls.
+// Each selected tile gets a morph range [start, end] in camera distance.
+// The vertex shader slides odd grid vertices onto the coarse grid and blends
+// toward the parent's elevation across that range, reaching the parent's
+// exact geometry at `end` — the distance at which the neighbouring coarser
+// tile begins. With K ≥ 3.2 the selection guarantees:
+//   • neighbouring tiles differ by at most one level, and
+//   • a coarse tile never morphs along an edge it shares with a finer one,
+// so LOD boundaries are watertight and transitions are continuous in time.
+//
+// Distances are 3D from the camera to the tile footprint on a horizontal
+// reference plane (the orbit target's height); the shader uses the identical
+// metric per vertex, so CPU selection and GPU morphing always agree.
+//
+// Culling is radial (a horizon circle around the camera) plus the camera's
+// four side planes against each tile's 3D box, whose height range comes from
+// the loaded elevation data. LOD never depends on the cull region, so moving
+// the culling boundaries can't change any tile's level.
 // ============================================================================
 
 import type { TileGrid } from '../tiles/TileGrid';
-import type { UnifiedAtlas, AtlasCoords } from './UnifiedAtlas';
-import type { TileCoord, WorldPoint } from '../core/types';
 import { packTileKey, NO_TILE_KEY } from '../tiles/TileIndex';
+import { MIN_LOD_RANGE_FACTOR } from '../core/constants';
 
-/** A tile that should be visible this frame. */
-export interface VisibleTile {
+/** A tile selected for rendering this frame. Pooled: valid until the next select(). */
+export interface SelectedTile {
   key: number;
-  coord: TileCoord;
-  /** World-space center of the tile. */
+  z: number;
+  x: number;
+  y: number;
+  /** World-space center and edge length. */
   centerX: number;
   centerY: number;
-  /** World-space size of the tile. */
-  worldSize: number;
-  /** Camera distance (for sorting). */
+  size: number;
+  /** Minimum camera distance to the tile footprint (fetch priority). */
   distance: number;
-  /** Atlas coordinates (null if tile data not yet loaded). */
-  atlas: AtlasCoords | null;
-  /** Parent tile key (z-1 level), or NO_TILE_KEY if no parent. */
+  /** Geomorph range in camera distance; start ≥ end means no morph. */
+  morphStart: number;
+  morphEnd: number;
+  /** Whether any part of the tile can be morphing (parent data needed). */
+  needsParent: boolean;
+  /** Parent key (z−1) or NO_TILE_KEY at the coarsest level. */
   parentKey: number;
-  /** Parent atlas coordinates (null if parent not loaded). */
-  parentAtlas: AtlasCoords | null;
-  /** Packed neighbor LOD differences for geomorphing (L + R*16 + B*256 + T*4096). */
-  neighborLodPacked: number;
 }
 
-/** Default maximum number of tile instances to render per frame. */
-export const MAX_INSTANCES = 512;
+/** Culling region: a root box, a horizon radius and optional 3D side planes. */
+export interface CullRegion {
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+  /** Tiles whose footprint lies farther than this (ground distance from the camera) are dropped. */
+  radius: number;
+  /** 4 planes × (nx, ny, nz, d): inside when nx·x + ny·y + nz·z + d ≥ 0. */
+  planes: Float64Array | null;
+  /**
+   * Optional lookahead along the camera's motion: extra offsets for the 4
+   * planes and the radius ([d0, d1, d2, d3, r]). Dropped first when the
+   * selection exceeds the budget, before any detail is given up.
+   */
+  prefetch: Float64Array | null;
+}
 
 /**
- * Number of floats per instance in the attribute buffer.
- * Layout: worldX, worldY, worldScale, atlasU, atlasV, atlasScale,
- *         tileLod, parentAtlasU, parentAtlasV, parentAtlasScale,
- *         neighborLodPacked
+ * Height range of a tile in scene units: writes [min, max] into `out`.
+ * Only consulted when 3D planes are given.
  */
-export const INSTANCE_FLOATS = 11;
+export type HeightBounds = (z: number, x: number, y: number, south: number, north: number, out: Float64Array) => void;
 
-/** Create a zeroed VisibleTile with embedded TileCoord for pool pre-allocation. */
-function createPoolTile(): VisibleTile {
+export interface SelectParams {
+  cameraX: number;
+  cameraY: number;
+  cameraZ: number;
+  /** Height of the horizontal plane distances are measured on. */
+  refZ: number;
+  /** Desired range factor (from focal length × quality); clamped to ≥ MIN_LOD_RANGE_FACTOR. */
+  rangeFactor: number;
+  minLevel: number;
+  maxLevel: number;
+  /** Fraction of each range used for morphing. */
+  morphWidth: number;
+  budget: number;
+  cull: CullRegion;
+  /** Tile height ranges for plane culling; flat at refZ when omitted. */
+  heightBounds?: HeightBounds;
+}
+
+/** Morph distances for tiles that must never morph (coarsest level). */
+const NO_MORPH_START = 1e20;
+const NO_MORPH_END = 2e20;
+
+function createTile(): SelectedTile {
   return {
-    key: 0,
-    coord: { z: 0, x: 0, y: 0 },
-    centerX: 0,
-    centerY: 0,
-    worldSize: 0,
-    distance: 0,
-    atlas: null,
-    parentKey: NO_TILE_KEY,
-    parentAtlas: null,
-    neighborLodPacked: 0,
+    key: 0, z: 0, x: 0, y: 0,
+    centerX: 0, centerY: 0, size: 0, distance: 0,
+    morphStart: NO_MORPH_START, morphEnd: NO_MORPH_END,
+    needsParent: false, parentKey: NO_TILE_KEY,
   };
 }
 
+const byDistance = (a: SelectedTile, b: SelectedTile) => a.distance - b.distance;
+
 export class TilePool {
   private readonly tileGrid: TileGrid;
-  private readonly atlas: UnifiedAtlas;
+  private readonly pool: SelectedTile[] = [];
+  private readonly _selected: SelectedTile[] = [];
+  private count = 0;
+  private overflow = false;
 
-  /** Maximum tile instances to render per frame (configurable). */
-  private readonly maxInstances: number;
-  /** Pool capacity: maxInstances * 2 for parent tiles headroom. */
-  private readonly tilePoolSize: number;
+  /** Range factor actually used by the last select() (after budget fitting). */
+  rangeFactor = MIN_LOD_RANGE_FACTOR;
+  /** Whether the last select() had to drop tiles to respect the budget. */
+  truncated = false;
+  /** Whether the last select() included the motion lookahead. */
+  prefetched = false;
 
-  /** Visible tiles computed in the most recent update. */
-  private _visibleTiles: VisibleTile[] = [];
+  /** Budget-fitted factor kept from the previous frame (Infinity when unconstrained). */
+  private fittedK = Infinity;
+  private lastCount = 0;
+  private usePrefetch = false;
 
-  /** Tiles that are visible but not yet loaded in the atlas. */
-  private _missingTiles: VisibleTile[] = [];
+  // Per-select parameters (avoids threading them through the recursion).
+  private p!: SelectParams;
+  private dz = 0;
+  private half = 0;
+  private readonly zRange = new Float64Array(2);
 
-  /** Parent tiles needed for geomorphing but not yet in the atlas. */
-  private _missingParentTiles: VisibleTile[] = [];
-
-  /** Pre-allocated instance data buffer. */
-  readonly instanceData: Float32Array;
-
-  /** Number of active instances in the buffer (set each frame). */
-  instanceCount = 0;
-
-  /** Reusable map for quadtree LOD selection (cleared each frame). */
-  private readonly _tilesByKey = new Map<number, VisibleTile>();
-
-  /** Ancestor tile keys used as fallback this frame (for LRU touch). */
-  private readonly _usedAncestorKeys = new Set<number>();
-
-  /** Reusable set for deduplicating missing parent tiles (cleared each frame). */
-  private readonly _seenParents = new Set<number>();
-
-  /** Reusable WorldPoint for tile center calculations (avoids per-call allocation). */
-  private readonly _centerOut: WorldPoint = { x: 0, y: 0 };
-
-  /** Transient cache for neighbor LOD lookups (cleared each frame).
-   *  Keyed by packed tile key of the neighbor position, value is the resolved LOD
-   *  difference. Eliminates redundant ancestor walks for symmetric neighbors
-   *  (A's right neighbor = B's left neighbor). */
-  private readonly _neighborLodCache = new Map<number, number>();
-
-  /** Pre-allocated VisibleTile object pool (avoids ~400+ allocations/frame).
-   *  WARNING: Tile objects are reused each frame - do not retain references
-   *  across frames. All consumers (instance buffer, missing lists) are rebuilt
-   *  each frame before the pool index resets. */
-  private readonly _tilePool: VisibleTile[];
-  /** Current index into the tile pool. Reset to 0 each frame. */
-  private _poolIdx = 0;
-
-  /** Minimum zoom level for LOD selection (updated from active layer bounds). */
-  private minZoom: number;
-  /** Maximum zoom level for LOD selection (updated from active layer bounds). */
-  private maxZoom: number;
-
-  constructor(
-    tileGrid: TileGrid,
-    atlas: UnifiedAtlas,
-    minZoom: number,
-    maxZoom: number,
-    maxInstances: number = MAX_INSTANCES,
-  ) {
+  constructor(tileGrid: TileGrid) {
     this.tileGrid = tileGrid;
-    this.atlas = atlas;
-    this.minZoom = minZoom;
-    this.maxZoom = maxZoom;
-    this.maxInstances = maxInstances;
-    this.tilePoolSize = maxInstances * 2;
-    this.instanceData = new Float32Array(maxInstances * INSTANCE_FLOATS);
+  }
 
-    // Pre-allocate tile object pool
-    this._tilePool = new Array(this.tilePoolSize);
-    for (let i = 0; i < this.tilePoolSize; i++) {
-      this._tilePool[i] = createPoolTile();
-    }
+  /** Tiles selected by the last select(), nearest first. */
+  get selected(): readonly SelectedTile[] {
+    return this._selected;
   }
 
   /**
-   * Update the effective zoom range for LOD selection.
-   * Called by TerrainRenderer when the active layer's data bounds change.
-   * The caller computes the intersection of Treelet-level (camera) bounds
-   * and per-layer (data) bounds.
+   * Select tiles for the current view. When the selection exceeds the
+   * budget, the motion lookahead is dropped first, then the range factor is
+   * lowered (coarser tiles) until it fits; if even the minimum factor
+   * overflows, the farthest tiles are dropped and `truncated` is set.
    */
-  setZoomRange(minZoom: number, maxZoom: number): void {
-    this.minZoom = minZoom;
-    this.maxZoom = maxZoom;
-  }
+  select(params: SelectParams): readonly SelectedTile[] {
+    this.p = params;
+    this.dz = params.cameraZ - params.refZ;
+    this.half = this.tileGrid.worldScale / 2;
 
-  /**
-   * Acquire a VisibleTile from the pre-allocated pool.
-   * Falls back to fresh allocation if pool is exhausted (should not happen).
-   */
-  private _allocTile(): VisibleTile {
-    if (this._poolIdx < this.tilePoolSize) {
-      return this._tilePool[this._poolIdx++];
-    }
-    return createPoolTile();
-  }
+    const minLevel = Math.max(0, Math.min(params.minLevel, params.maxLevel));
+    const preferred = Math.max(MIN_LOD_RANGE_FACTOR, params.rangeFactor);
+    let k = preferred;
+    // Hysteresis: once the budget forced a coarser factor, keep it until the
+    // view clearly fits at the preferred one (the tile count grows ~1.6× per
+    // step), so the LOD doesn't flip back and forth between frames.
+    if (this.fittedK < preferred && this.lastCount > params.budget * 0.5) k = this.fittedK;
+    this.usePrefetch = params.cull.prefetch !== null;
 
-  /**
-   * Compute visible tiles, LOD assignment, and build the instance buffer.
-   *
-   * @param cameraX - Camera world-space X (nadir)
-   * @param cameraY - Camera world-space Y (nadir)
-   * @param baseZoom - Current base zoom level from camera distance
-   * @param extentMin - Visible extent bottom-left corner
-   * @param extentMax - Visible extent top-right corner
-   * @param frustumPlanes - Optional 2D frustum half-planes (Float32Array(12))
-   *   for tight trapezoid culling at tilted views. null = AABB-only culling.
-   */
-  update(
-    cameraX: number,
-    cameraY: number,
-    baseZoom: number,
-    extentMin: WorldPoint,
-    extentMax: WorldPoint,
-    frustumPlanes: Float32Array | null = null,
-  ): void {
-    this._visibleTiles.length = 0;
-    this._missingTiles.length = 0;
-    this._missingParentTiles.length = 0;
-    this._tilesByKey.clear();
-    this._poolIdx = 0;
-
-    // Quadtree LOD selection: start from coarsest tiles covering the visible
-    // extent, recursively subdivide where camera distance warrants finer LOD.
-    // Guarantees complete spatial coverage - every area is either a leaf tile
-    // or subdivided into 4 children, so no LOD boundary gaps are possible.
-    const floorZoom = Math.floor(baseZoom);
-    const tilesByKey = this._tilesByKey;
-
-    // Inner radius: distance threshold for the finest LOD level.
-    const maxLod = Math.min(floorZoom + 1, this.maxZoom);
-    const baseTileSize = this.tileGrid.getTileSize(maxLod);
-    const innerRadius = baseTileSize * 2;
-
-    // Start from coarsest level (up to 6 levels coarser than finest)
-    const startZoom = Math.max(this.minZoom, maxLod - 6);
-    const startTileSize = this.tileGrid.getTileSize(startZoom);
-
-    const startTiles = this.tileGrid.getTilesInExtent(
-      { x: extentMin.x - startTileSize, y: extentMin.y - startTileSize },
-      { x: extentMax.x + startTileSize, y: extentMax.y + startTileSize },
-      startZoom,
-    );
-
-    for (const coord of startTiles) {
-      this.subdivideQuadtree(
-        coord.z, coord.x, coord.y,
-        maxLod, innerRadius, cameraX, cameraY,
-        extentMin, extentMax, tilesByKey, frustumPlanes,
-      );
-    }
-
-    // Collect and sort visible tiles by distance (nearest first)
-    for (const tile of tilesByKey.values()) {
-      this._visibleTiles.push(tile);
-    }
-    this._visibleTiles.sort((a, b) => a.distance - b.distance);
-
-    // Cap to maxInstances
-    if (this._visibleTiles.length > this.maxInstances) {
-      this._visibleTiles.length = this.maxInstances;
-    }
-
-    // Identify missing tiles (visible but not in atlas)
-    for (const tile of this._visibleTiles) {
-      if (!tile.atlas) this._missingTiles.push(tile);
-    }
-
-    // Identify parent tiles needed for geomorphing but not yet in atlas.
-    // Parent tiles near the camera aren't in the visible set (superseded by finer children)
-    // but are needed so the geomorphing shader can sample coarser elevation at LOD edges.
-    this._seenParents.clear();
-    for (const tile of this._visibleTiles) {
-      if (tile.parentKey === NO_TILE_KEY || tile.parentAtlas) continue; // Already loaded or no parent
-      if (this._seenParents.has(tile.parentKey)) continue;
-      if (this.atlas.hasTile(tile.parentKey)) {
-        // Parent loaded since update started; refresh parentAtlas
-        tile.parentAtlas = this.atlas.getCoords(tile.parentKey);
+    for (let attempt = 0; ; attempt++) {
+      this.rangeFactor = k;
+      this.runSelection(minLevel, k);
+      if (!this.overflow || attempt >= 10) break;
+      if (this.usePrefetch) {
+        this.usePrefetch = false;
         continue;
       }
-      this._seenParents.add(tile.parentKey);
-
-      if (tile.coord.z <= 0) continue;
-
-      const parent = this._allocTile();
-      parent.key = tile.parentKey;
-      parent.coord.z = tile.coord.z - 1;
-      parent.coord.x = tile.coord.x >> 1;
-      parent.coord.y = tile.coord.y >> 1;
-      parent.centerX = tile.centerX; // approximate - only used for sort distance
-      parent.centerY = tile.centerY;
-      parent.worldSize = tile.worldSize * 2;
-      parent.distance = tile.distance;
-      parent.atlas = null;
-      parent.parentKey = NO_TILE_KEY;
-      parent.parentAtlas = null;
-      parent.neighborLodPacked = 0;
-      this._missingParentTiles.push(parent);
+      if (k <= MIN_LOD_RANGE_FACTOR) break;
+      k = Math.max(MIN_LOD_RANGE_FACTOR, k * 0.8);
     }
+    this.fittedK = k < preferred ? k : Infinity;
+    this.lastCount = this.count;
+    this.prefetched = this.usePrefetch;
 
-    // Touch all visible tiles in the atlas (prevent LRU eviction)
-    for (const tile of this._visibleTiles) {
-      if (tile.atlas) {
-        this.atlas.touch(tile.key);
+    const out = this._selected;
+    out.length = 0;
+    for (let i = 0; i < this.count; i++) out.push(this.pool[i]);
+    out.sort(byDistance);
+    this.truncated = this.overflow;
+    if (out.length > params.budget) out.length = params.budget;
+    return out;
+  }
+
+  private runSelection(minLevel: number, k: number): void {
+    this.count = 0;
+    this.overflow = false;
+    const { cull } = this.p;
+    const size = this.tileGrid.getTileSize(minLevel);
+    const n = 2 ** minLevel;
+    const half = this.half;
+    const x0 = Math.max(0, Math.floor((cull.minX + half) / size));
+    const x1 = Math.min(n - 1, Math.floor((cull.maxX + half) / size));
+    const y0 = Math.max(0, Math.floor((half - cull.maxY) / size));
+    const y1 = Math.min(n - 1, Math.floor((half - cull.minY) / size));
+    // Hard limit on candidates collected (selection budget plus slack for
+    // the farthest-first truncation fallback).
+    const hardLimit = this.p.budget * 4;
+    for (let y = y0; y <= y1 && this.count < hardLimit; y++) {
+      for (let x = x0; x <= x1 && this.count < hardLimit; x++) {
+        this.visit(minLevel, x, y, minLevel, k, hardLimit);
       }
-      // Also touch parent (needed for geomorphing fallback)
-      if (tile.parentKey !== NO_TILE_KEY) {
-        this.atlas.touch(tile.parentKey);
+    }
+    if (this.count >= hardLimit) this.overflow = true;
+  }
+
+  private visit(z: number, x: number, y: number, minLevel: number, k: number, hardLimit: number): void {
+    if (this.count >= hardLimit) {
+      this.overflow = true;
+      return;
+    }
+    const p = this.p;
+    const size = this.tileGrid.getTileSize(z);
+    const west = x * size - this.half;
+    const east = west + size;
+    const north = this.half - y * size;
+    const south = north - size;
+
+    const cull = p.cull;
+    if (east < cull.minX || west > cull.maxX || north < cull.minY || south > cull.maxY) return;
+
+    const cx = p.cameraX;
+    const cy = p.cameraY;
+    const dx = cx < west ? west - cx : cx > east ? cx - east : 0;
+    const dy = cy < south ? south - cy : cy > north ? cy - north : 0;
+    const ground2 = dx * dx + dy * dy;
+    const prefetch = this.usePrefetch ? cull.prefetch : null;
+    const radius = prefetch !== null ? cull.radius + prefetch[4] : cull.radius;
+    if (ground2 > radius * radius) return;
+
+    const planes = cull.planes;
+    if (planes !== null) {
+      const zr = this.zRange;
+      if (p.heightBounds) p.heightBounds(z, x, y, south, north, zr);
+      else { zr[0] = p.refZ; zr[1] = p.refZ; }
+      for (let i = 0; i < 4; i++) {
+        const o = i * 4;
+        const nx = planes[o];
+        const ny = planes[o + 1];
+        const nz = planes[o + 2];
+        const d = prefetch !== null ? planes[o + 3] + prefetch[i] : planes[o + 3];
+        // Test the box corner farthest along the plane normal.
+        const tx = nx > 0 ? east : west;
+        const ty = ny > 0 ? north : south;
+        const tz = nz > 0 ? zr[1] : zr[0];
+        if (nx * tx + ny * ty + nz * tz + d < 0) return;
       }
     }
 
-    // Compute neighbor LOD differences for geomorphing
-    this.computeNeighborLod(tilesByKey);
+    const minDist = Math.sqrt(ground2 + this.dz * this.dz);
 
-    // Build instance buffer
-    this.buildInstanceBuffer();
-
-    // Touch ancestor tiles used as fallback (prevent LRU eviction of ancestors
-    // that are actively providing elevation data for tiles still loading).
-    // Must run after buildInstanceBuffer() which populates _usedAncestorKeys.
-    for (const key of this._usedAncestorKeys) {
-      this.atlas.touch(key);
-    }
-  }
-
-  /** Tiles visible this frame. */
-  get visibleTiles(): readonly VisibleTile[] {
-    return this._visibleTiles;
-  }
-
-  /** Tiles visible but not yet loaded in the atlas, sorted by distance (nearest first). */
-  get missingTiles(): readonly VisibleTile[] {
-    return this._missingTiles;
-  }
-
-  /** Parent tiles needed for geomorphing but not yet in the atlas. */
-  get missingParentTiles(): readonly VisibleTile[] {
-    return this._missingParentTiles;
-  }
-
-  // ==== Private ====
-
-  /**
-   * Compute the target zoom level for a given distance from camera.
-   * Uses a concentric-ring pattern at tile granularity.
-   */
-  private computeTargetZoom(dist: number, innerRadius: number, maxLod: number): number {
-    if (dist <= 0 || innerRadius <= 0) return Math.min(maxLod, this.maxZoom);
-
-    // Each LOD level doubles the distance threshold
-    const lodOffset = Math.max(0, Math.floor(Math.log2(dist / innerRadius)));
-    const zoom = Math.max(this.minZoom + 2, Math.min(maxLod - lodOffset, this.maxZoom));
-    return zoom;
-  }
-
-  /**
-   * Recursive quadtree LOD selection. Decides whether a tile should be a
-   * leaf (included as visible) or subdivided into 4 finer children.
-   * Guarantees complete spatial coverage: no area is ever skipped.
-   *
-   * Takes z/x/y as separate primitives (not a TileCoord object) to
-   * eliminate ~400-800 per-frame object allocations from recursive calls.
-   */
-  private subdivideQuadtree(
-    z: number, x: number, y: number,
-    maxLod: number,
-    innerRadius: number,
-    cameraX: number,
-    cameraY: number,
-    extentMin: WorldPoint,
-    extentMax: WorldPoint,
-    tilesByKey: Map<number, VisibleTile>,
-    frustumPlanes: Float32Array | null,
-  ): void {
-    // Compute tile center into reusable output object (avoids allocations)
-    const center = this._centerOut;
-    this.tileGrid.tileToWorldCenterOut(z, x, y, center);
-    const tileSize = this.tileGrid.getTileSize(z);
-
-    // AABB cull: skip tiles entirely outside the visible extent
-    const halfTile = tileSize * 0.5;
-    const margin = tileSize;
-    if (center.x + halfTile < extentMin.x - margin ||
-        center.x - halfTile > extentMax.x + margin ||
-        center.y + halfTile < extentMin.y - margin ||
-        center.y - halfTile > extentMax.y + margin) {
+    if (z >= p.maxLevel || minDist >= k * size * 0.5) {
+      this.emit(z, x, y, west, north, size, minDist, minLevel, k);
       return;
     }
 
-    // Frustum plane cull: tight trapezoid rejection for tilted views.
-    // Tests the tile AABB against each of the 4 inward-facing half-planes.
-    // A tile is rejected if its "most-inside" corner is outside any plane.
-    // Cost: ~2 dot products on average (early break on first failing plane).
-    if (frustumPlanes !== null) {
-      let outside = false;
-      for (let p = 0; p < 4; p++) {
-        const nx = frustumPlanes[p * 3];
-        const ny = frustumPlanes[p * 3 + 1];
-        const d  = frustumPlanes[p * 3 + 2];
-        // Pick the AABB corner most in the direction of the plane normal
-        const testX = center.x + (nx > 0 ? halfTile : -halfTile);
-        const testY = center.y + (ny > 0 ? halfTile : -halfTile);
-        if (nx * testX + ny * testY + d < 0) { outside = true; break; }
-      }
-      if (outside) return;
-    }
-
-    const dx = center.x - cameraX;
-    const dy = center.y - cameraY;
-    const dist = Math.sqrt(dx * dx + dy * dy);
-    const targetZoom = this.computeTargetZoom(dist, innerRadius, maxLod);
-
-    // Leaf: tile's zoom is at or finer than the target, or at max zoom.
-    // The >= comparison is key: at LOD boundaries, a tile one level finer
-    // than targetZoom is still included (not skipped), eliminating gaps.
-    if (z >= targetZoom || z >= this.maxZoom) {
-      const key = packTileKey(z, x, y);
-      if (tilesByKey.has(key)) return;
-
-      const atlas = this.atlas.getCoords(key);
-      const pz = z - 1;
-      const parentKey = pz >= 0
-        ? packTileKey(pz, x >> 1, y >> 1)
-        : NO_TILE_KEY;
-      const parentAtlas = parentKey !== NO_TILE_KEY ? this.atlas.getCoords(parentKey) : null;
-
-      const tile = this._allocTile();
-      tile.key = key;
-      tile.coord.z = z;
-      tile.coord.x = x;
-      tile.coord.y = y;
-      tile.centerX = center.x;
-      tile.centerY = center.y;
-      tile.worldSize = tileSize;
-      tile.distance = dist;
-      tile.atlas = atlas;
-      tile.parentKey = parentKey;
-      tile.parentAtlas = parentAtlas;
-      tile.neighborLodPacked = 0;
-      tilesByKey.set(key, tile);
-
-      return;
-    }
-
-    // Subdivide into 4 children at the next finer zoom level
     const cz = z + 1;
-    const cx = x * 2;
-    const cy = y * 2;
-    this.subdivideQuadtree(cz, cx,     cy,     maxLod, innerRadius, cameraX, cameraY, extentMin, extentMax, tilesByKey, frustumPlanes);
-    this.subdivideQuadtree(cz, cx + 1, cy,     maxLod, innerRadius, cameraX, cameraY, extentMin, extentMax, tilesByKey, frustumPlanes);
-    this.subdivideQuadtree(cz, cx,     cy + 1, maxLod, innerRadius, cameraX, cameraY, extentMin, extentMax, tilesByKey, frustumPlanes);
-    this.subdivideQuadtree(cz, cx + 1, cy + 1, maxLod, innerRadius, cameraX, cameraY, extentMin, extentMax, tilesByKey, frustumPlanes);
+    const x2 = x * 2;
+    const y2 = y * 2;
+    this.visit(cz, x2, y2, minLevel, k, hardLimit);
+    this.visit(cz, x2 + 1, y2, minLevel, k, hardLimit);
+    this.visit(cz, x2, y2 + 1, minLevel, k, hardLimit);
+    this.visit(cz, x2 + 1, y2 + 1, minLevel, k, hardLimit);
   }
 
-  /** Reusable output for findAncestorAtlas (avoids per-call allocation).
-   *  Coords is always set to a valid AtlasCoords before the object is returned. */
-  private readonly _ancestorOut: { coords: AtlasCoords; ancestorZ: number; key: number } =
-    { coords: { u: 0, v: 0, scale: 0 }, ancestorZ: 0, key: 0 };
+  private emit(
+    z: number, x: number, y: number,
+    west: number, north: number, size: number,
+    minDist: number, minLevel: number, k: number,
+  ): void {
+    if (this.count >= this.p.budget) this.overflow = true;
+    if (this.count >= this.pool.length) this.pool.push(createTile());
+    const t = this.pool[this.count++];
+    t.key = packTileKey(z, x, y);
+    t.z = z;
+    t.x = x;
+    t.y = y;
+    t.size = size;
+    t.centerX = west + size * 0.5;
+    t.centerY = north - size * 0.5;
+    t.distance = minDist;
 
-  /**
-   * Walk up the ancestor chain to find the nearest loaded tile in the atlas.
-   * Returns atlas coords and the ancestor's zoom level, or null if none found.
-   * Returns a reusable reference — consume immediately, do not retain.
-   */
-  private findAncestorAtlas(coord: TileCoord): { coords: AtlasCoords; ancestorZ: number; key: number } | null {
-    let az = coord.z - 1;
-    let ax = coord.x >> 1;
-    let ay = coord.y >> 1;
-    while (az >= this.minZoom) {
-      const key = packTileKey(az, ax, ay);
-      const coords = this.atlas.getCoords(key);
-      if (coords) {
-        const out = this._ancestorOut;
-        out.coords = coords;
-        out.ancestorZ = az;
-        out.key = key;
-        return out;
-      }
-      ax >>= 1;
-      ay >>= 1;
-      az--;
-    }
-    return null;
-  }
-
-  /**
-   * Build the flat Float32Array instance buffer from visible tiles.
-   */
-  private buildInstanceBuffer(): void {
-    const buf = this.instanceData;
-    let count = 0;
-    this._usedAncestorKeys.clear();
-
-    for (const tile of this._visibleTiles) {
-      // For tiles not yet loaded in the atlas, walk up the ancestor chain
-      // to find the nearest loaded ancestor and map into its sub-region.
-      let atlasU = 0, atlasV = 0, atlasScale = 0;
-      let hasAtlasData = false;
-
-      if (tile.atlas) {
-        atlasU = tile.atlas.u;
-        atlasV = tile.atlas.v;
-        atlasScale = tile.atlas.scale;
-        hasAtlasData = true;
-      } else {
-        // Multi-level ancestor fallback: walk z-1, z-2, ... until we find loaded data
-        const ancestor = this.findAncestorAtlas(tile.coord);
-        if (ancestor) {
-          const n = tile.coord.z - ancestor.ancestorZ;
-          const divisor = 1 << n;
-          const relX = (tile.coord.x % divisor) / divisor;
-          const relY = (tile.coord.y % divisor) / divisor;
-          const subScale = 1 / divisor;
-
-          atlasU = ancestor.coords.u + relX * ancestor.coords.scale;
-          atlasV = ancestor.coords.v + relY * ancestor.coords.scale;
-          atlasScale = ancestor.coords.scale * subScale;
-          hasAtlasData = true;
-          this._usedAncestorKeys.add(ancestor.key);
-        }
-      }
-
-      // Skip tiles with no atlas data at all (not even ancestor fallback)
-      if (!hasAtlasData) continue;
-
-      const offset = count * INSTANCE_FLOATS;
-
-      buf[offset + 0] = tile.centerX;                                        // worldX
-      buf[offset + 1] = tile.centerY;                                        // worldY
-      buf[offset + 2] = tile.worldSize;                                      // worldScale
-      buf[offset + 3] = atlasU;                                              // atlasU
-      buf[offset + 4] = atlasV;                                              // atlasV
-      buf[offset + 5] = atlasScale;                                          // atlasScale
-      buf[offset + 6] = tile.coord.z;                                        // tileLod
-
-      // Parent atlas: quadrant-adjusted coords for geomorphing.
-      // The child tile occupies one quadrant of the parent tile.
-      if (tile.parentAtlas) {
-        const qx = tile.coord.x % 2;
-        const qy = tile.coord.y % 2;
-        buf[offset + 7] = tile.parentAtlas.u + qx * tile.parentAtlas.scale * 0.5;
-        buf[offset + 8] = tile.parentAtlas.v + qy * tile.parentAtlas.scale * 0.5;
-        buf[offset + 9] = tile.parentAtlas.scale * 0.5;
-      } else {
-        buf[offset + 7] = 0;
-        buf[offset + 8] = 0;
-        buf[offset + 9] = 0;
-      }
-
-      buf[offset + 10] = tile.neighborLodPacked;                             // neighborLodPacked
-
-      count++;
+    if (z <= minLevel) {
+      t.morphStart = NO_MORPH_START;
+      t.morphEnd = NO_MORPH_END;
+      t.needsParent = false;
+      t.parentKey = z > 0 ? packTileKey(z - 1, x >> 1, y >> 1) : NO_TILE_KEY;
+      return;
     }
 
-    this.instanceCount = count;
+    // Fully morphed at K·size: where the parent level stops refining.
+    // Morphing must not start before K·size/2 + √2·size, the farthest an
+    // edge shared with a finer neighbour can lie.
+    const end = k * size;
+    const start = Math.max(end * (1 - this.p.morphWidth), end * 0.5 + Math.SQRT2 * size);
+    t.morphEnd = end;
+    t.morphStart = Math.min(start, end * 0.999);
+    t.parentKey = packTileKey(z - 1, x >> 1, y >> 1);
+
+    // Farthest footprint point decides whether morphing can occur at all.
+    const cx = this.p.cameraX;
+    const cy = this.p.cameraY;
+    const fx = Math.max(Math.abs(west - cx), Math.abs(west + size - cx));
+    const fy = Math.max(Math.abs(north - cy), Math.abs(north - size - cy));
+    const maxDist = Math.sqrt(fx * fx + fy * fy + this.dz * this.dz);
+    t.needsParent = maxDist > t.morphStart;
   }
-
-  /** Wrap an X tile coordinate for longitude wrapping. */
-  private static wrapTileX(nx: number, numTiles: number): number {
-    return ((nx % numTiles) + numTiles) % numTiles;
-  }
-
-  /**
-   * Compute neighbor LOD differences for geomorphing.
-   * For each visible tile, determine the LOD of the tile covering each
-   * of its 4 edges. Pack differences into neighborLodPacked.
-   *
-   * Uses a transient cache to avoid redundant ancestor walks for symmetric
-   * neighbors (e.g. tile A's right = tile B's left).
-   */
-  private computeNeighborLod(tilesByKey: Map<number, VisibleTile>): void {
-    this._neighborLodCache.clear();
-
-    for (const tile of this._visibleTiles) {
-      const { z, x, y } = tile.coord;
-      const numTiles = 1 << z;
-
-      const dLeft = this.findNeighborLodDiff(z, TilePool.wrapTileX(x - 1, numTiles), y, numTiles, tilesByKey);
-      const dRight = this.findNeighborLodDiff(z, TilePool.wrapTileX(x + 1, numTiles), y, numTiles, tilesByKey);
-      const dBottom = this.findNeighborLodDiff(z, x, y + 1, numTiles, tilesByKey);
-      const dTop = this.findNeighborLodDiff(z, x, y - 1, numTiles, tilesByKey);
-
-      // Pack 4 values (4 bits each): L + R*16 + B*256 + T*4096
-      tile.neighborLodPacked = dLeft + dRight * 16 + dBottom * 256 + dTop * 4096;
-    }
-  }
-
-  /**
-   * Find the LOD difference between a tile at `originZ` and the visible
-   * tile covering the neighbor position (nz, nx, ny).
-   * Walks from the same zoom level down to coarser levels until a visible tile is found.
-   * Results are cached in _neighborLodCache to avoid redundant ancestor walks.
-   */
-  private findNeighborLodDiff(
-    nz: number,
-    nx: number,
-    ny: number,
-    numTilesAtZ: number,
-    tilesByKey: Map<number, VisibleTile>,
-  ): number {
-    // Out of Y bounds - no neighbor, no morph
-    if (ny < 0 || ny >= numTilesAtZ) return 0;
-
-    // Check cache first (symmetric neighbors share the same lookup)
-    const cacheKey = packTileKey(nz, nx, ny);
-    const cached = this._neighborLodCache.get(cacheKey);
-    if (cached !== undefined) return cached;
-
-    let cx = nx, cy = ny;
-
-    for (let z = nz; z >= this.minZoom; z--) {
-      const key = packTileKey(z, cx, cy);
-      if (tilesByKey.has(key)) {
-        const diff = Math.max(0, nz - z);
-        this._neighborLodCache.set(cacheKey, diff);
-        return diff;
-      }
-      // Move to parent tile coordinates
-      cx >>= 1;
-      cy >>= 1;
-    }
-
-    this._neighborLodCache.set(cacheKey, 0);
-    return 0; // No neighbor found
-  }
-
 }

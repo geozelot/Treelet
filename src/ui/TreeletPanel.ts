@@ -7,7 +7,8 @@
 //   Each column: active section (name + gear → settings) + selector header
 //
 //   Terrain  - active base layer with gear → exaggeration slider
-//              header hover → dropdown of other base layers
+//              header → dropdown of other base layers (header is a
+//              plain label when there is only one)
 //
 //   Overlay  - active overlay with gear → settings:
 //                Terrain modes:
@@ -18,13 +19,17 @@
 //                  Aspect     (gear → color ramp picker)
 //                  Contours   (gear → color, thickness, interval)
 //                External drape → opacity slider
-//              header hover → dropdown:
-//                Terrain group (modes, always first)
-//                Layer group (external drapes, if present)
+//              header → dropdown:
+//                Analysis group (terrain modes, always first)
+//                Layers group (external drapes, if present)
+//
+// A dropdown opens while the mouse is over its header or list, or after a
+// tap / Enter on the header (until a tap elsewhere, Escape, or focus leaves).
 // ============================================================================
 
 import { panelStyles } from './styles';
-import { BASE_DRAPE_ID } from '../core/Treelet';
+import { BASE_DRAPE_ID } from '../core/DisplayController';
+import { BaseElement, escapeHtml } from './dom';
 import type { Treelet } from '../core/Treelet';
 import type { BaseDrapeMode, BlendMode, ColorRamp } from '../core/types';
 import type { BaseLayer } from '../layers/BaseLayer';
@@ -43,6 +48,7 @@ const RAMP_META: { id: ColorRamp; label: string; gradient: string }[] = [
   { id: 'viridis',     label: 'Viridis',     gradient: 'linear-gradient(to right, #440154, #31688e, #35b779, #fde725)' },
   { id: 'inferno',     label: 'Inferno',     gradient: 'linear-gradient(to right, #000004, #57106e, #bc3754, #f98e09, #fcffa4)' },
   { id: 'grayscale',   label: 'Grayscale',   gradient: 'linear-gradient(to right, #000, #fff)' },
+  { id: 'cyclic',      label: 'Cyclic',      gradient: 'linear-gradient(to right, #f26b6b, #c7c25a, #5ad16f, #5ab7c7, #8a6bf2, #f26b6b)' },
 ];
 
 /** Contour color presets: label → [r, g, b] in 0–1 range. */
@@ -62,14 +68,17 @@ const OPACITY_PREFIX = 'opacity-slider-';
 /** SVG gear icon (14×14). */
 const GEAR_SVG = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="2.5"/><path d="M13.3 10a1.2 1.2 0 0 0 .2 1.3l.1.1a1.4 1.4 0 1 1-2 2l-.1-.1a1.2 1.2 0 0 0-1.3-.2 1.2 1.2 0 0 0-.7 1.1v.2a1.4 1.4 0 1 1-2.9 0v-.1a1.2 1.2 0 0 0-.8-1.1 1.2 1.2 0 0 0-1.3.2l-.1.1a1.4 1.4 0 1 1-2-2l.1-.1a1.2 1.2 0 0 0 .2-1.3 1.2 1.2 0 0 0-1.1-.7h-.2a1.4 1.4 0 1 1 0-2.9h.1a1.2 1.2 0 0 0 1.1-.8 1.2 1.2 0 0 0-.2-1.3l-.1-.1a1.4 1.4 0 1 1 2-2l.1.1a1.2 1.2 0 0 0 1.3.2h.1a1.2 1.2 0 0 0 .7-1.1v-.2a1.4 1.4 0 1 1 2.9 0v.1a1.2 1.2 0 0 0 .7 1.1 1.2 1.2 0 0 0 1.3-.2l.1-.1a1.4 1.4 0 1 1 2 2l-.1.1a1.2 1.2 0 0 0-.2 1.3v.1a1.2 1.2 0 0 0 1.1.7h.2a1.4 1.4 0 1 1 0 2.9h-.1a1.2 1.2 0 0 0-1.1.7Z"/></svg>`;
 
+/** SVG chevron (10×10, pointing down; CSS turns it toward where the list opens). */
+const CHEVRON_SVG = `<svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 3.75 5 6.25 7.5 3.75"/></svg>`;
+
 /**
  * <treelet-panel> - Main UI panel for treelet.js.
  *
- * Uses event delegation: a single click + input listener on the shadow root
- * handles all interactions. No per-element listeners are registered, so
- * innerHTML replacement (render) doesn't incur re-binding overhead.
+ * Uses event delegation: listeners on the shadow root handle all
+ * interactions. No per-element listeners are registered, so innerHTML
+ * replacement (render) doesn't incur re-binding overhead.
  */
-export class TreeletPanel extends HTMLElement {
+export class TreeletPanel extends BaseElement {
   private shadow: ShadowRoot;
   private map: Treelet | null = null;
 
@@ -84,6 +93,16 @@ export class TreeletPanel extends HTMLElement {
 
   /** Which mode entry inside Terrain overlay has its gear open. */
   private modeSettingsOpen: BaseDrapeMode | null = null;
+
+  /** Settings were just opened: the next render fades them in. */
+  private settingsEntering = false;
+
+  /** Column whose dropdown the mouse is over / that a tap or Enter opened. */
+  private hoverCol: string | null = null;
+  private pinnedCol: string | null = null;
+
+  /** How the latest interaction inside the panel started. */
+  private lastInput: 'mouse' | 'touch' | 'keyboard' = 'mouse';
 
   /** Whether delegated listeners have been bound. */
   private delegated = false;
@@ -108,6 +127,11 @@ export class TreeletPanel extends HTMLElement {
       this.delegated = true;
       this.shadow.addEventListener('click', this.handleClick);
       this.shadow.addEventListener('input', this.handleInput);
+      this.shadow.addEventListener('pointerover', this.handlePointerOver);
+      this.shadow.addEventListener('pointerdown', this.handlePointerDown, true);
+      this.shadow.addEventListener('keydown', this.handleKeyDown);
+      this.shadow.addEventListener('focusout', this.handleFocusOut);
+      this.addEventListener('pointerleave', this.handlePointerLeave);
     }
 
     // Inject style and persistent panel container once
@@ -123,11 +147,23 @@ export class TreeletPanel extends HTMLElement {
     if (this.map) this.render();
   }
 
-  /** Reset all open settings (called by compass on mouseleave). */
+  /** Close open settings and dropdowns (called when the layer row closes). */
   resetSettings(): void {
     this.settingsOpen = null;
     this.modeSettingsOpen = null;
+    this.hoverCol = null;
+    this.pinnedCol = null;
     this.render();
+  }
+
+  /** Apply hoverCol / pinnedCol to the rendered selectors. */
+  private syncSelectors(): void {
+    this.panelEl?.querySelectorAll<HTMLElement>('.has-choices').forEach((el) => {
+      const col = el.dataset.col;
+      const open = col === this.hoverCol || col === this.pinnedCol;
+      el.classList.toggle('open', open);
+      el.querySelector('.layer-col-header')?.setAttribute('aria-expanded', String(open));
+    });
   }
 
   // =========================================================================
@@ -144,6 +180,18 @@ export class TreeletPanel extends HTMLElement {
       return;
     }
 
+    // === Dropdown header: a tap or Enter toggles it (the mouse opens it by hovering) ===
+    const header = target.closest('.has-choices > .layer-col-header') as HTMLElement | null;
+    if (header) {
+      e.stopPropagation();
+      if (this.lastInput !== 'mouse') {
+        const col = (header.parentElement as HTMLElement).dataset.col!;
+        this.pinnedCol = this.pinnedCol === col ? null : col;
+        this.syncSelectors();
+      }
+      return;
+    }
+
     // === Active row click → toggle settings panel ===
     const activeRow = target.closest('.active-row[data-layer-id]') as HTMLElement | null;
     if (activeRow) {
@@ -151,7 +199,9 @@ export class TreeletPanel extends HTMLElement {
       const layerId = activeRow.dataset.layerId!;
       const opening = this.settingsOpen !== layerId;
       this.settingsOpen = opening ? layerId : null;
+      this.settingsEntering = opening;
       this.modeSettingsOpen = null;
+      this.pinnedCol = null;
       this.render();
       return;
     }
@@ -165,9 +215,12 @@ export class TreeletPanel extends HTMLElement {
 
       const layerId = entry.dataset.layerId!;
       const layerType = entry.dataset.layerType!;
+      const col = (entry.closest('.has-choices') as HTMLElement | null)?.dataset.col;
 
       this.settingsOpen = null;
       this.modeSettingsOpen = null;
+      this.pinnedCol = null;
+      this.hoverCol = null;
 
       if (layerType === 'base') {
         this.map.setActiveBaseLayer(layerId);
@@ -179,6 +232,12 @@ export class TreeletPanel extends HTMLElement {
         this.map.setBaseDrapeMode(mode);
       } else if (layerType === 'drape') {
         this.map.activateDrapeLayer(layerId);
+      }
+      // The map's 'layerchange' re-renders; close now in case nothing changed
+      this.syncSelectors();
+      // The chosen entry is gone from the new list: keep keyboard focus on its column
+      if (this.lastInput === 'keyboard' && col) {
+        this.focusSelector(`.has-choices[data-col="${col}"] > .layer-col-header`);
       }
       return;
     }
@@ -222,6 +281,77 @@ export class TreeletPanel extends HTMLElement {
       return;
     }
   };
+
+  /** Mouse over a selector (header or list) opens it; anywhere else closes it. */
+  private handlePointerOver = (ev: Event): void => {
+    const e = ev as PointerEvent;
+    if (e.pointerType !== 'mouse') return;
+    const sel = (e.target as HTMLElement).closest('.has-choices') as HTMLElement | null;
+    const col = sel?.dataset.col ?? null;
+    if (col === this.hoverCol) return;
+    this.hoverCol = col;
+    this.syncSelectors();
+  };
+
+  private handlePointerLeave = (e: PointerEvent): void => {
+    if (e.pointerType !== 'mouse' || this.hoverCol === null) return;
+    this.hoverCol = null;
+    this.syncSelectors();
+  };
+
+  /** Record the input kind; a tap outside the open dropdown closes it. */
+  private handlePointerDown = (ev: Event): void => {
+    const e = ev as PointerEvent;
+    this.lastInput = e.pointerType === 'touch' || e.pointerType === 'pen' ? 'touch' : 'mouse';
+    if (this.pinnedCol === null) return;
+    const sel = (e.target as HTMLElement).closest('.has-choices') as HTMLElement | null;
+    if (sel?.dataset.col !== this.pinnedCol) {
+      this.pinnedCol = null;
+      this.syncSelectors();
+    }
+  };
+
+  /** Escape closes the open dropdown, then the open settings (focus returns to their button). */
+  private handleKeyDown = (ev: Event): void => {
+    const e = ev as KeyboardEvent;
+    this.lastInput = 'keyboard';
+    if (e.key !== 'Escape') return;
+    if (this.pinnedCol !== null || this.hoverCol !== null) {
+      const col = this.pinnedCol ?? this.hoverCol;
+      this.pinnedCol = null;
+      this.hoverCol = null;
+      this.syncSelectors();
+      this.focusSelector(`.has-choices[data-col="${col}"] > .layer-col-header`);
+      e.stopPropagation();
+    } else if (this.settingsOpen !== null) {
+      const id = this.settingsOpen;
+      this.settingsOpen = null;
+      this.modeSettingsOpen = null;
+      this.render();
+      this.focusSelector(`.active-row[data-layer-id="${CSS.escape(id)}"]`);
+      e.stopPropagation();
+    }
+  };
+
+  /**
+   * Keyboard focus leaving an open dropdown closes it. Checked once focus has
+   * settled: a re-render briefly removes the focused button and refocuses it.
+   */
+  private handleFocusOut = (): void => {
+    if (this.lastInput !== 'keyboard' || this.pinnedCol === null) return;
+    setTimeout(() => {
+      if (this.pinnedCol === null) return;
+      const sel = this.panelEl?.querySelector(`.has-choices[data-col="${this.pinnedCol}"]`);
+      if (!sel || !sel.contains(this.shadow.activeElement)) {
+        this.pinnedCol = null;
+        this.syncSelectors();
+      }
+    }, 0);
+  };
+
+  private focusSelector(selector: string): void {
+    (this.panelEl?.querySelector(selector) as HTMLElement | null)?.focus();
+  }
 
   private handleInput = (e: Event): void => {
     if (!this.map) return;
@@ -284,18 +414,10 @@ export class TreeletPanel extends HTMLElement {
         <div class="layer-col-active">
           ${this.renderActiveBaseLayer(activeBase)}
         </div>
-        <div class="layer-col-selector">
-          <div class="layer-col-header">
-            <div class="layer-col-title">Terrain</div>
-            <span class="header-chevron"></span>
-          </div>
-          <div class="layer-col-body">
-            ${baseLayers
-              .filter((l) => !l.visible)
-              .map((l) => this.renderBaseLayerButton(l))
-              .join('')}
-          </div>
-        </div>
+        ${this.renderSelector('terrain', 'Terrain', baseLayers
+          .filter((l) => !l.visible)
+          .map((l) => this.renderBaseLayerButton(l))
+          .join(''))}
       </div>`;
 
     const overlayCol = `
@@ -303,15 +425,7 @@ export class TreeletPanel extends HTMLElement {
         <div class="layer-col-active">
           ${this.renderActiveOverlay(isBaseDrape, activeDrapeId, drapeLayers)}
         </div>
-        <div class="layer-col-selector">
-          <div class="layer-col-header">
-            <div class="layer-col-title">Overlay</div>
-            <span class="header-chevron"></span>
-          </div>
-          <div class="layer-col-body">
-            ${this.renderOverlayDropdown(isBaseDrape, activeDrapeId, drapeLayers)}
-          </div>
-        </div>
+        ${this.renderSelector('overlay', 'Overlay', this.renderOverlayDropdown(isBaseDrape, activeDrapeId, drapeLayers))}
       </div>`;
 
     // Order: from box outwards - Terrain nearest to icon
@@ -319,10 +433,43 @@ export class TreeletPanel extends HTMLElement {
       ? overlayCol + terrainCol
       : terrainCol + overlayCol;
 
-    // Only replace panel content - style tag and panel container persist
+    // Only replace panel content - style tag and panel container persist.
+    // Keep focus on the same control across the rebuild (keyboard users).
     if (this.panelEl) {
+      const focused = this.shadow.activeElement as HTMLElement | null;
+      const focusKey = focused?.id || focused?.dataset.focusKey;
       this.panelEl.innerHTML = columns;
+      this.settingsEntering = false;
+      this.syncSelectors();
+      if (focusKey) {
+        const el = this.panelEl.querySelector(focused!.id ? `#${CSS.escape(focusKey)}` : `[data-focus-key="${CSS.escape(focusKey)}"]`);
+        (el as HTMLElement | null)?.focus();
+      }
     }
+  }
+
+  /** Class list for a settings panel: hidden, or fading in right after opening. */
+  private settingsClass(isOpen: boolean): string {
+    if (!isOpen) return 'active-settings hidden';
+    return this.settingsEntering ? 'active-settings entering' : 'active-settings';
+  }
+
+  /** Column title; with alternatives it is a chevron button for their dropdown. */
+  private renderSelector(col: string, title: string, choices: string): string {
+    if (!choices) {
+      return `
+        <div class="layer-col-selector">
+          <div class="layer-col-header"><span class="layer-col-title">${title}</span></div>
+        </div>`;
+    }
+    return `
+      <div class="layer-col-selector has-choices" data-col="${col}">
+        <button type="button" class="layer-col-header" aria-expanded="false" aria-label="Choose ${title.toLowerCase()}" data-focus-key="header-${col}">
+          <span class="layer-col-title">${title}</span>
+          <span class="header-chevron">${CHEVRON_SVG}</span>
+        </button>
+        <div class="layer-col-body">${choices}</div>
+      </div>`;
   }
 
   // =========================================================================
@@ -332,7 +479,7 @@ export class TreeletPanel extends HTMLElement {
   /** Render the active base layer row with gear → exaggeration slider. */
   private renderActiveBaseLayer(layer: BaseLayer | undefined): string {
     if (!layer) {
-      return `<div class="active-btn-wrap"><div class="active-row"><span class="active-name">None</span></div></div>`;
+      return `<div class="active-btn-wrap"><div class="active-row is-empty"><span class="active-name">None</span></div></div>`;
     }
 
     const isOpen = this.settingsOpen === layer.id;
@@ -340,11 +487,12 @@ export class TreeletPanel extends HTMLElement {
 
     return `
       <div class="active-btn-wrap">
-        <div class="active-row" data-layer-id="${layer.id}" data-layer-type="base">
-          <span class="active-name">${layer.layerName}</span>
-          <span class="gear-icon${isOpen ? ' open' : ''}" data-action="gear">${GEAR_SVG}</span>
-        </div>
-        <div class="active-settings${isOpen ? '' : ' hidden'}" data-layer-id="${layer.id}">
+        <button type="button" class="active-row" data-layer-id="${escapeHtml(layer.id)}" data-layer-type="base"
+          data-focus-key="active-terrain" aria-expanded="${isOpen}" title="${escapeHtml(layer.layerName)} settings">
+          <span class="active-name">${escapeHtml(layer.layerName)}</span>
+          <span class="gear-icon" aria-hidden="true">${GEAR_SVG}</span>
+        </button>
+        <div class="${this.settingsClass(isOpen)}" data-layer-id="${escapeHtml(layer.id)}">
           <div class="control-row">
             <span class="control-label">Exaggeration</span>
             <span class="control-value" id="exag-value-${layer.id}">${exag.toFixed(1)}x</span>
@@ -370,7 +518,7 @@ export class TreeletPanel extends HTMLElement {
       const drape = drapeLayers.find((l: DrapeLayer) => l.id === activeDrapeId);
       if (drape) return this.renderActiveExternalDrape(drape);
     }
-    return `<div class="active-btn-wrap"><div class="active-row"><span class="active-name">None</span></div></div>`;
+    return `<div class="active-btn-wrap"><div class="active-row is-empty"><span class="active-name">None</span></div></div>`;
   }
 
   /** Render the active Terrain mode: mode name + gear → mode-specific settings. */
@@ -381,11 +529,12 @@ export class TreeletPanel extends HTMLElement {
 
     return `
       <div class="active-btn-wrap">
-        <div class="active-row" data-layer-id="${BASE_DRAPE_ID}" data-layer-type="base-drape">
+        <button type="button" class="active-row" data-layer-id="${BASE_DRAPE_ID}" data-layer-type="base-drape"
+          data-focus-key="active-overlay" aria-expanded="${isOpen}" title="${label} settings">
           <span class="active-name">${label}</span>
-          <span class="gear-icon${isOpen ? ' open' : ''}" data-action="gear">${GEAR_SVG}</span>
-        </div>
-        <div class="active-settings${isOpen ? '' : ' hidden'}" data-layer-id="${BASE_DRAPE_ID}">
+          <span class="gear-icon" aria-hidden="true">${GEAR_SVG}</span>
+        </button>
+        <div class="${this.settingsClass(isOpen)}" data-layer-id="${BASE_DRAPE_ID}">
           ${this.renderModeSettings(mode)}
         </div>
       </div>
@@ -402,11 +551,12 @@ export class TreeletPanel extends HTMLElement {
 
     return `
       <div class="active-btn-wrap">
-        <div class="active-row" data-layer-id="${drape.id}" data-layer-type="drape">
-          <span class="active-name">${drape.layerName}</span>
-          <span class="gear-icon${isOpen ? ' open' : ''}" data-action="gear">${GEAR_SVG}</span>
-        </div>
-        <div class="active-settings${isOpen ? '' : ' hidden'}" data-layer-id="${drape.id}">
+        <button type="button" class="active-row" data-layer-id="${escapeHtml(drape.id)}" data-layer-type="drape"
+          data-focus-key="active-overlay" aria-expanded="${isOpen}" title="${escapeHtml(drape.layerName)} settings">
+          <span class="active-name">${escapeHtml(drape.layerName)}</span>
+          <span class="gear-icon" aria-hidden="true">${GEAR_SVG}</span>
+        </button>
+        <div class="${this.settingsClass(isOpen)}" data-layer-id="${escapeHtml(drape.id)}">
           <div class="control-row">
             <span class="control-label">Opacity</span>
             <span class="control-value" id="opacity-value-${drape.id}">${Math.round(opacity * 100)}%</span>
@@ -417,7 +567,8 @@ export class TreeletPanel extends HTMLElement {
           <div class="setting-label">Terrain Blend</div>
           <div class="toggle-row" data-action-type="blend-mode">
             ${BLEND_MODES.map((m) =>
-              `<button class="toggle-btn${blendMode === m.id ? ' active' : ''}" data-action="blend-mode" data-value="${m.id}">${m.label}</button>`
+              `<button type="button" class="toggle-btn${blendMode === m.id ? ' active' : ''}" data-action="blend-mode" data-value="${m.id}"
+                data-focus-key="blend-${m.id}" aria-pressed="${blendMode === m.id}">${m.label}</button>`
             ).join('')}
           </div>
 
@@ -439,13 +590,13 @@ export class TreeletPanel extends HTMLElement {
   /** Render a base layer as a simple selectable button (for dropdown). */
   private renderBaseLayerButton(layer: BaseLayer): string {
     return `
-      <div class="layer-entry" data-layer-id="${layer.id}" data-layer-type="base">
-        <button class="layer-btn" data-action="activate">${layer.layerName}</button>
+      <div class="layer-entry" data-layer-id="${escapeHtml(layer.id)}" data-layer-type="base">
+        <button type="button" class="layer-btn" data-action="activate">${escapeHtml(layer.layerName)}</button>
       </div>
     `;
   }
 
-  /** Build the overlay dropdown: Terrain group (modes) then Layer group (external drapes). */
+  /** Build the overlay dropdown: Analysis group (terrain modes) then Layers group (external drapes). */
   private renderOverlayDropdown(
     isBaseDrape: boolean,
     activeDrapeId: string | null,
@@ -457,8 +608,8 @@ export class TreeletPanel extends HTMLElement {
     // Wireframe mode available programmatically but hidden from the dropdown
     const visibleModes: BaseDrapeMode[] = ['elevation', 'slope', 'aspect', 'contours'];
 
-    // Always show Terrain group
-    parts.push('<div class="dropdown-group-label">Terrain</div>');
+    // Always show the Analysis group
+    parts.push('<div class="dropdown-group-label">Analysis</div>');
 
     // Mode buttons (exclude active mode when base drape is active)
     for (const m of visibleModes) {
@@ -466,7 +617,7 @@ export class TreeletPanel extends HTMLElement {
       const label = m.charAt(0).toUpperCase() + m.slice(1);
       parts.push(`
         <div class="layer-entry" data-layer-id="${BASE_DRAPE_ID}" data-layer-type="base-drape-mode" data-mode="${m}">
-          <button class="layer-btn" data-action="activate">${label}</button>
+          <button type="button" class="layer-btn" data-action="activate">${label}</button>
         </div>
       `);
     }
@@ -475,11 +626,11 @@ export class TreeletPanel extends HTMLElement {
     const inactiveDrapes = drapeLayers.filter((l: DrapeLayer) => l.id !== activeDrapeId);
     if (inactiveDrapes.length > 0) {
       parts.push('<div class="overlay-separator"></div>');
-      parts.push('<div class="dropdown-group-label">Layer</div>');
+      parts.push('<div class="dropdown-group-label">Layers</div>');
       for (const drape of inactiveDrapes) {
         parts.push(`
-          <div class="layer-entry" data-layer-id="${drape.id}" data-layer-type="drape">
-            <button class="layer-btn" data-action="activate">${drape.layerName}</button>
+          <div class="layer-entry" data-layer-id="${escapeHtml(drape.id)}" data-layer-type="drape">
+            <button type="button" class="layer-btn" data-action="activate">${escapeHtml(drape.layerName)}</button>
           </div>
         `);
       }
@@ -511,8 +662,10 @@ export class TreeletPanel extends HTMLElement {
     return `
       <div class="toggle-row">
         <span class="toggle-label">Coloring</span>
-        <button class="toggle-btn${!isWhite ? ' active' : ''}" data-action="wireframe-mode" data-value="normals">Normals</button>
-        <button class="toggle-btn${isWhite ? ' active' : ''}" data-action="wireframe-mode" data-value="white">White</button>
+        <button type="button" class="toggle-btn${!isWhite ? ' active' : ''}" data-action="wireframe-mode" data-value="normals"
+          data-focus-key="wire-normals" aria-pressed="${!isWhite}">Normals</button>
+        <button type="button" class="toggle-btn${isWhite ? ' active' : ''}" data-action="wireframe-mode" data-value="white"
+          data-focus-key="wire-white" aria-pressed="${isWhite}">White</button>
       </div>
     `;
   }
@@ -522,7 +675,8 @@ export class TreeletPanel extends HTMLElement {
     return `
       <div class="ramp-list" data-action-type="ramp">
         ${RAMP_META.map((r) =>
-          `<button class="ramp-btn${ramp === r.id ? ' active' : ''}" data-value="${r.id}">
+          `<button type="button" class="ramp-btn${ramp === r.id ? ' active' : ''}" data-value="${r.id}"
+            data-focus-key="ramp-${r.id}" aria-pressed="${ramp === r.id}">
             <span>${r.label}</span>
             <span class="ramp-indicator" style="background:${r.gradient}"></span>
           </button>`
@@ -572,9 +726,9 @@ export class TreeletPanel extends HTMLElement {
           const active = Math.abs(c.rgb[0] - currentColor[0]) < 0.02
             && Math.abs(c.rgb[1] - currentColor[1]) < 0.02
             && Math.abs(c.rgb[2] - currentColor[2]) < 0.02;
-          return `<div class="color-swatch${active ? ' active' : ''}"
+          return `<button type="button" class="color-swatch${active ? ' active' : ''}"
             style="background:${c.hex}" data-r="${c.rgb[0]}" data-g="${c.rgb[1]}" data-b="${c.rgb[2]}"
-            title="${c.label}"></div>`;
+            data-focus-key="swatch-${c.label}" title="${c.label}" aria-label="${c.label} lines" aria-pressed="${active}"></button>`;
         }).join('')}
       </div>
 
@@ -593,7 +747,3 @@ export class TreeletPanel extends HTMLElement {
   }
 }
 
-// Register the custom element
-if (typeof customElements !== 'undefined' && !customElements.get('treelet-panel')) {
-  customElements.define('treelet-panel', TreeletPanel);
-}

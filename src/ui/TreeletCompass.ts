@@ -6,6 +6,10 @@
 //   - Slide-out nav panel: map coords (copy), viewport stats, D-pad, zoom
 //   - Click compass to reset orientation (azimuth + tilt)
 //   - Layer box with slide-out panel for layer/overlay selection
+//
+// Each corner row opens while the mouse is over it, after a tap on its box
+// (until a tap elsewhere), or while it holds keyboard focus; Escape closes it.
+// On touch, the first tap on the compass opens its panel, the next one resets.
 // ============================================================================
 
 import { compassStyles } from './compassStyles';
@@ -16,6 +20,7 @@ import type { Treelet } from '../core/Treelet';
 import type { CameraController, CameraState } from '../scene/CameraController';
 import type { UICorner } from '../core/types';
 import { WebMercator } from '../crs/WebMercator';
+import { BaseElement } from './dom';
 
 // ===========================================================================
 // Inline SVGs for navigation buttons and copy icon
@@ -36,11 +41,56 @@ function formatBearing(rotation: number): string {
   return `${(((rotation % 360) + 360) % 360).toFixed(1)}°`;
 }
 
+/** How the latest interaction started. */
+type InputKind = 'mouse' | 'touch' | 'keyboard';
+
+type OpenReason = 'hover' | 'tap' | 'focus';
+
+/**
+ * Open state of a corner row (box + slide-out). The row is open while any
+ * reason holds; closing runs `onClose` (e.g. to collapse panel settings).
+ */
+class RowDisclosure {
+  private readonly reasons = new Set<OpenReason>();
+
+  constructor(
+    readonly row: HTMLElement,
+    readonly box: HTMLElement,
+    private readonly onClose?: () => void,
+  ) {}
+
+  get isOpen(): boolean { return this.reasons.size > 0; }
+
+  has(reason: OpenReason): boolean { return this.reasons.has(reason); }
+
+  set(reason: OpenReason, on: boolean): void {
+    const was = this.isOpen;
+    if (on) this.reasons.add(reason);
+    else this.reasons.delete(reason);
+    this.sync(was);
+  }
+
+  close(): void {
+    const was = this.isOpen;
+    this.reasons.clear();
+    this.sync(was);
+  }
+
+  private sync(was: boolean): void {
+    const open = this.isOpen;
+    if (open === was) return;
+    this.row.classList.toggle('open', open);
+    // Only boxes whose activation toggles the panel announce it
+    if (this.box.hasAttribute('aria-expanded')) this.box.setAttribute('aria-expanded', String(open));
+    if (!open) this.onClose?.();
+  }
+}
+
 // ===========================================================================
 // Component
 // ===========================================================================
 
-export class TreeletCompass extends HTMLElement {
+export class TreeletCompass extends BaseElement {
   private shadow: ShadowRoot;
   private map: Treelet | null = null;
   private cc: CameraController | null = null;
@@ -56,10 +106,27 @@ export class TreeletCompass extends HTMLElement {
   private zoomEl: HTMLElement | null = null;
   private pitchEl: HTMLElement | null = null;
   private bearingEl: HTMLElement | null = null;
+  private tileCount = -1;
+
+  private compassRow: RowDisclosure | null = null;
+  private layerRow: RowDisclosure | null = null;
+  private lastInput: InputKind = 'mouse';
+  /** Set while Escape returns focus to a box, so that focus doesn't reopen it. */
+  private refocusing = false;
 
   constructor() {
     super();
     this.shadow = this.attachShadow({ mode: 'open' });
+  }
+
+  connectedCallback(): void {
+    document.addEventListener('pointerdown', this.onDocPointerDown, true);
+    document.addEventListener('keydown', this.onDocKeyDown, true);
+  }
+
+  disconnectedCallback(): void {
+    document.removeEventListener('pointerdown', this.onDocPointerDown, true);
+    document.removeEventListener('keydown', this.onDocKeyDown, true);
   }
 
   /** Whether compass and layer box occupy the same corner. */
@@ -79,14 +146,15 @@ export class TreeletCompass extends HTMLElement {
 
   attach(
     map: Treelet,
-    positions?: { compassPosition: UICorner; layerPosition: UICorner },
+    options?: { compassPosition: UICorner; layerPosition: UICorner; glass?: boolean },
   ): void {
     this.map = map;
     this.cc = map.getCameraController();
-    if (positions) {
-      this.compassPos = positions.compassPosition;
-      this.layerPos = positions.layerPosition;
+    if (options) {
+      this.compassPos = options.compassPosition;
+      this.layerPos = options.layerPosition;
     }
+    this.toggleAttribute('glass', options?.glass === true);
     this.render();
     this.cacheElements();
     this.bindEvents();
@@ -105,12 +173,16 @@ export class TreeletCompass extends HTMLElement {
     }
 
     // Update live stats in the info box
-    if (this.zoomEl) this.zoomEl.textContent = `${state.zoom}`;
+    if (this.zoomEl) this.zoomEl.textContent = state.zoom.toFixed(1);
     if (this.pitchEl) this.pitchEl.textContent = `${(90 - state.pitch).toFixed(1)}°`;
     if (this.bearingEl) this.bearingEl.textContent = formatBearing(state.rotation);
-    if (this.tileCountEl && this.map) {
-      this.tileCountEl.textContent = `${this.map.getTileCount()}`;
-    }
+  }
+
+  /** Called every rendered frame (tiles load while the camera rests). */
+  updateTileCount(count: number): void {
+    if (count === this.tileCount || !this.tileCountEl) return;
+    this.tileCount = count;
+    this.tileCountEl.textContent = `${count}`;
   }
 
   // =======================================================================
@@ -121,21 +193,26 @@ export class TreeletCompass extends HTMLElement {
     const cp = this.parseCorner(this.compassPos);
     const lp = this.parseCorner(this.layerPos);
 
+    // Boxes come first in the DOM (slide-outs are absolutely positioned), so
+    // Tab reaches a box, which opens its panel, before the panel's buttons.
     const compassRowHtml = `
-      <div class="compass-row" id="compassRow" data-h="${cp.h}">
-        <div class="nav-panel">
+      <div class="row compass-row" id="compassRow" data-h="${cp.h}">
+        <button type="button" class="box compass-box" id="compassBox" title="Reset orientation" aria-label="Reset orientation">
+          <span class="compass-svg" id="compassSvg">${COMPASS_SVG}</span>
+        </button>
+        <div class="slide nav-panel">
           <div class="nav-section nav-copy-section">
             <div class="nav-label">Map</div>
             <div class="info-body">
               <div class="info-group">
                 <span class="info-group-label">Center</span>
-                <button class="info-copy-btn" id="copyCenterWgs">${COPY_ICON}<span>EPSG:4326</span></button>
-                <button class="info-copy-btn" id="copyCenterMerc">${COPY_ICON}<span>EPSG:3857</span></button>
+                <button type="button" class="info-copy-btn" id="copyCenterWgs" title="Copy center as [lng, lat]">${COPY_ICON}<span>EPSG:4326</span></button>
+                <button type="button" class="info-copy-btn" id="copyCenterMerc" title="Copy center as Web Mercator [x, y]">${COPY_ICON}<span>EPSG:3857</span></button>
               </div>
               <div class="info-group">
                 <span class="info-group-label">Extent</span>
-                <button class="info-copy-btn" id="copyExtentWgs">${COPY_ICON}<span>EPSG:4326</span></button>
-                <button class="info-copy-btn" id="copyExtentMerc">${COPY_ICON}<span>EPSG:3857</span></button>
+                <button type="button" class="info-copy-btn" id="copyExtentWgs" title="Copy extent as [[west, south], [east, north]]">${COPY_ICON}<span>EPSG:4326</span></button>
+                <button type="button" class="info-copy-btn" id="copyExtentMerc" title="Copy extent as Web Mercator [[minX, minY], [maxX, maxY]]">${COPY_ICON}<span>EPSG:3857</span></button>
               </div>
             </div>
           </div>
@@ -159,32 +236,29 @@ export class TreeletCompass extends HTMLElement {
           <div class="nav-section">
             <div class="nav-label">Navigation</div>
             <div class="nav-grid">
-              <button class="nav-btn" id="rotLeft">${ARROW_LEFT}</button>
-              <button class="nav-btn" id="tiltUp">${ARROW_UP}</button>
-              <button class="nav-btn" id="tiltDown">${ARROW_DOWN}</button>
-              <button class="nav-btn" id="rotRight">${ARROW_RIGHT}</button>
+              <button type="button" class="nav-btn" id="rotLeft" title="Rotate left" aria-label="Rotate left">${ARROW_LEFT}</button>
+              <button type="button" class="nav-btn" id="tiltUp" title="Tilt up" aria-label="Tilt up">${ARROW_UP}</button>
+              <button type="button" class="nav-btn" id="tiltDown" title="Tilt down" aria-label="Tilt down">${ARROW_DOWN}</button>
+              <button type="button" class="nav-btn" id="rotRight" title="Rotate right" aria-label="Rotate right">${ARROW_RIGHT}</button>
             </div>
           </div>
           <div class="nav-divider"></div>
           <div class="nav-section">
             <div class="nav-label">Zoom</div>
             <div class="nav-zoom">
-              <button class="nav-btn" id="zoomIn">+</button>
-              <button class="nav-btn" id="zoomOut">\u2212</button>
+              <button type="button" class="nav-btn" id="zoomIn" title="Zoom in" aria-label="Zoom in">+</button>
+              <button type="button" class="nav-btn" id="zoomOut" title="Zoom out" aria-label="Zoom out">−</button>
             </div>
           </div>
-        </div>
-        <div class="compass-box" id="compassBox">
-          <div class="compass-svg" id="compassSvg">${COMPASS_SVG}</div>
         </div>
       </div>`;
 
     const layerRowHtml = `
-      <div class="layer-row" id="layerRow" data-h="${lp.h}" data-v="${lp.v}">
-        <div class="layer-slide" id="layerSlide"></div>
-        <div class="layer-box">
+      <div class="row layer-row" id="layerRow" data-h="${lp.h}" data-v="${lp.v}">
+        <button type="button" class="box layer-box" id="layerBox" aria-label="Layers" aria-expanded="false">
           ${TREE_SVG}
-        </div>
+        </button>
+        <div class="slide layer-slide" id="layerSlide"></div>
       </div>`;
 
     if (this.isCombined) {
@@ -221,6 +295,7 @@ export class TreeletCompass extends HTMLElement {
     this.zoomEl = this.shadow.getElementById('infoZoom');
     this.pitchEl = this.shadow.getElementById('infoPitch');
     this.bearingEl = this.shadow.getElementById('infoBearing');
+    this.tileCount = -1;
   }
 
   // =======================================================================
@@ -229,10 +304,11 @@ export class TreeletCompass extends HTMLElement {
 
   /** Copy text to clipboard and flash the icon on a button. */
   private copyToClipboard(btn: HTMLElement, text: string): void {
-    navigator.clipboard.writeText(text).then(() => {
+    // Clipboard API is unavailable on insecure origins; fail quietly.
+    navigator.clipboard?.writeText(text).then(() => {
       btn.classList.add('copied');
       setTimeout(() => btn.classList.remove('copied'), 800);
-    });
+    }).catch(() => {});
   }
 
   /** Build a JSON coordinate array string for the current center. */
@@ -271,13 +347,89 @@ export class TreeletCompass extends HTMLElement {
   }
 
   // =======================================================================
+  // Open / close (hover, tap, keyboard)
+  // =======================================================================
+
+  /** Record the input kind; a tap outside a row closes what a tap opened. */
+  private onDocPointerDown = (e: PointerEvent): void => {
+    this.lastInput = e.pointerType === 'touch' || e.pointerType === 'pen' ? 'touch' : 'mouse';
+    const path = e.composedPath();
+    for (const d of [this.compassRow, this.layerRow]) {
+      if (d && !path.includes(d.row)) d.set('tap', false);
+    }
+  };
+
+  private onDocKeyDown = (): void => {
+    this.lastInput = 'keyboard';
+  };
+
+  /** Whether a focus change came from keyboard navigation (not a click or tap). */
+  private isKeyboardFocus(e: FocusEvent): boolean {
+    const el = e.composedPath()[0];
+    try {
+      return el instanceof Element && el.matches(':focus-visible');
+    } catch {
+      return this.lastInput === 'keyboard'; // no :focus-visible support
+    }
+  }
+
+  private bindDisclosure(d: RowDisclosure): void {
+    const { row, box } = d;
+    row.addEventListener('pointerenter', (e) => { if (e.pointerType === 'mouse') d.set('hover', true); });
+    row.addEventListener('pointerleave', (e) => { if (e.pointerType === 'mouse') d.set('hover', false); });
+    row.addEventListener('focusin', (e) => {
+      if (!this.refocusing && this.isKeyboardFocus(e)) d.set('focus', true);
+    });
+    // Checked once focus has settled: the panel's re-renders briefly remove
+    // the focused button and refocus its replacement.
+    row.addEventListener('focusout', () => {
+      setTimeout(() => {
+        const active = this.shadow.activeElement;
+        if (!active || !row.contains(active)) d.set('focus', false);
+      }, 0);
+    });
+    row.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape' || !d.isOpen) return;
+      e.stopPropagation();
+      d.close();
+      this.refocusing = true;
+      box.focus();
+      this.refocusing = false;
+    });
+  }
+
+  // =======================================================================
   // Event binding
   // =======================================================================
 
   private bindEvents(): void {
-    // Compass click - reset orientation
-    this.shadow.getElementById('compassBox')!.addEventListener('click', () => {
+    const compassBox = this.shadow.getElementById('compassBox')!;
+    const layerBox = this.shadow.getElementById('layerBox')!;
+    const compassRow = new RowDisclosure(this.shadow.getElementById('compassRow')!, compassBox);
+    const layerRow = new RowDisclosure(
+      this.shadow.getElementById('layerRow')!,
+      layerBox,
+      () => this.panel?.resetSettings(),
+    );
+    this.compassRow = compassRow;
+    this.layerRow = layerRow;
+    this.bindDisclosure(compassRow);
+    this.bindDisclosure(layerRow);
+
+    // Compass click resets orientation; on touch the first tap only opens the panel
+    compassBox.addEventListener('click', () => {
+      if (this.lastInput === 'touch' && !compassRow.isOpen) {
+        compassRow.set('tap', true);
+        return;
+      }
       this.cc?.resetOrientation();
+    });
+
+    // Layer box: a tap toggles the panel, Enter reopens it after Escape
+    // (mouse hover and keyboard focus already open it)
+    layerBox.addEventListener('click', () => {
+      if (this.lastInput === 'touch') layerRow.set('tap', !layerRow.has('tap'));
+      else if (this.lastInput === 'keyboard') layerRow.set('focus', true);
     });
 
     // Helper: bind a button by ID with stopPropagation
@@ -289,8 +441,8 @@ export class TreeletCompass extends HTMLElement {
     };
 
     // Zoom ±1
-    bind('zoomIn',  () => this.cc && this.cc.setZoomLevel(this.cc.getState().zoom + 1));
-    bind('zoomOut', () => this.cc && this.cc.setZoomLevel(this.cc.getState().zoom - 1));
+    bind('zoomIn',  () => this.cc && this.cc.setZoomLevel(Math.round(this.cc.getState().zoom) + 1));
+    bind('zoomOut', () => this.cc && this.cc.setZoomLevel(Math.round(this.cc.getState().zoom) - 1));
 
     // Rotation ±15°
     bind('rotLeft',  () => this.cc && this.cc.setAzimuth(this.cc.getState().rotation - 15));
@@ -313,15 +465,5 @@ export class TreeletCompass extends HTMLElement {
     bindCopy('copyCenterMerc', () => this.getCenterMerc());
     bindCopy('copyExtentWgs',  () => this.getExtentWgs());
     bindCopy('copyExtentMerc', () => this.getExtentMerc());
-
-    // Layer row - reset panel settings when mouse leaves
-    this.shadow.getElementById('layerRow')!.addEventListener('mouseleave', () => {
-      this.panel?.resetSettings();
-    });
   }
-}
-
-// Register the custom element
-if (!customElements.get('treelet-compass')) {
-  customElements.define('treelet-compass', TreeletCompass);
 }

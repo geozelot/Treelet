@@ -11,17 +11,19 @@ const map = (window as any).__treelet = Treelet.map('map', {
   initCenter: { lng: 11.39, lat: 47.27 }, // Innsbruck, Austria - surrounded by Alps
   initZoom: 10,
   minZoom: 4,
-  maxZoom: 15,
+  maxZoom: 18,
   mapDisplay: {
+    horizonDistance: 24,
     atlasSegments: 64,
     antialias: true,
+    drapeSlotSize: 512,
   },
   guiDisplay: {
     enabled: true,
+    glass: true,
     compassPosition: 'top-right',
     layerPosition: 'bottom-right',
   },
-  workerCount: 8,
 });
 
 // =========================================================================
@@ -31,7 +33,7 @@ const terrain = map.addBaseLayer({
   layerName: 'AWS Terrain Tiles',
   layerSource: new XYZSource({
     url: 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png',
-    tileSize: 512,
+    tileSize: 256,
     maxZoom: 15,
     attribution: '© Mapzen, © AWS',
   }),
@@ -50,11 +52,10 @@ const osm = map.addDrapeLayer({
   layerName: 'OpenStreetMap (XYZ)',
   layerSource: new XYZSource({
     url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-    tileSize: 512,
-    maxZoom: 16,
+    tileSize: 256,
+    maxZoom: 19,
     attribution: '© OpenStreetMap contributors',
   }),
-  lodOffset: 2,
 });
 
 // =========================================================================
@@ -64,11 +65,10 @@ const satellite = map.addDrapeLayer({
   layerName: 'ESRI Satellite (XYZ)',
   layerSource: new XYZSource({
     url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-    tileSize: 512,
-    maxZoom: 16,
+    tileSize: 256,
+    maxZoom: 19,
     attribution: '© Esri, Maxar, Earthstar Geographics',
   }),
-  lodOffset: 2,
 });
 
 // =========================================================================
@@ -80,8 +80,8 @@ const basemapOrtho = map.addDrapeLayer({
   layerName: 'basemap.at Ortho (WMTS)',
   layerSource: new WMTSSource({
     url: 'https://maps.wien.gv.at/basemap/bmaporthofoto30cm/normal/google3857/{z}/{y}/{x}.jpeg',
-    tileSize: 512,
-    maxZoom: 16,
+    tileSize: 256,
+    maxZoom: 19,
     attribution: '© basemap.at',
   }),
 });
@@ -94,5 +94,6 @@ map.start();
 (window as unknown as Record<string, unknown>).Treelet = Treelet;
 
 console.log(`treelet.js v${Treelet.version} - Full Demo`);
-console.log('Navigate: Left-click drag to pan, scroll to zoom, right-click drag to orbit');
+console.log('Navigate: Left-click drag to pan, scroll to zoom, right-click drag to orbit (touch: 1 finger pans, 2 fingers zoom/rotate)');
+console.log('Inspect: map.getElevation({ lng, lat }), map.pick(x, y), map.getElevationProfile(a, b), map.getStats()');
 console.log('Default: elevation mode. Use panel to switch visualization and drapes.');

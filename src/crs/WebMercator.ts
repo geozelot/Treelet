@@ -96,4 +96,28 @@ export const WebMercator = {
     const tileCount = 1 << zoom;
     return worldScale / tileCount;
   },
+
+  /**
+   * Mercator scale factor k = 1/cos(lat) at a world-plane Y coordinate.
+   *
+   * Horizontal world distances are stretched by k relative to ground
+   * distance, so true-to-scale relief needs elevations multiplied by k
+   * as well. Uses the identity cosh(y/R) = 1/cos(lat) (Gudermannian),
+   * which is cheap and exact for the whole Mercator range.
+   */
+  scaleFactorAtWorldY(worldY: number, worldScale: number): number {
+    return Math.cosh((worldY * 2 * Math.PI) / worldScale);
+  },
+
+  /**
+   * Great-circle ground distance in meters between two LngLat points
+   * (haversine on the WGS84 equatorial sphere).
+   */
+  groundDistance(a: LngLat, b: LngLat): number {
+    const dLat = (b.lat - a.lat) * DEG2RAD;
+    const dLng = (b.lng - a.lng) * DEG2RAD;
+    const s = Math.sin(dLat / 2) ** 2 +
+      Math.cos(a.lat * DEG2RAD) * Math.cos(b.lat * DEG2RAD) * Math.sin(dLng / 2) ** 2;
+    return 2 * 6378137 * Math.asin(Math.min(1, Math.sqrt(s)));
+  },
 } as const;

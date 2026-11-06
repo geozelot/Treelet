@@ -2,13 +2,14 @@
 // treelet.js - XYZ Tile Source
 //
 // Standard slippy-map tile source using URL templates with {z}/{x}/{y}
-// placeholders. Supports optional {s} subdomain rotation.
+// placeholders. Supports optional {s} subdomain rotation, TMS {-y},
+// {quadkey}, {r} and {accessToken}.
 // ============================================================================
 
 import type { TileCoord } from '../core/types';
 import type { XYZSourceOptions } from './types';
 import { UrlTileSource } from './UrlTileSource';
-import { splitTemplate, expandTemplate } from './templateUrl';
+import { splitTemplate, expandTemplate, hasTokenPlaceholder } from './templateUrl';
 
 /**
  * XYZ tile source for standard slippy-map tile services.
@@ -16,8 +17,12 @@ import { splitTemplate, expandTemplate } from './templateUrl';
  * URL templates use curly-brace placeholders:
  *   {z} - zoom level
  *   {x} - tile column
- *   {y} - tile row
+ *   {y} - tile row (XYZ, origin top-left)
+ *   {-y} - tile row (TMS, origin bottom-left)
  *   {s} - subdomain (rotated round-robin)
+ *   {quadkey} - Bing-style quadkey
+ *   {r} - retina suffix (see `retina` option)
+ *   {accessToken} - access token
  *
  * @example
  * ```ts
@@ -37,18 +42,19 @@ export class XYZSource extends UrlTileSource {
   /** Pre-split URL template segments for fast concatenation. */
   private readonly urlParts: string[];
   private readonly urlTokens: string[];
+  private readonly hasToken: boolean;
 
   constructor(options: XYZSourceOptions) {
-    super(options.attribution, options.maxConcurrency);
+    super(options);
     this.subdomains = options.subdomains ?? [];
     this.tileSize = options.tileSize ?? 256;
     this.minZoom = options.minZoom ?? 0;
     this.maxZoom = options.maxZoom ?? 22;
 
-    // Pre-compile: split template into literal parts and token names
     const { parts, tokens } = splitTemplate(options.url);
     this.urlParts = parts;
     this.urlTokens = tokens;
+    this.hasToken = hasTokenPlaceholder(tokens);
   }
 
   /**
@@ -56,6 +62,7 @@ export class XYZSource extends UrlTileSource {
    * Subdomain rotation uses (x + y) mod to distribute requests.
    */
   getTileUrl(coord: TileCoord): string {
-    return expandTemplate(this.urlParts, this.urlTokens, coord, this.subdomains);
+    const url = expandTemplate(this.urlParts, this.urlTokens, coord, this.subdomains, this.templateContext);
+    return this.withAccessToken(url, this.hasToken);
   }
 }

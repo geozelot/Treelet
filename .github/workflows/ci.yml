@@ -28,3 +28,6 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      - name: Verify bundles
+        run: node scripts/check-dist.mjs

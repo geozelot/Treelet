@@ -42,8 +42,13 @@ export class LayerRegistry {
 
     this.baseLayers.set(layer.id, layer);
 
-    if (this.activeBaseLayerId === null || layer.visible) {
+    // The first layer becomes active; later ones only when explicitly asked
+    // (layerDisplay.visible: true), so adding a layer never silently swaps
+    // the terrain out from under the user.
+    if (this.activeBaseLayerId === null || options.layerDisplay?.visible === true) {
       this.setActiveBaseLayer(layer.id);
+    } else {
+      layer.visible = false;
     }
 
     return { id: layer.id, layerName: layer.layerName };

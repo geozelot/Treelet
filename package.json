@@ -1,6 +1,6 @@
 {
   "name": "@geozelot/treelet",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A lightweight 3D terrain and overlay map library using Three.js - this is Leaflet for 3D terrain",
   "repository": {
     "type": "git",
@@ -13,24 +13,32 @@
   "main": "./dist/treelet.es.js",
   "module": "./dist/treelet.es.js",
   "types": "./dist/types/index.d.ts",
+  "unpkg": "./dist/treelet.cdn.standalone.js",
+  "jsdelivr": "./dist/treelet.cdn.standalone.js",
   "exports": {
     ".": {
       "types": "./dist/types/index.d.ts",
       "import": "./dist/treelet.es.js"
-    }
+    },
+    "./worker": "./dist/treelet.worker.js",
+    "./standalone": "./dist/treelet.cdn.standalone.js",
+    "./package.json": "./package.json"
   },
+  "sideEffects": false,
   "files": [
     "dist"
   ],
   "scripts": {
     "dev": "vite --config demo/vite.config.ts",
-    "build": "vite build && vite build --config vite.config.standalone.ts",
+    "build": "vite build && vite build --config vite.config.standalone.ts && vite build --config vite.config.worker.ts",
     "build:slim": "vite build",
     "build:standalone": "vite build --config vite.config.standalone.ts",
     "build:demo": "vite build --config demo/vite.config.ts",
     "test": "vitest",
     "typecheck": "tsc --noEmit",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "build:worker": "vite build --config vite.config.worker.ts",
+    "check:dist": "node scripts/check-dist.mjs"
   },
   "peerDependencies": {
     "three": ">=0.171.0"

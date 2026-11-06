@@ -10,6 +10,7 @@ import type { TileCoord } from '../core/types';
 import type { TileSource } from '../sources/TileSource';
 import type { ElevationDecoder } from '../decoders/ElevationDecoder';
 import { resolveDecoder } from '../decoders/ElevationDecoder';
+import { MAX_TILE_ZOOM } from '../core/constants';
 import type { Layer } from './Layer';
 import type {
   BaseLayerOptions,
@@ -74,7 +75,11 @@ export class BaseLayer implements Layer {
     this.source = options.layerSource;
     this.attribution = options.layerAttribution ?? options.layerSource.attribution ?? '';
     this.minZoom = options.minZoom ?? 0;
-    this.maxZoom = options.maxZoom ?? 22;
+    const maxZoom = options.maxZoom ?? MAX_TILE_ZOOM;
+    if (maxZoom > MAX_TILE_ZOOM) {
+      console.warn(`treelet: base layer "${options.layerName}" maxZoom ${maxZoom} clamped to ${MAX_TILE_ZOOM}`);
+    }
+    this.maxZoom = Math.min(maxZoom, MAX_TILE_ZOOM);
 
     // Resolve decoder: string name → built-in, function → direct.
     // `decoderSource` carries the function body to the worker for any
@@ -110,9 +115,10 @@ export class BaseLayer implements Layer {
       isolineStrength: td?.isolineStrength ?? 1.5,
       isolineColor: td?.isolineColor ?? [0.12, 0.08, 0.04],
       rampInterpolationRange: td?.rampInterpolationRange ?? [0, 4000],
+      slopeRange: td?.slopeRange ?? [0, 60],
       rampDefaultElevation: td?.rampDefaultElevation ?? 'hypsometric',
       rampDefaultSlope: td?.rampDefaultSlope ?? 'viridis',
-      rampDefaultAspect: td?.rampDefaultAspect ?? 'inferno',
+      rampDefaultAspect: td?.rampDefaultAspect ?? 'cyclic',
     };
   }
 

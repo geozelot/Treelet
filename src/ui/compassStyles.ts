@@ -5,8 +5,11 @@
 //   - Compass box with rotatable SVG
 //   - Slide-out navigation panel: map coords, viewport stats, D-pad, zoom
 //   - Layer box with slide-out panel
-//   - Light/dark theme via light-dark()
+//   - Light/dark theme via light-dark(); optional frosted glass ([glass])
 //   - Direction-aware positioning via data-h / data-v attributes
+//
+// A row's slide-out is shown while the row has the .open class, which
+// TreeletCompass sets for mouse hover, a tap, or keyboard focus.
 //
 // NOTE: Custom properties on :host are inherited by <treelet-panel>'s shadow
 //       tree; do not remove variables that appear unused in this file alone.
@@ -20,10 +23,18 @@ export const compassStyles = /* css */ `
     font-family: system-ui, -apple-system, sans-serif;
     font-size: 13px;
     pointer-events: none;
+    /* Map width for cqw units and @container rules, here and in <treelet-panel> */
+    container-type: inline-size;
 
     color-scheme: light dark;
 
     --bg: light-dark(#fafafa, #181818);
+    /* Boxes and slide-outs, and the menus that open from them (dropdowns,
+       settings); translucent with [glass], menus a little less so. */
+    --surface-bg: var(--bg);
+    --surface-filter: none;
+    --menu-bg: var(--bg);
+    --menu-filter: none;
     --border: light-dark(rgba(0, 0, 0, 0.10), rgba(255, 255, 255, 0.08));
     --shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
     --text: light-dark(#333333, #e8e8e8);
@@ -33,15 +44,54 @@ export const compassStyles = /* css */ `
     --hover-text: light-dark(#222222, #e8e8e8);
     --active-bg: light-dark(rgba(0, 0, 0, 0.10), rgba(255, 255, 255, 0.14));
     --active-text: light-dark(#000000, #ffffff);
-    --accent: light-dark(#555555, #b0b0b0);
+    /* The logo's leaf green; darker on light backgrounds for 3:1 contrast */
+    --accent: light-dark(#7a9400, #a5c500);
     --control-border: light-dark(rgba(0, 0, 0, 0.12), rgba(255, 255, 255, 0.12));
     --control-bg: light-dark(rgba(0, 0, 0, 0.04), rgba(255, 255, 255, 0.04));
+    /* Buttons: resting, hovered/selected, pressed */
+    --btn-bg: light-dark(rgba(0, 0, 0, 0.05), rgba(255, 255, 255, 0.07));
+    --btn-bg-hover: var(--active-bg);
+    --btn-bg-press: light-dark(rgba(0, 0, 0, 0.18), rgba(255, 255, 255, 0.22));
+
+    /* Type scale: uppercase labels, secondary text, primary text */
+    --fs-label: 10px;
+    --fs-small: 11px;
+    --fs-body: 12px;
+    /* Corner radii: surfaces (boxes, panels, menus) and the controls in them */
+    --radius: 10px;
+    --radius-sm: 5px;
+    --fade: 0.15s;
+
+    /* Edge of the compass and layer boxes; their slide-out panels match it. */
+    --box-size: 60px;
+    /* Room beside a box for its slide-out: map width minus the box and a
+       12px margin on both sides. */
+    --slide-room: calc(100cqw - var(--box-size) - 24px);
 
     color: var(--text);
   }
 
   @media (prefers-color-scheme: light) {
     :host { --shadow: 0 4px 16px rgba(0, 0, 0, 0.10); }
+  }
+
+  :host([glass]) {
+    --surface-bg: light-dark(rgba(250, 250, 250, 0.72), rgba(24, 24, 24, 0.66));
+    --surface-filter: blur(14px) saturate(1.5);
+    --menu-bg: light-dark(rgba(250, 250, 250, 0.8), rgba(24, 24, 24, 0.74));
+    --menu-filter: blur(14px) saturate(1.5);
+  }
+
+  button {
+    margin: 0;
+    font: inherit;
+    color: inherit;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
   }
 
   /* ==========================================================================
@@ -74,49 +124,146 @@ export const compassStyles = /* css */ `
   .anchor[data-h="left"]  .compass-wrapper { align-items: flex-start; }
 
   /* ==========================================================================
-     Compass row - nav-panel + compass-box side by side
+     Rows - a box with its slide-out beside it (compass-row, layer-row)
      ========================================================================== */
 
-  .compass-row {
+  .row {
     position: relative;
     display: flex;
     align-items: stretch;
   }
 
-  .compass-row[data-h="right"] { flex-direction: row;         justify-content: flex-end; }
-  .compass-row[data-h="left"]  { flex-direction: row-reverse; justify-content: flex-start; }
+  .row[data-h="right"] { flex-direction: row;         justify-content: flex-end; }
+  .row[data-h="left"]  { flex-direction: row-reverse; justify-content: flex-start; }
 
-  /* ==========================================================================
-     Compass box - clickable SVG that resets orientation
-     ========================================================================== */
+  /* Box - compass (click resets orientation) or layer icon */
 
-  .compass-box {
+  .box {
     position: relative;
-    width: 60px;
-    height: 60px;
-    background: var(--bg);
+    box-sizing: border-box;
+    width: var(--box-size);
+    height: var(--box-size);
+    padding: 0;
+    background: var(--surface-bg);
+    -webkit-backdrop-filter: var(--surface-filter);
+    backdrop-filter: var(--surface-filter);
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: var(--radius);
     box-shadow: var(--shadow);
+    color: var(--text);
     cursor: pointer;
     display: flex;
     align-items: center;
     justify-content: center;
-    opacity: 0.65;
-    transition: background 0.15s, opacity 0.15s, border-radius 0.2s;
     flex-shrink: 0;
+    opacity: 0.65;
+    transition: opacity var(--fade), border-radius 0.2s;
   }
 
-  .compass-row:hover .compass-box {
-    background: var(--bg);
+  .row.open > .box {
     opacity: 1;
-    transition: background 0.15s, opacity 0.15s, border-radius 0s;
+    transition: opacity var(--fade), border-radius 0s;
   }
 
-  .compass-row[data-h="right"]:hover .compass-box { border-radius: 0 8px 8px 0; }
-  .compass-row[data-h="left"]:hover  .compass-box { border-radius: 8px 0 0 8px; }
+  .row[data-h="right"].open > .box { border-radius: 0 var(--radius) var(--radius) 0; }
+  .row[data-h="left"].open  > .box { border-radius: var(--radius) 0 0 var(--radius); }
 
-  .compass-box:active { background: var(--active-bg); }
+  .box:active { background-image: linear-gradient(var(--active-bg), var(--active-bg)); }
+
+  /* Slide-out - fades and slides in beside the box; hidden ones are not
+     focusable (visibility), so Tab only reaches an open panel */
+
+  .slide {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    box-sizing: border-box;
+    background: var(--surface-bg);
+    -webkit-backdrop-filter: var(--surface-filter);
+    backdrop-filter: var(--surface-filter);
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow);
+    white-space: nowrap;
+    overflow: visible;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transition: opacity 0.2s, transform 0.2s, visibility 0s 0.2s;
+  }
+
+  .row[data-h="right"] > .slide {
+    right: 100%;
+    border-right: none;
+    border-radius: var(--radius) 0 0 var(--radius);
+    transform: translateX(8px);
+  }
+
+  .row[data-h="left"] > .slide {
+    left: 100%;
+    border-left: none;
+    border-radius: 0 var(--radius) var(--radius) 0;
+    transform: translateX(-8px);
+  }
+
+  .row[data-h].open > .slide {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+    transform: translateX(0);
+    transition: opacity 0.2s, transform 0.2s, visibility 0s;
+  }
+
+  /* Glass: a blur only shows what lies inside its nearest blurred or
+     translucent ancestor. So the slide-out itself neither blurs nor fades:
+     its frosted background and border sit on ::before (over the whole
+     border box; the slide's own border only keeps the layout), which fades
+     with the content and the shadow, so the menus opening from it can blur
+     the map too. */
+  :host([glass]) .slide {
+    isolation: isolate;
+    opacity: 1;
+    background: transparent;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    border-color: transparent;
+    box-shadow: none;
+    transition: transform 0.2s, box-shadow 0.2s, visibility 0s 0.2s;
+  }
+
+  :host([glass]) .slide::before {
+    content: '';
+    position: absolute;
+    inset: -1px;
+    z-index: -1;
+    box-sizing: border-box;
+    border-width: inherit;
+    border-style: inherit;
+    border-color: var(--border);
+    border-radius: inherit;
+    background: var(--surface-bg);
+    -webkit-backdrop-filter: var(--surface-filter);
+    backdrop-filter: var(--surface-filter);
+  }
+
+  /* No border on the side joined to the box */
+  :host([glass]) .row[data-h="right"] > .slide::before { right: 0; }
+  :host([glass]) .row[data-h="left"] > .slide::before { left: 0; }
+
+  :host([glass]) .slide::before,
+  :host([glass]) .slide > * {
+    opacity: 0;
+    transition: opacity 0.2s;
+  }
+
+  :host([glass]) .row[data-h].open > .slide {
+    box-shadow: var(--shadow);
+    transition: transform 0.2s, box-shadow 0.2s, visibility 0s;
+  }
+
+  :host([glass]) .row.open > .slide::before,
+  :host([glass]) .row.open > .slide > * {
+    opacity: 1;
+  }
 
   /* SVG container with 3D transforms */
 
@@ -136,68 +283,41 @@ export const compassStyles = /* css */ `
   }
 
   /* ==========================================================================
-     Navigation panel - slides out from compass box on hover
+     Navigation panel - Map (copy) | Viewport (stats) | Navigation | Zoom
      ========================================================================== */
 
   .nav-panel {
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    box-shadow: var(--shadow);
-    white-space: nowrap;
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity 0.2s, transform 0.2s;
-    overflow: visible;
     display: flex;
     flex-direction: row;
   }
 
-  .compass-row:hover .nav-panel {
-    opacity: 1;
-    pointer-events: auto;
-  }
+  .row[data-h="left"] > .nav-panel { flex-direction: row-reverse; }
 
-  .compass-row[data-h="right"] .nav-panel {
-    right: 100%;
-    border-right: none;
-    border-radius: 8px 0 0 8px;
-    transform: translateX(8px);
+  /* Narrow maps: drop the Map section, then Viewport, so the panel stays on
+     screen (Zoom and Navigation sit next to the box in either corner). The
+     full panel needs ~582px of map width, without Map ~377px; the limits
+     leave ~10% for wider system fonts. */
+  @container (max-width: 640px) {
+    .nav-panel > .nav-copy-section, .nav-panel > .nav-copy-section + .nav-divider { display: none; }
   }
-
-  .compass-row[data-h="left"] .nav-panel {
-    left: 100%;
-    border-left: none;
-    border-radius: 0 8px 8px 0;
-    transform: translateX(-8px);
-    flex-direction: row-reverse;
+  @container (max-width: 420px) {
+    .nav-panel > .nav-info-section, .nav-panel > .nav-info-section + .nav-divider { display: none; }
   }
-
-  .compass-row[data-h="right"]:hover .nav-panel,
-  .compass-row[data-h="left"]:hover  .nav-panel {
-    transform: translateX(0);
-  }
-
-  /* ==========================================================================
-     Nav sections - NAVIGATION (D-pad) and ZOOM (stack)
-     ========================================================================== */
 
   .nav-section {
     display: flex;
     flex-direction: column;
-    padding: 3px 4px;
+    padding: 4px 5px;
   }
 
   .nav-label {
-    font-size: 8px;
+    font-size: var(--fs-label);
     font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.6px;
+    letter-spacing: 0.5px;
     opacity: 0.55;
     text-align: center;
-    padding-bottom: 2px;
+    padding-bottom: 3px;
   }
 
   .nav-divider {
@@ -210,7 +330,7 @@ export const compassStyles = /* css */ `
 
   .nav-grid {
     display: grid;
-    grid-template-columns: 21px 28px 21px;
+    grid-template-columns: 22px 28px 22px;
     grid-template-rows: 1fr 1fr;
     gap: 2px;
     align-items: stretch;
@@ -242,39 +362,31 @@ export const compassStyles = /* css */ `
   .nav-btn {
     flex: 1;
     border: none;
-    border-radius: 4px;
-    background: var(--active-bg);
-    color: var(--active-text);
-    opacity: 0.45;
-    font: inherit;
+    border-radius: var(--radius-sm);
+    background: var(--btn-bg);
+    color: var(--text-dim);
     font-size: 13px;
     line-height: 1;
     cursor: pointer;
     display: flex;
     align-items: center;
     justify-content: center;
-    transition: opacity 0.15s;
+    transition: background-color var(--fade), color var(--fade);
     user-select: none;
     padding: 0;
   }
 
   .nav-btn svg { width: 10px; height: 10px; }
 
-  .nav-btn:hover { opacity: 1; }
-
-  .nav-btn:active {
-    opacity: 1;
-    background: light-dark(rgba(0, 0, 0, 0.18), rgba(255, 255, 255, 0.22));
+  @media (hover: hover) {
+    .nav-btn:hover { background: var(--btn-bg-hover); color: var(--text); }
   }
+
+  .nav-btn:active { background: var(--btn-bg-press); color: var(--text); }
 
   /* ==========================================================================
      Info sections - Map (copy) and Viewport (stats), wider than nav/zoom
      ========================================================================== */
-
-  .nav-info-section,
-  .nav-copy-section {
-    padding: 3px 5px;
-  }
 
   .info-body {
     display: flex;
@@ -293,28 +405,26 @@ export const compassStyles = /* css */ `
   }
 
   .info-group-label {
-    font-size: 9px;
+    font-size: var(--fs-label);
     font-weight: 600;
-    opacity: 0.5;
-    min-width: 34px;
+    opacity: 0.55;
+    min-width: 38px;
   }
 
   .info-copy-btn {
     display: inline-flex;
     align-items: center;
-    gap: 2px;
+    gap: 3px;
     border: none;
-    border-radius: 3px;
-    background: var(--active-bg);
-    color: var(--active-text);
-    opacity: 0.45;
-    font: inherit;
-    font-size: 9px;
+    border-radius: var(--radius-sm);
+    background: var(--btn-bg);
+    color: var(--text-dim);
+    font-size: var(--fs-label);
     font-weight: 500;
     letter-spacing: 0.3px;
-    padding: 2px 5px;
+    padding: 2px 6px;
     cursor: pointer;
-    transition: opacity 0.15s;
+    transition: background-color var(--fade), color var(--fade);
     white-space: nowrap;
   }
 
@@ -324,16 +434,15 @@ export const compassStyles = /* css */ `
     flex-shrink: 0;
   }
 
-  .info-copy-btn:hover { opacity: 1; }
-
-  .info-copy-btn:active {
-    opacity: 1;
-    background: light-dark(rgba(0, 0, 0, 0.18), rgba(255, 255, 255, 0.22));
+  @media (hover: hover) {
+    .info-copy-btn:hover { background: var(--btn-bg-hover); color: var(--text); }
   }
 
+  .info-copy-btn:active { background: var(--btn-bg-press); color: var(--text); }
+
   .info-copy-btn.copied {
-    opacity: 1;
-    background: light-dark(rgba(0, 120, 0, 0.12), rgba(100, 255, 100, 0.15));
+    background: color-mix(in srgb, var(--accent) 28%, transparent);
+    color: var(--text);
   }
 
   /* -- Stats: two side-by-side sub-grids (label value | label value) -- */
@@ -346,113 +455,38 @@ export const compassStyles = /* css */ `
   .info-stats-col {
     display: grid;
     grid-template-columns: auto auto;
-    gap: 1px 3px;
+    gap: 2px 4px;
     align-items: baseline;
   }
 
   .info-stat-label {
-    font-size: 8px;
+    font-size: var(--fs-label);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.3px;
+    letter-spacing: 0.5px;
     opacity: 0.45;
   }
 
   .info-stat-value {
-    font-size: 10px;
+    font-size: var(--fs-small);
     font-weight: 600;
     font-variant-numeric: tabular-nums;
     opacity: 0.85;
     text-align: right;
-    min-width: 20px;
+    min-width: 24px;
   }
 
   /* Second column (Pitch / Bearing) needs room for "360.0°" */
   .info-stats-col:last-child .info-stat-value {
-    min-width: 38px;
+    min-width: 42px;
   }
 
   /* ==========================================================================
-     Layer row - layer-slide + layer-box side by side (mirrors compass-row)
+     Layer row - the slide-out holds <treelet-panel>
      ========================================================================== */
 
-  .layer-row {
-    position: relative;
-    display: flex;
-    align-items: stretch;
-  }
+  /* On narrow maps the panel stops at the opposite margin and its columns shrink */
+  .layer-slide { max-width: var(--slide-room); }
 
-  .layer-row[data-h="right"] { flex-direction: row;         justify-content: flex-end; }
-  .layer-row[data-h="left"]  { flex-direction: row-reverse; justify-content: flex-start; }
-
-  /* Layer slide panel - slides out on hover */
-
-  .layer-slide {
-    position: absolute;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    box-shadow: var(--shadow);
-    white-space: nowrap;
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity 0.2s, transform 0.2s;
-    overflow: visible;
-  }
-
-  /* Pin slide to both edges of the layer-row so its height matches the box */
-  .layer-row .layer-slide { top: 0; bottom: 0; }
-
-  .layer-row:hover .layer-slide {
-    opacity: 1;
-    pointer-events: auto;
-  }
-
-  .layer-row[data-h="right"] .layer-slide {
-    right: 100%;
-    border-right: none;
-    border-radius: 8px 0 0 8px;
-    transform: translateX(8px);
-  }
-
-  .layer-row[data-h="left"] .layer-slide {
-    left: 100%;
-    border-left: none;
-    border-radius: 0 8px 8px 0;
-    transform: translateX(-8px);
-  }
-
-  .layer-row[data-h="right"]:hover .layer-slide,
-  .layer-row[data-h="left"]:hover  .layer-slide {
-    transform: translateX(0);
-  }
-
-  /* Layer box icon - mirrors compass-box appearance */
-
-  .layer-box {
-    position: relative;
-    width: 40px;
-    height: 40px;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    box-shadow: var(--shadow);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-    opacity: 0.65;
-    transition: background 0.15s, opacity 0.15s, border-radius 0.2s;
-    color: var(--text);
-  }
-
-  .layer-box svg { width: 24px; height: 24px; }
-
-  .layer-row:hover .layer-box {
-    background: var(--bg);
-    opacity: 1;
-    transition: background 0.15s, opacity 0.15s, border-radius 0s;
-  }
-
-  .layer-row[data-h="right"]:hover .layer-box { border-radius: 0 8px 8px 0; }
-  .layer-row[data-h="left"]:hover  .layer-box { border-radius: 8px 0 0 8px; }
+  .layer-box svg { width: 36px; height: 36px; }
 `;

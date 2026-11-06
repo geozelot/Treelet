@@ -40,11 +40,12 @@ export class DisplayController {
   /** Whether wireframe renders flat white (true) or normals coloring (false). */
   private _wireframeWhite = false;
 
-  /** Sun azimuth in degrees (0–360, clockwise from north). 0° = north. */
-  private _sunAzimuth = 0;
+  /** Sun azimuth in degrees (0–360, clockwise from north). Default 315° (north-west),
+   *  the cartographic convention that avoids the relief-inversion illusion. */
+  private _sunAzimuth = 315;
 
   /** Sun altitude in degrees above the horizon (5–90). 90° = straight down. */
-  private _sunAltitude = 68;
+  private _sunAltitude = 45;
 
   /** Reusable Vector3 for sun direction computation. */
   private readonly _sunDir = new Vector3();
@@ -116,6 +117,7 @@ export class DisplayController {
   // =========================================================================
 
   setSunAzimuth(degrees: number): void {
+    if (!Number.isFinite(degrees)) return;
     this._sunAzimuth = ((degrees % 360) + 360) % 360;
     this.updateSunDirection();
   }
@@ -125,6 +127,7 @@ export class DisplayController {
   }
 
   setSunAltitude(degrees: number): void {
+    if (!Number.isFinite(degrees)) return;
     this._sunAltitude = Math.max(5, Math.min(90, degrees));
     this.updateSunDirection();
   }
@@ -159,12 +162,12 @@ export class DisplayController {
       baseLayer = this.layerRegistry.getBaseLayer(handleOrValue);
       newValue = value ?? 1.0;
     }
+    if (!Number.isFinite(newValue)) return;
 
     if (baseLayer) {
-      (baseLayer.display as { exaggeration: number }).exaggeration = newValue;
-      if (baseLayer === this.layerRegistry.getActiveBaseLayer()) {
-        this.terrainRenderer.setExaggeration(newValue);
-      }
+      // Applied to the material every frame from the active layer's display state.
+      (baseLayer.display as { exaggeration: number }).exaggeration = Math.max(0, Math.min(100, newValue));
+      this.sceneManager.requestRender();
     }
   }
 
@@ -178,6 +181,7 @@ export class DisplayController {
   // =========================================================================
 
   setIsolineInterval(interval: number): void {
+    if (!Number.isFinite(interval) || interval <= 0) return;
     const baseLayer = this.layerRegistry.getActiveBaseLayer();
     if (baseLayer) {
       (baseLayer.terrainDisplay as { isoplethInterval: number }).isoplethInterval = interval;
@@ -194,6 +198,7 @@ export class DisplayController {
   }
 
   setIsolineThickness(thickness: number): void {
+    if (!Number.isFinite(thickness) || thickness < 0) return;
     const baseLayer = this.layerRegistry.getActiveBaseLayer();
     if (baseLayer) {
       (baseLayer.terrainDisplay as { isolineStrength: number }).isolineStrength = thickness;
@@ -221,6 +226,49 @@ export class DisplayController {
     const baseLayer = this.layerRegistry.getActiveBaseLayer();
     const c = baseLayer?.terrainDisplay.isolineColor ?? [0.12, 0.08, 0.04];
     return [...c] as [number, number, number];
+  }
+
+  // =========================================================================
+  // Ramp ranges
+  // =========================================================================
+
+  /** Elevation ramp range in meters, or 'auto' to fit the visible tiles' data. */
+  setElevationRange(range: [number, number] | 'auto'): void {
+    const baseLayer = this.layerRegistry.getActiveBaseLayer();
+    if (range !== 'auto' && !(Number.isFinite(range[0]) && Number.isFinite(range[1]) && range[1] > range[0])) return;
+    if (baseLayer) {
+      (baseLayer.terrainDisplay as { rampInterpolationRange: [number, number] | 'auto' }).rampInterpolationRange =
+        range === 'auto' ? 'auto' : [range[0], range[1]];
+    }
+    this.applyElevationRange();
+  }
+
+  getElevationRange(): [number, number] | 'auto' {
+    const r = this.layerRegistry.getActiveBaseLayer()?.terrainDisplay.rampInterpolationRange ?? [0, 4000];
+    return r === 'auto' ? 'auto' : [r[0], r[1]];
+  }
+
+  /** Slope ramp range in degrees. */
+  setSlopeRange(min: number, max: number): void {
+    if (!(Number.isFinite(min) && Number.isFinite(max) && max > min)) return;
+    const lo = Math.max(0, min);
+    const hi = Math.min(90, max);
+    const baseLayer = this.layerRegistry.getActiveBaseLayer();
+    if (baseLayer) {
+      (baseLayer.terrainDisplay as { slopeRange: [number, number] }).slopeRange = [lo, hi];
+    }
+    this.terrainRenderer.setSlopeRange(lo, hi);
+  }
+
+  getSlopeRange(): [number, number] {
+    const r = this.layerRegistry.getActiveBaseLayer()?.terrainDisplay.slopeRange ?? [0, 60];
+    return [r[0], r[1]];
+  }
+
+  private applyElevationRange(): void {
+    const range = this.layerRegistry.getActiveBaseLayer()?.terrainDisplay.rampInterpolationRange ?? [0, 4000];
+    if (range === 'auto') this.terrainRenderer.setAutoElevationRange();
+    else this.terrainRenderer.setElevationRange(range[0], range[1]);
   }
 
   // =========================================================================
@@ -268,6 +316,7 @@ export class DisplayController {
   // =========================================================================
 
   setDrapeOpacity(handle: LayerHandle | string, opacity: number): void {
+    if (!Number.isFinite(opacity)) return;
     const id = typeof handle === 'string' ? handle : handle.id;
     const drape = this.layerRegistry.getDrapeLayer(id);
     if (drape) {
@@ -315,6 +364,7 @@ export class DisplayController {
   // =========================================================================
 
   setMinPitch(degrees: number): void {
+    if (!Number.isFinite(degrees)) return;
     (this.options.mapDisplay as { minPitch: number }).minPitch = degrees;
     this.sceneManager.cameraController.setMinPitch(degrees);
   }
@@ -324,6 +374,7 @@ export class DisplayController {
   }
 
   setMaxPitch(degrees: number): void {
+    if (!Number.isFinite(degrees)) return;
     (this.options.mapDisplay as { maxPitch: number }).maxPitch = degrees;
     this.sceneManager.cameraController.setMaxPitch(degrees);
   }
@@ -378,13 +429,10 @@ export class DisplayController {
       td?.isolineStrength ?? 1.5,
     );
 
-    // Elevation range from active base layer's terrainDisplay
-    const range = td?.rampInterpolationRange;
-    if (range && range !== 'auto') {
-      this.terrainRenderer.setElevationRange(range[0], range[1]);
-    } else {
-      this.terrainRenderer.setElevationRange(0, 4000);
-    }
+    // Ramp ranges from active base layer's terrainDisplay
+    this.applyElevationRange();
+    const slope = td?.slopeRange ?? [0, 60];
+    this.terrainRenderer.setSlopeRange(slope[0], slope[1]);
   }
 
   /**

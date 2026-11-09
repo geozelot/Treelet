@@ -13,7 +13,7 @@ describe('AnalysisLayer', () => {
     const layer = new AnalysisLayer({ analysis: 'hillshade' });
     expect(layer.id).toMatch(/^analysis-\d+$/);
     expect(layer.layerName).toBe('Hillshade');
-    expect(layer.params).toEqual({ ambient: 0.45 });
+    expect(layer.params).toEqual({ ambient: 0.45, mode: 'single' });
     expect(layer.ramp).toBeUndefined();
     expect(layer.isValueKind).toBe(false);
     expect(layer.display).toEqual({ visible: true, opacity: 0.6, blendMode: 'multiply' });

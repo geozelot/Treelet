@@ -593,6 +593,9 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
     this.teleported = false;
     this.compass?.updateTileCount(this.terrainRenderer.getInstanceCount());
 
+    // ==== Shadows: the near part of the visible range ====
+    const shadowsChanged = this.terrainRenderer.renderShadows(cam, Math.min(horizon / 3, dist * 4));
+
     // ==== Overlays (draped again as finer terrain loads) ====
     const overlaysChanged = this.overlays.update(cameraMoved || adjusted);
 
@@ -603,7 +606,7 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
       this.emit('zoom', { zoom });
     }
 
-    return needsRender || overlaysChanged || adjusted || horizon !== range || this.terrainHeight !== terrainHeight;
+    return needsRender || shadowsChanged || overlaysChanged || adjusted || horizon !== range || this.terrainHeight !== terrainHeight;
   }
 
   /** Whether terrain lies between the camera and a world point (scene units). */

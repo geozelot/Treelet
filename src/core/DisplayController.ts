@@ -312,9 +312,13 @@ export class DisplayController {
    */
   applyMaterialState(): void {
     const coats: CoatInput[] = [];
+    let shadows = false;
     for (const layer of this.layerRegistry.getStack()) {
       if (!layer.visible) continue;
-      if ('descriptor' in layer) coats.push(this.analysisCoat(layer));
+      if ('descriptor' in layer) {
+        coats.push(this.analysisCoat(layer));
+        if (layer.descriptor.shadowMap && coats.length <= MAX_COATS) shadows = true;
+      }
       else {
         coats.push({
           id: layer.id,
@@ -332,6 +336,7 @@ export class DisplayController {
       console.warn(`treelet: only the lowest ${MAX_COATS} visible coats are drawn (${coats.length} visible)`);
     }
     this.terrainRenderer.setCoats(coats);
+    this.terrainRenderer.setShadowsEnabled(shadows);
   }
 
   private analysisCoat(layer: AnalysisLayer): CoatInput {

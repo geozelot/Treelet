@@ -90,7 +90,9 @@ const basemapOrtho = map.addDrapeLayer({
 // preset adds its own analyses on top of the imagery it picks. Open the
 // Overlay stack in the layer panel to change them.
 // =========================================================================
-type Preset = 'relief' | 'avalanche' | 'flood' | 'viewshed' | 'sun' | 'peaks';
+type Preset = 'relief' | 'avalanche' | 'flood' | 'viewshed' | 'sun' | 'peaks' | 'shadows';
+/** The running sun animation of the Shadows preset (stopped by any other preset). */
+let sunAnimation = 0;
 let presetLayers: ReturnType<typeof map.addAnalysisLayer>[] = [];
 let presetOverlay: ReturnType<typeof map.addOverlayLayer> | null = null;
 
@@ -117,13 +119,14 @@ const ROUTE = {
 const SUMMIT = { lng: 11.3853, lat: 47.3122 };
 
 function applyPreset(name: Preset): void {
+  sunAnimation++;
   for (const job of map.getAnalysisJobs()) map.cancelAnalysis(job.id);
   map.cancelPick();
   for (const h of presetLayers) map.removeAnalysisLayer(h);
   presetLayers = [];
   if (presetOverlay) map.removeOverlayLayer(presetOverlay);
   presetOverlay = null;
-  if (name !== 'sun' && map.getSunTime()) {
+  if (name !== 'sun' && name !== 'shadows' && map.getSunTime()) {
     // Back to the default sun from the north-west
     map.setSunTime(null);
     map.setSunAzimuth(315);
@@ -157,6 +160,26 @@ function applyPreset(name: Preset): void {
     map.activateDrapeLayer(basemapOrtho);
     map.setView({ lng: SUMMIT.lng, lat: SUMMIT.lat - 0.04 }, 10.8);
     keep(map.computeViewshed(SUMMIT, { radius: 12000, eyeHeight: 2, layerDisplay: { opacity: 0.8 } }));
+  } else if (name === 'shadows') {
+    // A winter day: terrain shadows follow the sun from morning to afternoon
+    map.deactivateDrapeLayer();
+    map.setView({ lng: 11.40, lat: 47.27 }, 11.3);
+    presetLayers.push(
+      map.addAnalysisLayer({ analysis: 'elevation', params: { range: [0, 4000] } }),
+      map.addAnalysisLayer({ analysis: 'shadows', params: { darkness: 0.55 } }),
+    );
+    const year = new Date().getFullYear();
+    const from = new Date(year, 11, 21, 8, 30).getTime();
+    const to = new Date(year, 11, 21, 15, 30).getTime();
+    const token = sunAnimation;
+    const start = performance.now();
+    const step = (now: number) => {
+      if (token !== sunAnimation) return;
+      const t = Math.min(1, (now - start) / 14000);
+      map.setSunTime(new Date(from + (to - from) * t));
+      if (t < 1) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
   } else if (name === 'peaks') {
     // A GeoJSON overlay: summits with labels and a route draped over the satellite imagery
     map.activateDrapeLayer(satellite);

@@ -11,6 +11,7 @@
 import {
   ShaderMaterial,
   FrontSide,
+  Matrix4,
   Vector2,
   Vector3,
   Vector4,
@@ -26,6 +27,7 @@ import elevationSampling from './glsl/includes/elevation_sampling.glsl?raw';
 import surface from './glsl/includes/surface.glsl?raw';
 import coats from './glsl/includes/coats.glsl?raw';
 import rasters from './glsl/includes/rasters.glsl?raw';
+import shadows from './glsl/includes/shadows.glsl?raw';
 import vertexMain from './glsl/terrain.vert.glsl?raw';
 import fragmentMain from './glsl/terrain.frag.glsl?raw';
 
@@ -45,6 +47,7 @@ export function buildFragmentShader(analysisGlsl: string): string {
     elevationSampling,
     surface,
     rasters,
+    shadows,
     analysisGlsl,
     coats,
     fragmentMain,
@@ -136,6 +139,11 @@ export function createTerrainMaterial(options: TerrainMaterialOptions): ShaderMa
     uRaster3: { value: null },
     uRasterXform: { value: Array.from({ length: MAX_RASTERS }, () => new Vector4()) },
     uRasterInfo: { value: Array.from({ length: MAX_RASTERS }, () => new Vector4(1, 1, 0, 0)) },
+    // Terrain-cast shadows
+    uShadowMap: { value: null },
+    uShadowMatrix: { value: new Matrix4() },
+    uShadowOn: { value: 0 },
+    uShadowParams: { value: new Vector4(0, 0, 1e20, 2e20) },
     uRampTex: { value: null },
     uRampSize: { value: new Vector2(1, 1) },
     // Drape
@@ -219,6 +227,27 @@ export function setTerrainRasters(material: ShaderMaterial, slots: ReadonlyArray
     }
   }
   return changed;
+}
+
+/**
+ * Shadow map for the shadows coat: its depth texture, the terrain-local →
+ * shadow-map matrix and [texel uv, depth per texel, fade start, fade end];
+ * null turns shadows off.
+ */
+export function setTerrainShadows(
+  material: ShaderMaterial,
+  shadow: { texture: Texture; matrix: Matrix4; params: readonly number[] } | null,
+): void {
+  const u = material.uniforms;
+  if (!shadow) {
+    u.uShadowOn.value = 0;
+    u.uShadowMap.value = null;
+    return;
+  }
+  u.uShadowOn.value = 1;
+  u.uShadowMap.value = shadow.texture;
+  (u.uShadowMatrix.value as Matrix4).copy(shadow.matrix);
+  (u.uShadowParams.value as Vector4).fromArray(shadow.params as number[]);
 }
 
 function vec4Equals(v: Vector4, a: Vec4): boolean {

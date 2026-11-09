@@ -37,6 +37,8 @@
 - Tools on the map: `startTool('distance' | 'area' | 'profile' | 'sight')` with click / drag / double-click / Enter / Backspace / Escape and long press on touch; `'measure'` and `'toolchange'` events; `finishTool`, `clearTool`, `getTool`.
 - Profile panel (`<treelet-profile>`, `showProfile(path | lineOfSight)`): SVG chart, hover marks the point on the terrain, statistics, CSV and PNG export.
 - Toolbar (`<treelet-toolbar>`, `guiDisplay.tools`, off by default): distance, area, profile, line of sight and viewshed, with the live result and Profile / Finish / Clear.
+- Hillshade `mode: 'multi'`: four lights around the sun azimuth weighted by aspect (multidirectional oblique weighting).
+- `'shadows'` analysis: terrain-cast shadows from a 2048² shadow map of the terrain seen from the sun (same vertex program as the terrain, so morphing and exaggeration match), fitted around the visible terrain, snapped to texels, 3 × 3 filtered, faded at its edge, redrawn only when the sun, the view or the terrain changes. Combined with `setSunTime`, shows the shadows of a given moment.
 
 ## 0.3.0
 

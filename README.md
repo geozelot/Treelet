@@ -48,7 +48,8 @@ The library is designed to be easily extendable - via registry or plugin package
     - **Curvature** - profile, plan or total curvature on a diverging ramp
     - **Contours** - lines computed from the DEM per pixel, with index lines
     - **Water level** - flooding below a level, animatable
-    - **Hillshade** - terrain light from the map's sun, placed by date and time if you like
+    - **Hillshade** - terrain light from the map's sun (placed by date and time if you like), one light or four (multidirectional)
+    - **Shadows** - terrain-cast shadows of the sun, from a shadow map
   - **Region analyses** - computed in a worker over a loaded region, shown as coats:
     - **Viewshed** - ground visible from an observer (Earth curvature and refraction)
     - **Sun hours** - hours of direct sun on a date, with terrain shadows
@@ -391,7 +392,7 @@ An analysis layer is a coat computed from the terrain: elevation, slope, aspect,
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `analysis` | `string` | *required* | Kind: `'elevation' \| 'slope' \| 'aspect' \| 'curvature' \| 'contours' \| 'water' \| 'hillshade'` or a registered id |
+| `analysis` | `string` | *required* | Kind: `'elevation' \| 'slope' \| 'aspect' \| 'curvature' \| 'contours' \| 'water' \| 'hillshade' \| 'shadows'` or a registered id |
 | `layerName` | `string` | the kind's label | Display name |
 | `params` | `object` | kind defaults | Parameters (below) |
 | `ramp` | `Ramp` | kind default | Color ramp (value kinds) |
@@ -407,7 +408,12 @@ An analysis layer is a coat computed from the terrain: elevation, slope, aspect,
 | `'curvature'` | `mode: 'total' \| 'profile' \| 'plan'`, `range: [min, max]` (1/km; convex positive) | `'diverging'` | normal, opacity 1 |
 | `'contours'` | `interval` (m), `thickness` (px), `index` (every Nth line bolder, 0 = off), `color: [r, g, b]` | — | normal, opacity 0.75 |
 | `'water'` | `level` (m), `color: [r, g, b]`, `depthFade` (m over which the water darkens), `shoreline` (m of fade at the shore) | — | normal, opacity 0.85 |
-| `'hillshade'` | `ambient` (light on slopes facing away from the sun, 0–1) | — | multiply, opacity 0.6 |
+| `'hillshade'` | `mode: 'single' \| 'multi'`, `ambient` (light on slopes facing away from the sun, 0–1) | — | multiply, opacity 0.6 |
+| `'shadows'` | `darkness` (0–1, default 0.5) | — | multiply, opacity 1 |
+
+The `'multi'` hillshade lights the terrain from four directions at the sun's altitude (the sun azimuth and 45°, 90° and 135° around it), each weighted by how squarely it crosses the slope (multidirectional oblique weighting, Mark 1992): slopes facing away from the sun keep their form and slopes facing it get less glare.
+
+`'shadows'` darkens ground that the terrain hides from the sun. While a shadows coat is visible the renderer keeps a shadow map: the terrain drawn into a 2048 × 2048 depth texture from the sun, fitted around the part of the view where terrain is seen (at most four times the camera's distance, a third of the visible range), snapped to whole texels so it doesn't shimmer, and drawn again only when the sun, the view or the terrain changes. Shadows fade out at its far edge, are filtered over 3 × 3 texels, and follow the drawn terrain (exaggeration included). Only terrain in view casts them, so a mountain behind the camera doesn't. Place the sun with `setSunTime(date)` for the shadows of a given moment.
 
 A new map starts with a hillshade coat. Slope, aspect and curvature are true-scale (unaffected by exaggeration); curvature is computed at the rendered tile's resolution, so its values grow as finer tiles load. A new water coat starts a third of the way up the visible elevation range unless `level` is given.
 

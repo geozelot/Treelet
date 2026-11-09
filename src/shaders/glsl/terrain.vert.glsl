@@ -21,6 +21,7 @@ uniform vec3 uCameraLocal;      // camera position relative to the render origin
 uniform float uRefZ;            // height of the LOD reference plane
 uniform float uOriginY;         // absolute world Y of the render origin
 uniform float uWorldScale;
+uniform mat4 uShadowMatrix;     // terrain-local → shadow-map coordinates
 
 out vec2 vTileUV;
 out float vMorph;
@@ -31,6 +32,7 @@ flat out vec4 vParent;
 flat out vec4 vDrape;
 out vec3 vCamVec;            // camera → vertex (world units, for distance haze)
 out vec2 vWorldLocal;        // world position relative to the render origin (rasters)
+out vec4 vShadowCoord;       // position in the shadow map (texture space)
 
 void main() {
   // ==== Geomorph ====
@@ -76,4 +78,5 @@ void main() {
   vDrape = iDrape;
   vCamVec = vec3(world, z) - uCameraLocal;
   vWorldLocal = world;
+  vShadowCoord = uShadowMatrix * vec4(world, z, 1.0);
 }

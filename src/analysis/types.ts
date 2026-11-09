@@ -190,4 +190,10 @@ export interface AnalysisDescriptor<P extends object = Record<string, unknown>> 
    * `addAnalysisLayer`.
    */
   raster?: boolean;
+  /**
+   * The kind reads the terrain-cast shadow factor (`gShadowLit` in GLSL:
+   * 1 lit, 0 in shadow); the renderer keeps a shadow map while a coat of
+   * it is visible.
+   */
+  shadowMap?: boolean;
 }

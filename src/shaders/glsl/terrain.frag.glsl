@@ -23,6 +23,7 @@ void main() {
   Surface s = terrainSurface();
   if (!s.valid) s.h = 0.0;
   s.fw = fwidth(s.h);
+  if (uShadowOn != 0) gShadowLit = terrainShadow(s);
 
   vec3 color = uBaseWhite ? vec3(1.0) : applyCoats(s, drape);
 

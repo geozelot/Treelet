@@ -59,12 +59,15 @@ import {
   setTerrainView,
   setTerrainFog,
   setTerrainRasters,
+  setTerrainShadows,
 } from '../shaders/TerrainMaterial';
 import { CoatStack, type CoatInput } from './CoatStack';
 import { RasterSet, type RasterEntry, type RasterInput } from './RasterSet';
+import { ShadowMap, shadowReach } from './ShadowMap';
 import { analysisShaderSource, onAnalysisRegistered } from '../analysis/registry';
 import type { SurfaceSample } from '../analysis/types';
 import { WebMercator } from '../crs/WebMercator';
+import type { PerspectiveCamera } from 'three';
 
 /** Floats per instance: world(2) size(1) elev(4) parent(4) drape(4) morph(2). */
 export const INSTANCE_STRIDE = 17;
@@ -186,6 +189,11 @@ export class TerrainRenderer {
   private drapeVisible = false;
   private readonly coatStack = new CoatStack();
   private readonly rasters: RasterSet;
+  /** Terrain-cast shadows (created while a shadows coat is visible). */
+  private shadowMap: ShadowMap | null = null;
+  private shadowsEnabled = false;
+  /** Bumps whenever the instance buffer changes (what the shadow pass draws). */
+  private instanceVersion = 0;
   private readonly unsubscribeAnalyses: () => void;
 
   /** Floating render origin (world units, float64). */
@@ -735,6 +743,7 @@ export class TerrainRenderer {
     if (len > 0) this.instanceBuffer.addUpdateRange(0, len);
     this.instanceBuffer.needsUpdate = true;
     this.geometry.instanceCount = n;
+    this.instanceVersion++;
     return true;
   }
 
@@ -986,6 +995,7 @@ export class TerrainRenderer {
     // Drape imagery has no CPU copy: refetch it.
     this.resetDrapeState();
     this.prevInstanceCount = -1;
+    this.shadowMap?.invalidate();
     this.markDirty();
   }
 
@@ -1030,6 +1040,66 @@ export class TerrainRenderer {
     if (!this.rasters.release(id)) return false;
     this.syncRasters();
     this.markRender();
+    return true;
+  }
+
+  // =========================================================================
+  // Shadows
+  // =========================================================================
+
+  /** Keep a shadow map (while a coat that reads it is visible). */
+  setShadowsEnabled(enabled: boolean): void {
+    if (this.disposed || enabled === this.shadowsEnabled) return;
+    this.shadowsEnabled = enabled;
+    if (enabled) {
+      const max = this.renderer.capabilities?.maxTextureSize ?? 4096;
+      this.shadowMap ??= new ShadowMap(this.geometry, this.material, Math.min(2048, max));
+      this.shadowMap.invalidate();
+    } else {
+      setTerrainShadows(this.material, null);
+      this.shadowMap?.dispose();
+      this.shadowMap = null;
+    }
+    this.markRender();
+  }
+
+  get shadowsActive(): boolean {
+    return this.shadowsEnabled;
+  }
+
+  /**
+   * Draw the shadow map for this frame's view if the sun, the view or the
+   * terrain changed. Call after update() and before the frame is rendered;
+   * returns whether the frame must be drawn again.
+   * @param maxDistance - farthest camera distance (world units) shadows may reach
+   */
+  renderShadows(camera: PerspectiveCamera, maxDistance: number): boolean {
+    const map = this.shadowMap;
+    if (!this.shadowsEnabled || !map || this.disposed || this.geometry.instanceCount === 0) return false;
+    const sun = this.material.uniforms.uSunDirection.value as Vector3;
+    if (sun.z <= 0.005) {
+      // Night: the shader shades everything without the map
+      const was = this.material.uniforms.uShadowOn.value;
+      setTerrainShadows(this.material, { texture: map.target.depthTexture!, matrix: map.matrix, params: map.params });
+      return was !== 1;
+    }
+    const lo = Number.isFinite(this.lastAutoMin) ? this.lastAutoMin : 0;
+    const hi = Number.isFinite(this.lastAutoMax) ? this.lastAutoMax : 4000;
+    const k = WebMercator.scaleFactorAtWorldY(this.originY, this.tileGrid.worldScale);
+    const heightSpan = Math.max(hi - lo, 0) * this.opts.metersToScene * k * this.exaggeration;
+    // Only as far as the view can see terrain: where the corner rays meet the lowest of it
+    const reach = shadowReach(camera, lo * this.opts.metersToScene * k * this.exaggeration, maxDistance);
+    const drawn = map.update(this.renderer, {
+      camera,
+      terrain: this.mesh,
+      range: reach.depth,
+      fadeDistance: reach.distance,
+      heightSpan,
+      sun,
+      version: `${this.atlas.version}|${this.instanceVersion}|${this.exaggeration}`,
+    });
+    if (!drawn) return false;
+    setTerrainShadows(this.material, { texture: map.target.depthTexture!, matrix: map.matrix, params: map.params });
     return true;
   }
 
@@ -1170,6 +1240,8 @@ export class TerrainRenderer {
     this.unsubscribeAnalyses();
     this.coatStack.dispose();
     this.rasters.dispose();
+    this.shadowMap?.dispose();
+    this.shadowMap = null;
     this.atlas.dispose();
     this.drapeAtlas?.dispose();
     this.drapeAtlas = null;

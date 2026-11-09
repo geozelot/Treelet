@@ -138,7 +138,7 @@ describe('layer panel', () => {
     const labels = [...proot.querySelectorAll('.dropdown-group-label')].map((l) => l.textContent);
     expect(labels).toEqual(['Analysis', 'Layers']);
     const kinds = [...proot.querySelectorAll('.layer-entry[data-layer-type="analysis"]')].map((e) => (e as HTMLElement).dataset.kind);
-    expect(kinds).toEqual(['elevation', 'slope', 'aspect', 'contours', 'hillshade', 'curvature', 'water', 'viewshed', 'sunhours', 'skyview', 'tpi']);
+    expect(kinds).toEqual(['elevation', 'slope', 'aspect', 'contours', 'hillshade', 'curvature', 'water', 'viewshed', 'sunhours', 'skyview', 'tpi', 'shadows']);
     expect(proot.querySelector('[data-layer-type="drape"] .layer-btn')!.textContent).toBe('OpenStreetMap');
   });
 

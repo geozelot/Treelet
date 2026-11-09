@@ -20,12 +20,13 @@ export type CoatBlendMode = 'normal' | 'multiply' | 'screen' | 'softlight';
 
 /**
  * Built-in ramp names. `cyclic` suits circular data such as aspect.
- * `avalanche` (slope classes 30–35–40–45°, nothing below 30°) and `aspect8`
- * (eight compass sectors) are class presets for the slope and aspect analyses.
+ * `avalanche` (slope classes 30–35–40–45°, nothing below 30°), `aspect8`
+ * (eight compass sectors) and `visibility` (hidden / visible) are class
+ * presets for the slope, aspect and viewshed analyses.
  */
 export type ColorRamp =
   | 'hypsometric' | 'viridis' | 'inferno' | 'grayscale' | 'cyclic' | 'diverging'
-  | 'avalanche' | 'aspect8';
+  | 'avalanche' | 'aspect8' | 'visibility';
 
 /** Smooth ramp: color stops over the normalized value t in [0, 1]. */
 export interface ContinuousRamp {
@@ -85,6 +86,8 @@ export interface SpanParam extends ParamBase {
   auto?: boolean;
   optional?: boolean;
   wrap?: boolean;
+  /** `'data'`: the panel's sliders span the layer's raster values instead of min–max. */
+  bounds?: 'data';
 }
 
 export interface SelectParam extends ParamBase {
@@ -180,4 +183,11 @@ export interface AnalysisDescriptor<P extends object = Record<string, unknown>> 
    * added (under the caller's `params`), e.g. a water level inside the view.
    */
   initialParams?: (visible: [number, number]) => Partial<P>;
+  /**
+   * The kind draws a raster bound to its layer (`coatRaster()` in GLSL)
+   * rather than a quantity of the surface. Its layers come from
+   * `addRasterLayer` or a region analysis (viewshed, sun hours…), not from
+   * `addAnalysisLayer`.
+   */
+  raster?: boolean;
 }

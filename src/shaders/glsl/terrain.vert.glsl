@@ -30,6 +30,7 @@ flat out vec4 vElev;
 flat out vec4 vParent;
 flat out vec4 vDrape;
 out vec3 vCamVec;            // camera → vertex (world units, for distance haze)
+out vec2 vWorldLocal;        // world position relative to the render origin (rasters)
 
 void main() {
   // ==== Geomorph ====
@@ -74,4 +75,5 @@ void main() {
   vParent = iParent;
   vDrape = iDrape;
   vCamVec = vec3(world, z) - uCameraLocal;
+  vWorldLocal = world;
 }

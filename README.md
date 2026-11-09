@@ -48,7 +48,12 @@ The library is designed to be easily extendable - via registry or plugin package
     - **Curvature** - profile, plan or total curvature on a diverging ramp
     - **Contours** - lines computed from the DEM per pixel, with index lines
     - **Water level** - flooding below a level, animatable
-    - **Hillshade** - terrain light from the map's sun
+    - **Hillshade** - terrain light from the map's sun, placed by date and time if you like
+  - **Region analyses** - computed in a worker over a loaded region, shown as coats:
+    - **Viewshed** - ground visible from an observer (Earth curvature and refraction)
+    - **Sun hours** - hours of direct sun on a date, with terrain shadows
+    - **Sky-view factor** and **topographic position index**
+  - **Raster layers** - your own value grids or images as coats (`addRasterLayer`)
   - **Ramps** - built-in or custom color stops and classes (with alpha), with legends
   - **Custom analyses** - a GLSL snippet plus a parameter schema (`registerAnalysis`)
 
@@ -229,6 +234,8 @@ The main map class. Extends `EventEmitter`.
 | `pick(x, y)` | `TerrainPick \| null` | The same plus `lngLat` for the terrain under container-relative pixel `(x, y)` |
 | `getElevationProfile(from, to, samples?)` | `ProfileSample[]` | `{ lngLat, distance, elevation }` samples along a line (distance in meters) |
 | `getVisibleElevationRange()` | `[number, number]` | Min and max elevation of the tiles on screen |
+| `getElevationGrid(options?)` | `Promise<ElevationGrid>` | Elevations of a region as one grid (see [Region analyses](#region-analyses)) |
+| `pickLocation(options?)` | `Promise<TerrainPick \| null>` | Wait for a click on the terrain (crosshair cursor; `prompt` shown in the legend); `null` after Escape or `cancelPick()` |
 
 Slope, aspect and curvature come from the same 12-texel surface the shader shades, at the finest loaded tile's resolution.
 
@@ -347,6 +354,83 @@ await map.animateAnalysisParams(water, { level: [lo, (lo + hi) / 2] }, 4000);
 
 `registerAnalysis(descriptor)` adds a kind. The descriptor's `glsl` defines `vec4 analysis_<id>(Surface s, vec4 p0, vec4 p1)`; `s.h` is the elevation in meters, `s.n` the true-scale unit normal (x east, y north, z up), `s.g` the gradient (dh/dx east, dh/dy north, m/m), `s.c` the second derivatives (hxx, hyy, hxy in 1/m), `s.fw` the screen-space derivative of `s.h`, and `uSunDirection` the sun. A value kind (with a `ramp`) returns the normalized value in `.x` and the alpha in `.w`; a color kind returns `rgb` and alpha. `params` is the schema the panel renders (`range`, `span`, `select`, `color`, `boolean`; a `span` may be `optional` and `wrap` for compass sectors, a `range` may take its slider `bounds` from the visible elevation), `pack(params, domain)` fills `p0`/`p1`, `domain(params, auto)` gives the ramp's value range, `initialParams(visible)` derives defaults from the visible elevation range, and `cpu(sample, params)` computes the same value for readouts. See `src/analysis/builtins/` for examples.
 
+#### Region analyses
+
+Analyses that need more than one point of the surface run in a dedicated worker over a *region*: the elevation tiles covering a box, at the finest zoom that needs no more than `maxTiles` tiles (default 64, i.e. about 2048 × 2048 cells), assembled into one grid. The result is shown as a coat (a raster layer of the analysis' kind) and returned with its data. The worker keeps the last two regions, so several analyses of the same view load the tiles once.
+
+| Method | Returns | Description |
+|---|---|---|
+| `computeViewshed(observer, options?)` | `Promise<ViewshedResult>` | Ground visible from `observer` (lng/lat) |
+| `computeSunHours(options?)` | `Promise<SunHoursResult>` | Hours of direct sun on a day, with terrain shadows |
+| `computeSkyView(options?)` | `Promise<GridResult>` | Sky-view factor: the visible fraction of the sky (1 open, lower in valleys) |
+| `computeTpi(options?)` | `Promise<GridResult>` | Topographic position index: meters above (+) or below (−) the surrounding mean |
+| `computeAnalysis(kind, options?)` | `Promise<…>` | Any of the above by kind (`'viewshed'` needs `observer`) |
+| `getElevationGrid(options?)` | `Promise<ElevationGrid>` | The region's elevations (`data`, `min`, `max`) |
+| `getAnalysisJobs()` | `AnalysisJob[]` | Running analyses `{ id, kind, label, stage, progress }` |
+| `cancelAnalysis(id)` | `this` | Cancel one; its promise rejects with an `AbortError` |
+
+Options of every region analysis (`RegionOptions`, `ResultLayerOptions`):
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `bounds` | `TileBounds` | the area in view | Region in degrees (the viewshed's default is a square around the observer) |
+| `zoom` | `number` | source's finest | Finest zoom of the elevation tiles |
+| `maxTiles` | `number` | `64` | Tile budget; the zoom drops until the region fits |
+| `signal` | `AbortSignal` | — | Cancels the job |
+| `addLayer` | `boolean` | `true` | Show the result as a coat |
+| `layerName`, `layerDisplay` | | | Name and `{ opacity, blendMode, visible }` of the coat |
+| `replaceLayer` | `LayerHandle \| string` | — | A coat the result replaces once it is ready |
+
+| Analysis | Own options | Result |
+|---|---|---|
+| Viewshed | `eyeHeight` (1.7 m), `targetHeight` (0), `radius` (10 000 m), `fov` (360°), `bearing` (0°), `curvature` (true), `refraction` (0.13), `clearance` | `visible` (1 / 0 / NaN outside), `clearance` (m a hidden target must rise), `visibleArea` (m²), `observerElevation` |
+| Sun hours | `date` (the sun time, or today), `stepMinutes` (15), `utcOffset` (this browser's) | `hours`, `firstSun` / `lastSun` (time of day), `daylight` (h) |
+| Sky view | `radius` (whole region), `directions` (16) | `data` (0–1) |
+| TPI | `radius` (500 m), `innerRadius` (0: a box; > 0: a ring) | `data` (m) |
+
+Every result carries `bounds`, `width`, `height`, `zoom`, `cellSize` (meters) and `missingTiles`. The viewshed casts rays from the observer to every cell on the edge of the search square and drops distant ground by the Earth's curvature less refraction (`d² (1 − k) / 2R`). Sun hours sweep the terrain's shadow along the sun's azimuth for every sun position of the day; terrain outside the region casts no shadow. Without a radius the sky view searches the whole region exactly (one sweep per direction); with one it samples up to 128 cells per direction, which is slower. While an analysis runs, the legend shows its progress and a cancel button; the layer panel's *Analysis* list runs them over the view (the viewshed asks for a click on the observer first).
+
+```ts
+const summit = { lng: 11.3853, lat: 47.3122 };
+const { visibleArea, layer } = await map.computeViewshed(summit, { radius: 12000, eyeHeight: 2 });
+console.log(`${(visibleArea / 1e6).toFixed(1)} km² visible`);
+map.getRasterValue(layer!, { lng: 11.3928, lat: 47.2654 }); // 1: Innsbruck is in view
+
+const sun = await map.computeSunHours({ date: new Date(2026, 11, 21) });
+console.log(`${sun.daylight} h of daylight`);
+```
+
+#### Raster Layers
+
+Your own grids, drawn like any coat: single-band values (`Float32Array`, colored by a ramp, with a legend) or images (RGBA bytes). Rows run from north to south; `bounds` are the outer edges of the cells. At most 4 raster coats (including analysis results) are shown at once.
+
+| Method | Returns | Description |
+|---|---|---|
+| `addRasterLayer(options)` | `LayerHandle` | Add a raster coat (remove it with `removeAnalysisLayer`) |
+| `getRasterInfo(handle)` | `{ width, height, bounds, range, color } \| null` | Size, bounds and value range |
+| `getRasterValue(handle, lngLat)` | `number \| null` | Value at a position, filtered as drawn |
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `data` | `Float32Array \| Uint8Array \| Uint8ClampedArray` | *required* | `width·height` values (NaN = no data) or `width·height·4` RGBA bytes |
+| `width`, `height` | `number` | *required* | Grid size in cells |
+| `bounds` | `TileBounds` | *required* | Outer edges in degrees |
+| `crs` | `'EPSG:3857' \| 'EPSG:4326'` | `'EPSG:3857'` | Rows evenly spaced in Web Mercator (like map tiles) or in latitude (resampled once) |
+| `nodata` | `number` | — | A value that marks missing data |
+| `range` | `[number, number]` | data min / max | Ramp range |
+| `ramp`, `unit`, `layerName`, `layerDisplay` | | `'viridis'` | As for analysis layers |
+
+```ts
+const temps = new Float32Array(200 * 100); // …filled row by row from the north
+map.addRasterLayer({
+  data: temps, width: 200, height: 100,
+  bounds: { west: 10, south: 46, east: 13, north: 48 }, crs: 'EPSG:4326',
+  ramp: 'inferno', unit: '°C', layerName: 'Temperature', layerDisplay: { opacity: 0.7 },
+});
+```
+
+Value rasters are filtered bilinearly between cell centers in the shader (no-data cells are skipped), so they work on GPUs without float-texture filtering.
+
 #### Coat Stack
 
 | Method | Returns | Description |
@@ -376,6 +460,11 @@ At most 6 coats are drawn (the lowest visible ones). The layer panel's *Overlay*
 | `getSunAzimuth()` | `number` | |
 | `setSunAltitude(degrees)` | `this` | Sun altitude for hillshade (default 45°) |
 | `getSunAltitude()` | `number` | |
+| `setSunTime(date \| null)` | `this` | Place the sun where it stands at `date` over the map center (it follows the map as it moves); `null` returns to the manual sun |
+| `getSunTime()` | `Date \| null` | |
+| `getSunPosition(date?, lngLat?)` | `SunPosition` | `{ azimuth, altitude, declination, equationOfTime }` (NOAA algorithm, refraction-corrected) |
+
+Setting the azimuth or altitude by hand clears the sun time. The layer panel's *Terrain* settings switch between a manual sun and a day and time.
 
 ##### ColorRamp
 
@@ -389,6 +478,7 @@ At most 6 coats are drawn (the lowest visible ones). The layer panel's *Overlay*
 | `'diverging'` | Blue, white, red (curvature default) |
 | `'avalanche'` | Slope classes: nothing below 30°, then 30–35° yellow, 35–40° orange, 40–45° red, ≥ 45° violet |
 | `'aspect8'` | Eight compass sectors (N, NE, … NW) |
+| `'visibility'` | Viewshed: hidden ground shaded, visible ground green |
 
 A ramp can also be given as data: `{ type: 'continuous', stops: [[t, [r, g, b]], …] }` with `t` in 0–1 over the value range, or `{ type: 'classes', breaks: [...], colors: [...], labels? }` with breaks in the analysis' units (one more color than breaks). Colors may be `[r, g, b, a]`; a class with alpha 0 draws nothing and is left out of the legend. Legends, the panel preview and the shader all read the same spec.
 
@@ -432,6 +522,12 @@ map.on('tileerror', ({ coord, layer, error }) => { /* request failed; retried wi
 | `'layeradd'` | `{ id }` | Layer added |
 | `'layerremove'` | `{ id }` | Layer removed |
 | `'layerchange'` | `{}` | Layer configuration changed |
+| `'rangechange'` | `{ min, max }` | Visible elevation range changed (`'auto'` ramps) |
+| `'analysisstart'` | `{ id, kind, label }` | A region analysis started |
+| `'analysisprogress'` | `{ id, kind, label, stage, progress }` | `stage`: `'loading'` (tiles) or `'computing'`; `progress` 0–1 of the stage |
+| `'analysisend'` | `{ id, kind, label, status, error? }` | `status`: `'done' \| 'cancelled' \| 'error'` |
+| `'sunchange'` | `{ azimuth, altitude, time }` | The sun moved |
+| `'pickstart'` / `'pickend'` | `{ prompt }` / `{}` | `pickLocation()` waits for a click / stopped waiting |
 
 ---
 
@@ -586,7 +682,7 @@ interface TileBounds { west: number; south: number; east: number; north: number 
 
 type RGB = [number, number, number];
 type RGBA = [number, number, number, number];
-type ColorRamp = 'hypsometric' | 'viridis' | 'inferno' | 'grayscale' | 'cyclic' | 'diverging' | 'avalanche' | 'aspect8';
+type ColorRamp = 'hypsometric' | 'viridis' | 'inferno' | 'grayscale' | 'cyclic' | 'diverging' | 'avalanche' | 'aspect8' | 'visibility';
 type Ramp = ColorRamp | { type: 'continuous'; stops: [number, RGB | RGBA][] } | { type: 'classes'; breaks: number[]; colors: (RGB | RGBA)[]; labels?: string[] };
 type BlendMode = 'normal' | 'multiply' | 'screen' | 'softlight';
 interface LegendSpec { id: string; title: string; unit?: string; type: 'continuous' | 'classes'; domain: [number, number]; stops?: [number, RGBA][]; classes?: { color: RGBA; label: string }[] }
@@ -594,6 +690,10 @@ type DecoderName = 'terrain-rgb' | 'mapbox' | 'terrarium';
 type UICorner = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right';
 
 interface TerrainSample { elevation: number; slope: number; aspect: number | null; curvature: number; normal: [number, number, number] }
+interface RegionInfo { bounds: TileBounds; width: number; height: number; zoom: number; cellSize: number; missingTiles: number }
+interface ElevationGrid extends RegionInfo { data: Float32Array; min: number; max: number }
+interface AnalysisJob { id: string; kind: string; label: string; stage: 'loading' | 'computing'; progress: number }
+interface SunPosition { azimuth: number; altitude: number; declination: number; equationOfTime: number }
 interface TerrainPick extends TerrainSample { lngLat: LngLat }
 interface ProfileSample { lngLat: LngLat; distance: number; elevation: number | null }
 interface TreeletStats {

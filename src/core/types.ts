@@ -165,6 +165,15 @@ export interface TreeletEventMap {
   layerchange: Record<string, never>;
   /** The visible elevation range (used by 'auto' ramp domains) changed. */
   rangechange: { min: number; max: number };
+  /** A region analysis (viewshed, sun hours…) started, progressed or ended. */
+  analysisstart: { id: string; kind: string; label: string };
+  analysisprogress: { id: string; kind: string; label: string; stage: 'loading' | 'computing'; progress: number };
+  analysisend: { id: string; kind: string; label: string; status: 'done' | 'cancelled' | 'error'; error?: string };
+  /** The sun moved (sun time, map center or manual direction). */
+  sunchange: { azimuth: number; altitude: number; time: Date | null };
+  /** pickLocation() is waiting for a click on the terrain (prompt), or stopped waiting. */
+  pickstart: { prompt: string };
+  pickend: Record<string, never>;
   ready: Record<string, never>;
 }
 

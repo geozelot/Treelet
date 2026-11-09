@@ -23,6 +23,8 @@ export interface CoatInput {
   ramp: RampSpec | null;
   /** Value domain the ramp spans; 'auto' = the visible elevation range. */
   domain: [number, number] | 'auto';
+  /** Raster slot the coat draws, or -1 (default). */
+  raster?: number;
   pack: (domain: [number, number]) => { p0: Vec4; p1: Vec4 };
 }
 
@@ -94,7 +96,7 @@ export class CoatStack {
       this.texture.needsUpdate = true;
       rampRow = i;
     }
-    return { kind: c.kind, blendMode: c.blendMode, opacity: c.opacity, rampRow, p0, p1 };
+    return { kind: c.kind, blendMode: c.blendMode, opacity: c.opacity, rampRow, raster: c.raster ?? -1, p0, p1 };
   }
 
   dispose(): void {

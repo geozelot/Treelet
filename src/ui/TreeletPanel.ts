@@ -32,7 +32,7 @@ import type { DrapeLayer } from '../layers/DrapeLayer';
 import type { AnalysisLayer } from '../layers/AnalysisLayer';
 import type { StackLayer } from '../layers/LayerRegistry';
 import type { ParamSpec, RGB } from '../analysis/types';
-import { listAnalyses } from '../analysis/registry';
+import { listAnalyses, getAnalysis } from '../analysis/registry';
 import { BUILTIN_RAMPS, isRampName, rampGradientCss, rampNamesFor } from '../analysis/ramps';
 
 /** Settings-row id of the coat stack (the Overlay column's active row). */
@@ -73,6 +73,24 @@ function sameColor(a: RGB, b: RGB): boolean {
 function hex(c: RGB): string {
   const h = (v: number) => Math.round(Math.max(0, Math.min(1, v)) * 255).toString(16).padStart(2, '0');
   return `#${h(c[0])}${h(c[1])}${h(c[2])}`;
+}
+
+/** 1, 2 or 5 × a power of ten, at least `x`. */
+function niceStep(x: number): number {
+  if (!(x > 0)) return 1;
+  const p = 10 ** Math.floor(Math.log10(x));
+  const m = x / p;
+  return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10) * p;
+}
+
+/** Hours as h:mm. */
+function formatHour(h: number): string {
+  const m = Math.round(h * 60);
+  return `${Math.floor(m / 60) % 24}:${String(m % 60).padStart(2, '0')}`;
+}
+
+function sunText(azimuth: number, altitude: number): string {
+  return altitude < 0 ? `${Math.round(azimuth)}° · below the horizon` : `${Math.round(azimuth)}° · ${Math.round(altitude)}° up`;
 }
 
 function formatNumber(v: number, step: number): string {
@@ -234,9 +252,14 @@ export class TreeletPanel extends BaseElement {
         this.settingsOpen = null;
         map.setActiveBaseLayer(layerId);
       } else if (layerType === 'analysis') {
-        const handle = map.addAnalysisLayer({ analysis: entry.dataset.kind! });
-        this.settingsOpen = STACK_ID;
-        this.coatOpen = handle.id;
+        const kind = entry.dataset.kind!;
+        if (getAnalysis(kind)?.raster) {
+          this.runRegionAnalysis(kind);
+        } else {
+          const handle = map.addAnalysisLayer({ analysis: kind });
+          this.settingsOpen = STACK_ID;
+          this.coatOpen = handle.id;
+        }
       } else if (layerType === 'drape') {
         map.activateDrapeLayer(layerId);
       }
@@ -315,10 +338,42 @@ export class TreeletPanel extends BaseElement {
           map.setWireframeWhite(value === 'white');
           this.render();
           break;
+        case 'suntime':
+          if (value === 'date') {
+            // Start from now, to the quarter hour
+            const now = new Date();
+            now.setMinutes(Math.round(now.getMinutes() / 15) * 15, 0, 0);
+            map.setSunTime(now);
+          } else {
+            map.setSunTime(null);
+          }
+          this.render();
+          break;
       }
       return;
     }
   };
+
+  /**
+   * Compute a region analysis over the view (a viewshed asks for the
+   * observer first). The result replaces an earlier coat of the same kind;
+   * the legend shows the progress and offers to cancel.
+   */
+  private runRegionAnalysis(kind: string): void {
+    const map = this.map!;
+    const previous = map.getLayerStack().find((l) => isAnalysis(l) && l.descriptor.id === kind)?.id;
+    const report = (err: unknown) => {
+      if ((err as { name?: string })?.name !== 'AbortError') console.warn(`treelet: ${kind} failed:`, (err as Error)?.message ?? err);
+    };
+    if (kind === 'viewshed') {
+      map.pickLocation({ prompt: 'Click the terrain to place the observer' }).then((pick) => {
+        if (pick) return map.computeAnalysis('viewshed', { observer: pick.lngLat, replaceLayer: previous });
+        return undefined;
+      }).catch(report);
+    } else {
+      map.computeAnalysis(kind as never, { replaceLayer: previous }).catch(report);
+    }
+  }
 
   /** Mouse over a selector (header or list) opens it; anywhere else closes it. */
   private handlePointerOver = (ev: Event): void => {
@@ -403,6 +458,23 @@ export class TreeletPanel extends BaseElement {
     const param = target.dataset.param ?? '';
     const label = this.panelEl?.querySelector<HTMLElement>(`[data-value-for="${CSS.escape(`${id}:${param}`)}"]`);
 
+    if (param === 'sunday' || param === 'sunhour') {
+      const current = map.getSunTime() ?? new Date();
+      const next = new Date(current.getTime());
+      if (param === 'sunday') {
+        const [y, m, d] = target.value.split('-').map(Number);
+        if (!(y && m && d)) return;
+        next.setFullYear(y, m - 1, d);
+      } else {
+        const minutes = Math.round(val * 60);
+        next.setHours(Math.floor(minutes / 60), minutes % 60, 0, 0);
+        if (label) label.textContent = formatHour(val);
+      }
+      map.setSunTime(next);
+      const pos = this.panelEl?.querySelector<HTMLElement>('[data-value-for="sun:position"]');
+      if (pos) pos.textContent = sunText(map.getSunAzimuth(), map.getSunAltitude());
+      return;
+    }
     if (param === 'exaggeration') {
       if (label) label.textContent = `${val.toFixed(1)}x`;
       map.setExaggeration(val);
@@ -687,18 +759,29 @@ export class TreeletPanel extends BaseElement {
           const [lo, hi] = Array.isArray(value) ? value as [number, number] : [spec.min, spec.max];
           const key = escapeHtml(`${id}:${spec.key}`);
           const wrap = spec.wrap ? ' data-wrap=""' : '';
+          let [smin, smax, step] = [spec.min, spec.max, spec.step];
+          if (spec.bounds === 'data') {
+            // Sliders span the raster's values (and the current range)
+            const r = this.map!.getRasterInfo?.(id)?.range ?? [lo, hi];
+            const a = Math.min(r[0], lo);
+            const b = Math.max(r[1], hi, a + 1e-6);
+            step = niceStep((b - a) / 200);
+            smin = Number((Math.floor(a / step + 1e-9) * step).toPrecision(12));
+            smax = Number((Math.ceil(b / step - 1e-9) * step).toPrecision(12));
+          }
           const text = spec.wrap
-            ? `${formatNumber(lo, spec.step)}${unit} → ${formatNumber(hi, spec.step)}${unit}`
-            : `${formatNumber(lo, spec.step)}–${formatNumber(hi, spec.step)}${unit}`;
+            ? `${formatNumber(lo, step)}${unit} → ${formatNumber(hi, step)}${unit}`
+            : `${formatNumber(lo, step)}–${formatNumber(hi, step)}${unit}`;
+
           parts.push(`
             <div class="control-row">
               <span class="control-label">${spec.auto || spec.optional ? (spec.wrap ? 'From → to' : 'Range') : escapeHtml(spec.label)}</span>
               <span class="control-value" data-value-for="${key}">${text}</span>
             </div>
             <input type="range" data-layer-id="${eid}" data-param="${spec.key}" data-span="0" data-unit="${escapeHtml(unit)}"${wrap}
-              min="${spec.min}" max="${spec.max}" step="${spec.step}" value="${lo}" aria-label="${escapeHtml(spec.label)} ${spec.wrap ? 'from' : 'low'}">
+              min="${smin}" max="${smax}" step="${step}" value="${lo}" aria-label="${escapeHtml(spec.label)} ${spec.wrap ? 'from' : 'low'}">
             <input type="range" data-layer-id="${eid}" data-param="${spec.key}" data-span="1" data-unit="${escapeHtml(unit)}"${wrap}
-              min="${spec.min}" max="${spec.max}" step="${spec.step}" value="${hi}" aria-label="${escapeHtml(spec.label)} ${spec.wrap ? 'to' : 'high'}">`);
+              min="${smin}" max="${smax}" step="${step}" value="${hi}" aria-label="${escapeHtml(spec.label)} ${spec.wrap ? 'to' : 'high'}">`);
         }
         return parts.join('');
       }
@@ -763,7 +846,10 @@ export class TreeletPanel extends BaseElement {
     const parts: string[] = [];
 
     parts.push('<div class="dropdown-group-label">Analysis</div>');
+    // Raster kinds appear only when the map can compute them over the view
+    const computable = new Set<string>(this.map!.getRegionAnalyses?.() ?? []);
     for (const d of listAnalyses()) {
+      if (d.raster && !computable.has(d.id)) continue;
       parts.push(`
         <div class="layer-entry" data-layer-id="${escapeHtml(d.id)}" data-layer-type="analysis" data-kind="${escapeHtml(d.id)}">
           <button type="button" class="layer-btn" data-action="activate">${escapeHtml(d.label)}</button>
@@ -816,12 +902,44 @@ export class TreeletPanel extends BaseElement {
   }
 
   private renderLightSettings(): string {
-    const azimuth = this.map!.getSunAzimuth();
-    const altitude = this.map!.getSunAltitude();
+    const map = this.map!;
+    const azimuth = map.getSunAzimuth();
+    const altitude = map.getSunAltitude();
+    const time = map.getSunTime?.() ?? null;
+    const mode = time ? 'date' : 'manual';
+    const toggle = `
+      <div class="toggle-row">
+        <span class="toggle-label">Sun</span>
+        <span class="toggle-group">
+          ${([['manual', 'Manual'], ['date', 'Date']] as const).map(([v, label]) =>
+            `<button type="button" class="toggle-btn${mode === v ? ' active' : ''}" data-action="suntime" data-layer-id="sun"
+              data-value="${v}" data-focus-key="sun-${v}" aria-pressed="${mode === v}">${label}</button>`).join('')}
+        </span>
+      </div>`;
+    if (!time) {
+      return `
+        <div class="setting-label">Light Direction</div>
+        ${toggle}
+        ${this.renderSlider('sun', 'azimuth', 'Direction', azimuth, 0, 360, 1, `${Math.round(azimuth)}°`)}
+        ${this.renderSlider('sun', 'altitude', 'Altitude', altitude, 5, 90, 1, `${Math.round(altitude)}°`)}
+      `;
+    }
+    // Date mode: the sun stands where it does at that local time over the map center
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const day = `${time.getFullYear()}-${pad(time.getMonth() + 1)}-${pad(time.getDate())}`;
+    const hour = time.getHours() + time.getMinutes() / 60;
     return `
       <div class="setting-label">Light Direction</div>
-      ${this.renderSlider('sun', 'azimuth', 'Direction', azimuth, 0, 360, 1, `${Math.round(azimuth)}°`)}
-      ${this.renderSlider('sun', 'altitude', 'Altitude', altitude, 5, 90, 1, `${Math.round(altitude)}°`)}
+      ${toggle}
+      <div class="control-row">
+        <span class="control-label">Day</span>
+        <input type="date" class="date-input" data-layer-id="sun" data-param="sunday" value="${day}" aria-label="Day">
+      </div>
+      ${this.renderSlider('sun', 'sunhour', 'Time', hour, 0, 24, 0.25, formatHour(hour))}
+      <div class="control-row">
+        <span class="control-label">Sun</span>
+        <span class="control-value" data-value-for="sun:position">${sunText(azimuth, altitude)}</span>
+      </div>
     `;
   }
 

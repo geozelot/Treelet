@@ -418,6 +418,18 @@ export const panelStyles = /* css */ `
     color: var(--active-text);
   }
 
+  .date-input {
+    font: inherit;
+    font-size: 11px;
+    color: var(--text);
+    background: var(--btn-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 2px 4px;
+    color-scheme: light dark;
+  }
+  .date-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
   .ramp-indicator {
     width: 36px;
     height: 6px;

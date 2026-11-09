@@ -13,7 +13,15 @@
 
 import * as Comlink from 'comlink';
 import type { TileWorkerAPI } from './tileWorker';
-import type { DrapeRequest, DrapeResponse, ElevationRequest, ElevationResponse } from './protocol';
+import type {
+  DrapeRequest,
+  DrapeResponse,
+  ElevationRequest,
+  ElevationResponse,
+  RegionAnalysisRequest,
+  RegionAnalysisResponse,
+  RegionProgress,
+} from './protocol';
 import { hashString } from './raster';
 import InlineTileWorker from './tileWorker.ts?worker&inline';
 
@@ -38,24 +46,33 @@ export class WorkerPool {
   /** Outstanding calls, rejected on dispose so no promise hangs forever. */
   private readonly pending = new Set<PendingCall>();
   private disposed = false;
+  private readonly workerUrl: string | URL | null;
+  /** Worker for region analyses (created on first use), so long jobs never hold up tile loading. */
+  private analysis: { worker: Worker; proxy: Comlink.Remote<TileWorkerAPI> } | null = null;
 
   /**
    * @param count - Number of workers to create
    * @param workerUrl - Optional URL of the standalone worker script
    */
   constructor(count: number, workerUrl: string | URL | null = null) {
+    this.workerUrl = workerUrl;
     const n = Math.max(1, Math.floor(count));
     for (let i = 0; i < n; i++) {
-      const worker = workerUrl
-        ? new Worker(workerUrl, { type: 'module', name: `treelet-tiles-${i}` })
-        : new InlineTileWorker({ name: `treelet-tiles-${i}` });
-      worker.addEventListener('error', (e) => {
-        console.error('treelet: tile worker error', e.message ?? e);
-      });
+      const worker = this.createWorker(`treelet-tiles-${i}`);
       this.workers.push(worker);
       this.proxies.push(Comlink.wrap<TileWorkerAPI>(worker));
       this.pendingCounts.push(0);
     }
+  }
+
+  private createWorker(name: string): Worker {
+    const worker = this.workerUrl
+      ? new Worker(this.workerUrl, { type: 'module', name })
+      : new InlineTileWorker({ name });
+    worker.addEventListener('error', (e) => {
+      console.error('treelet: tile worker error', e.message ?? e);
+    });
+    return worker;
   }
 
   /** Number of active workers. */
@@ -76,6 +93,34 @@ export class WorkerPool {
     return this.dispatch(req.id, req.parts[0]?.url ?? '', (p) => p.loadDrape(req) as Promise<DrapeResponse>);
   }
 
+  /**
+   * Load a region's elevation grid and run an analysis on it in the
+   * analysis worker. Reject with an AbortError after cancelAnalysis(id).
+   */
+  analyzeRegion(req: RegionAnalysisRequest, onProgress?: RegionProgress): Promise<RegionAnalysisResponse> {
+    if (this.disposed) return Promise.reject(disposedError());
+    if (!this.analysis) {
+      const worker = this.createWorker('treelet-analysis');
+      this.analysis = { worker, proxy: Comlink.wrap<TileWorkerAPI>(worker) };
+    }
+    const proxy = this.analysis.proxy;
+    return new Promise<RegionAnalysisResponse>((resolve, reject) => {
+      const entry: PendingCall = { reject };
+      this.pending.add(entry);
+      const progress = onProgress ? Comlink.proxy(onProgress) : undefined;
+      (proxy.analyzeRegion(req, progress) as Promise<RegionAnalysisResponse>).then(
+        (value) => { this.pending.delete(entry); resolve(value); },
+        (err) => { this.pending.delete(entry); reject(err); },
+      );
+    });
+  }
+
+  /** Cancel a region analysis by request id. */
+  cancelAnalysis(id: number): void {
+    if (this.disposed) return;
+    this.analysis?.proxy.cancel(id).catch(() => {});
+  }
+
   /** Cancel a request by id. Safe to call for settled or unknown ids. */
   cancel(id: number): void {
     const idx = this.requestWorker.get(id);
@@ -91,6 +136,11 @@ export class WorkerPool {
     this.pending.clear();
     for (const proxy of this.proxies) proxy[Comlink.releaseProxy]();
     for (const worker of this.workers) worker.terminate();
+    if (this.analysis) {
+      this.analysis.proxy[Comlink.releaseProxy]();
+      this.analysis.worker.terminate();
+      this.analysis = null;
+    }
     this.workers = [];
     this.proxies = [];
     this.pendingCounts = [];

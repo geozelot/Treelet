@@ -29,7 +29,17 @@ import {
   type ElevationRequest,
   type ElevationResponse,
   type TileRequestInit,
+  type RegionAnalysisRequest,
+  type RegionAnalysisResponse,
+  type RegionProgress,
+  type RegionSpec,
 } from './protocol';
+import { loadRegionTiles, assembleRegion, type AssembledRegion } from '../analysis/compute/region';
+import { drive, type Grid } from '../analysis/compute/drive';
+import { viewshedSteps } from '../analysis/compute/viewshed';
+import { sunHoursSteps } from '../analysis/compute/sunHours';
+import { skyViewSteps, tpiSteps } from '../analysis/compute/skyView';
+import { cellSizeAt } from '../analysis/region';
 
 // ---------------------------------------------------------------------------
 // Decoders
@@ -295,6 +305,87 @@ async function loadDecodedElevation(
 }
 
 // ---------------------------------------------------------------------------
+// Region grids (analysis worker)
+// ---------------------------------------------------------------------------
+
+/** Assembled region grids, most recent last; a few are kept for follow-up analyses. */
+const regions = new Map<string, AssembledRegion & { zoom: number }>();
+const MAX_REGIONS = 2;
+
+type LoadedRegion = AssembledRegion & { zoom: number; missing: number; failed: number };
+
+/**
+ * A region being loaded, shared by every job that needs it: it is aborted
+ * only when all of them are cancelled, and reports progress to each.
+ */
+interface RegionLoad {
+  promise: Promise<LoadedRegion>;
+  controller: AbortController;
+  refs: number;
+  listeners: Set<RegionProgress>;
+}
+const regionLoads = new Map<string, RegionLoad>();
+
+async function loadRegion(spec: RegionSpec, signal: AbortSignal, onProgress: RegionProgress): Promise<LoadedRegion> {
+  const cached = regions.get(spec.key);
+  if (cached) {
+    regions.delete(spec.key);
+    regions.set(spec.key, cached);
+    return { ...cached, missing: 0, failed: 0 };
+  }
+  let load = regionLoads.get(spec.key);
+  if (!load) {
+    const controller = new AbortController();
+    const listeners = new Set<RegionProgress>();
+    const promise = (async () => {
+      const loaded = await loadRegionTiles(spec.tiles, async (ref, sig) => {
+        const cacheKey = `${spec.decoderType}:${spec.decoderSource ? hashString(spec.decoderSource) : ''}:${ref.url}`;
+        let decoded = elevationCache.get(cacheKey);
+        if (!decoded) {
+          decoded = await sharedLoad(
+            elevationInflight,
+            cacheKey,
+            (s) => loadDecodedElevation(cacheKey, ref.url, spec.decoderType, spec.decoderSource, spec.init, s),
+            sig ?? controller.signal,
+          );
+        }
+        return decoded instanceof EmptyTile ? null : decoded;
+      }, {
+        signal: controller.signal,
+        onTile: (done, total) => { for (const l of listeners) l('loading', done / total); },
+      });
+      const grid = { ...assembleRegion(spec.window, spec.tiles, loaded.tiles), zoom: spec.zoom };
+      regions.set(spec.key, grid);
+      while (regions.size > MAX_REGIONS) regions.delete(regions.keys().next().value as string);
+      return { ...grid, missing: loaded.missing, failed: loaded.failed };
+    })();
+    const created: RegionLoad = { promise, controller, refs: 0, listeners };
+    promise.catch(() => {}).finally(() => { if (regionLoads.get(spec.key) === created) regionLoads.delete(spec.key); });
+    regionLoads.set(spec.key, created);
+    load = created;
+  }
+  const shared = load;
+  shared.refs++;
+  shared.listeners.add(onProgress);
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    shared.refs--;
+    shared.listeners.delete(onProgress);
+    if (shared.refs <= 0) shared.controller.abort();
+  };
+  signal.addEventListener('abort', release, { once: true });
+  try {
+    return await raceAbort(shared.promise, signal);
+  } finally {
+    signal.removeEventListener('abort', release);
+    shared.listeners.delete(onProgress);
+    if (!released) { released = true; shared.refs--; }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -396,6 +487,73 @@ const api = {
       return Comlink.transfer({ status: 'ok' as const, levels, imageSize }, levels.map((l) => l.buffer as ArrayBuffer));
     } finally {
       requestControllers.delete(req.id);
+    }
+  },
+
+  /**
+   * Load the elevation grid of a region (or reuse it) and run an analysis
+   * on it. Progress is reported per stage; cancel(id) aborts.
+   */
+  async analyzeRegion(req: RegionAnalysisRequest, onProgress?: RegionProgress): Promise<RegionAnalysisResponse> {
+    const controller = new AbortController();
+    requestControllers.set(req.id, controller);
+    // Progress goes to a proxied callback; never let a closed one break the job
+    const report: RegionProgress = (stage, fraction) => {
+      try { void onProgress?.(stage, fraction); } catch { /* released */ }
+    };
+    try {
+      const region = await loadRegion(req.region, controller.signal, report);
+      const cellSize = cellSizeAt(req.centerLat, region.zoom, region.tileSize);
+      const grid: Grid = { data: region.data, width: region.width, height: region.height, cellSize };
+      const outputs: Record<string, Float32Array> = {};
+      const stats: Record<string, number> = {};
+      const progress = (f: number) => report('computing', f);
+      const task = req.task;
+      if (task?.kind === 'viewshed') {
+        const { tileX, tileY, ...rest } = task.options;
+        const T = region.tileSize;
+        const r = await drive(viewshedSteps(grid, { ...rest, x: tileX * T - region.px0, y: tileY * T - region.py0 }), controller.signal, progress);
+        outputs.visible = r.visible;
+        if (r.clearance) outputs.clearance = r.clearance;
+        stats.visibleCells = r.visibleCells;
+        stats.analysedCells = r.analysedCells;
+        stats.observerElevation = r.observerElevation;
+      } else if (task?.kind === 'sunhours') {
+        const r = await drive(sunHoursSteps(grid, task.options), controller.signal, progress);
+        outputs.hours = r.hours;
+        outputs.firstSun = r.firstSun;
+        outputs.lastSun = r.lastSun;
+        stats.daylight = r.daylight;
+      } else if (task?.kind === 'skyview') {
+        outputs.skyview = await drive(skyViewSteps(grid, task.options), controller.signal, progress);
+      } else if (task?.kind === 'tpi') {
+        outputs.tpi = await drive(tpiSteps(grid, task.options), controller.signal, progress);
+      }
+      const response: RegionAnalysisResponse = {
+        width: region.width,
+        height: region.height,
+        tileSize: region.tileSize,
+        zoom: region.zoom,
+        px0: region.px0,
+        py0: region.py0,
+        cellSize,
+        min: region.min,
+        max: region.max,
+        missing: region.missing,
+        failed: region.failed,
+        outputs,
+        stats,
+      };
+      const transfers = Object.values(outputs).map((a) => a.buffer as ArrayBuffer);
+      if (req.returnGrid) {
+        response.grid = region.data.slice();
+        transfers.push(response.grid.buffer as ArrayBuffer);
+      }
+      return Comlink.transfer(response, transfers);
+    } finally {
+      requestControllers.delete(req.id);
+      // The progress callback arrived as a proxy with its own port: close it
+      (onProgress as unknown as { [Comlink.releaseProxy]?: () => void } | undefined)?.[Comlink.releaseProxy]?.();
     }
   },
 

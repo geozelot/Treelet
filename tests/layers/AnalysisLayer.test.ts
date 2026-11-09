@@ -44,6 +44,6 @@ describe('AnalysisLayer', () => {
   });
 
   it('rejects unknown analyses', () => {
-    expect(() => new AnalysisLayer({ analysis: 'viewshed' })).toThrow(/unknown analysis "viewshed"/);
+    expect(() => new AnalysisLayer({ analysis: 'no_such_kind' })).toThrow(/unknown analysis "no_such_kind"/);
   });
 });

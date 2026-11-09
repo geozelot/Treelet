@@ -43,3 +43,5 @@ export {
 } from './ramps';
 export { sampleSurfaceGrid, type GridReader } from './surface';
 export * from './builtins';
+export { sunPosition, sunPathOfDay, type SunPosition } from './solar';
+export { planRegion, type RegionPlan, type RegionWindow } from './region';

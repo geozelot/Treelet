@@ -4,6 +4,7 @@
 // Options, display state, and handle types for all layer kinds.
 // ============================================================================
 
+import type { TileBounds } from '../core/types';
 import type { TileSource } from '../sources/TileSource';
 import type { ElevationDecoder } from '../decoders/ElevationDecoder';
 import type { CoatBlendMode, Ramp } from '../analysis/types';
@@ -81,8 +82,40 @@ export interface AnalysisLayerOptions<P extends object = Record<string, unknown>
   params?: Partial<P>;
   /** Ramp for value analyses. Default: the analysis' ramp. */
   ramp?: Ramp;
+  /** Unit of the values (legend). Default: the analysis' unit. */
+  unit?: string;
   minZoom?: number;
   maxZoom?: number;
+  layerDisplay?: AnalysisLayerDisplay;
+}
+
+/**
+ * A grid to show as a coat: single-band values (colored by a ramp) or RGBA
+ * colors. Rows run from north to south; cells are registered to `bounds`
+ * (the outer edges of the first and last rows and columns).
+ */
+export interface RasterLayerOptions {
+  /** Values (width·height, NaN = no data) or RGBA bytes (width·height·4). */
+  data: Float32Array | Uint8Array | Uint8ClampedArray;
+  width: number;
+  height: number;
+  /** Outer edges in degrees. */
+  bounds: TileBounds;
+  /**
+   * How rows are spaced: evenly in Web Mercator y (EPSG:3857, as map
+   * tiles) or in latitude (EPSG:4326, resampled once when added). Default
+   * 'EPSG:3857'.
+   */
+  crs?: 'EPSG:3857' | 'EPSG:4326';
+  /** A value that marks missing data (besides NaN). */
+  nodata?: number;
+  layerName?: string;
+  /** Ramp range of value grids. Default: the data's min and max. */
+  range?: [number, number];
+  /** Ramp of value grids. Default 'viridis'. */
+  ramp?: Ramp;
+  /** Unit of the values (legend). */
+  unit?: string;
   layerDisplay?: AnalysisLayerDisplay;
 }
 

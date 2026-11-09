@@ -35,6 +35,7 @@ vec3 applyCoats(Surface s, vec4 drape) {
   for (int i = 0; i < MAX_COATS; i++) {
     if (i >= uCoatCount) break;
     int kind = uCoatKind[i];
+    gCoatRaster = uCoatRaster[i];
     vec4 c = kind == 0 ? imageryCoat(drape) : evalAnalysis(kind, s, uCoatP0[i], uCoatP1[i]);
     if (uCoatRamp[i] >= 0.0) {
       vec4 rc = rampColor(uCoatRamp[i], c.x);

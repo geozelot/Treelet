@@ -2,7 +2,8 @@
 // treelet.js - Full Demo
 // Showcases the layer architecture: the base layer is the geometry; the
 // coat stack (imagery and analyses such as elevation, slope, contours,
-// water and hillshade) colors it. Three presets switch between stacks.
+// water and hillshade) colors it. Presets switch between stacks, including
+// region analyses computed in a worker (a viewshed, sun hours on a date).
 // ============================================================================
 
 import { Treelet, XYZSource, WMTSSource } from '../src/index';
@@ -88,12 +89,27 @@ const basemapOrtho = map.addDrapeLayer({
 // preset adds its own analyses on top of the imagery it picks. Open the
 // Overlay stack in the layer panel to change them.
 // =========================================================================
-type Preset = 'relief' | 'avalanche' | 'flood';
+type Preset = 'relief' | 'avalanche' | 'flood' | 'viewshed' | 'sun';
 let presetLayers: ReturnType<typeof map.addAnalysisLayer>[] = [];
 
+/** Hafelekar (2256 m) on the Nordkette, straight above Innsbruck. */
+const SUMMIT = { lng: 11.3853, lat: 47.3122 };
+
 function applyPreset(name: Preset): void {
+  for (const job of map.getAnalysisJobs()) map.cancelAnalysis(job.id);
+  map.cancelPick();
   for (const h of presetLayers) map.removeAnalysisLayer(h);
   presetLayers = [];
+  if (name !== 'sun' && map.getSunTime()) {
+    // Back to the default sun from the north-west
+    map.setSunTime(null);
+    map.setSunAzimuth(315);
+    map.setSunAltitude(45);
+  }
+  const keep = (p: Promise<{ layer: ReturnType<typeof map.addAnalysisLayer> | null }>) => {
+    p.then((r) => { if (r.layer) presetLayers.push(r.layer); })
+      .catch((err) => { if (err?.name !== 'AbortError') console.warn(err); });
+  };
 
   if (name === 'relief') {
     // Elevation colors under the hillshade, no imagery
@@ -106,13 +122,25 @@ function applyPreset(name: Preset): void {
       map.addAnalysisLayer({ analysis: 'slope', ramp: 'avalanche', layerDisplay: { opacity: 0.7 } }),
       map.addAnalysisLayer({ analysis: 'contours', params: { interval: 100, index: 5 } }),
     );
-  } else {
+  } else if (name === 'flood') {
     // Rising water over the satellite imagery: the level animates up through the visible range
     map.activateDrapeLayer(satellite);
     const [lo, hi] = map.getVisibleElevationRange();
     const water = map.addAnalysisLayer({ analysis: 'water', params: { level: lo } });
     presetLayers.push(water);
     void map.animateAnalysisParams(water, { level: [lo, lo + 0.45 * (hi - lo)] }, 4000);
+  } else if (name === 'viewshed') {
+    // What the summit sees within 12 km (computed in a worker; progress in the legend)
+    map.activateDrapeLayer(basemapOrtho);
+    map.setView({ lng: SUMMIT.lng, lat: SUMMIT.lat - 0.04 }, 10.8);
+    keep(map.computeViewshed(SUMMIT, { radius: 12000, eyeHeight: 2, layerDisplay: { opacity: 0.8 } }));
+  } else {
+    // Winter solstice: hours of direct sun in the Inn valley, sun placed at 10:30
+    map.deactivateDrapeLayer();
+    map.setView({ lng: 11.39, lat: 47.27 }, 11);
+    const day = new Date(new Date().getFullYear(), 11, 21, 10, 30);
+    map.setSunTime(day);
+    keep(map.computeSunHours({ date: day, layerDisplay: { opacity: 0.85 } }));
   }
 
   document.querySelectorAll<HTMLButtonElement>('#presets button').forEach((b) => {
@@ -139,3 +167,4 @@ console.log('Navigate: Left-click drag to pan, scroll to zoom, right-click drag 
 console.log('Inspect: map.sampleTerrain({ lng, lat }), map.pick(x, y), map.getElevationProfile(a, b), map.getStats()');
 console.log('Coats: map.addAnalysisLayer({ analysis: "slope", ramp: "avalanche" }), map.getLayerStack(), map.getLegends()');
 console.log('Water: const w = map.addAnalysisLayer({ analysis: "water" }); map.animateAnalysisParams(w, { level: 2000 }, 3000)');
+console.log('Regions: map.computeViewshed({ lng, lat }), map.computeSunHours({ date }), map.computeSkyView(), map.computeTpi(), map.getElevationGrid()');

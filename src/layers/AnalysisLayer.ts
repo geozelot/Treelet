@@ -26,6 +26,8 @@ export class AnalysisLayer<P extends object = Record<string, unknown>> implement
   params: P;
   /** Current ramp (value kinds), a built-in name or a spec. */
   ramp: Ramp | undefined;
+  /** Unit of the values (legend). */
+  readonly unit: string | undefined;
   /** Per-layer display settings. */
   readonly display: ResolvedAnalysisLayerDisplay;
 
@@ -45,6 +47,7 @@ export class AnalysisLayer<P extends object = Record<string, unknown>> implement
     this.params = resolveParams(descriptor, options.params);
     if (options.ramp !== undefined) resolveRamp(options.ramp); // validates
     this.ramp = options.ramp ?? descriptor.ramp;
+    this.unit = options.unit ?? descriptor.unit;
 
     const ld = options.layerDisplay;
     this.display = {

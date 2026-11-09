@@ -164,7 +164,7 @@ export class DisplayController {
     const layer = this.layerRegistry.getAnalysisLayer(handle);
     if (!layer || !layer.isValueKind) return null;
     const domain = this.getAnalysisDomain(layer) ?? [0, 1];
-    return legendFor(layer.id, layer.layerName, resolveRamp(layer.ramp ?? layer.descriptor.ramp!), domain, layer.descriptor.unit);
+    return legendFor(layer.id, layer.layerName, resolveRamp(layer.ramp ?? layer.descriptor.ramp!), domain, layer.unit);
   }
 
   /** Legends of the visible value analyses, top of the stack first. */
@@ -202,6 +202,17 @@ export class DisplayController {
 
   getSunAltitude(): number {
     return this._sunAltitude;
+  }
+
+  /**
+   * Place the sun where it actually is (from a date): altitudes down to
+   * −10° are kept, so slopes facing the sun still catch light at dusk.
+   */
+  setSunPosition(azimuth: number, altitude: number): void {
+    if (!Number.isFinite(azimuth) || !Number.isFinite(altitude)) return;
+    this._sunAzimuth = ((azimuth % 360) + 360) % 360;
+    this._sunAltitude = Math.max(-10, Math.min(90, altitude));
+    this.updateSunDirection();
   }
 
   updateSunDirection(): void {
@@ -338,6 +349,7 @@ export class DisplayController {
       opacity: layer.display.opacity,
       ramp: layer.isValueKind ? resolveRamp(layer.ramp ?? d.ramp!) : null,
       domain,
+      raster: d.raster ? this.terrainRenderer.rasterSlot(layer.id) : -1,
       pack: (dom) => d.pack(params, dom),
     };
   }

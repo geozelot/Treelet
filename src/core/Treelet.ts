@@ -34,6 +34,7 @@ import type {
   ProfileSample,
   TreeletStats,
   UICorner,
+  TileBounds,
 } from './types';
 import { SceneManager } from '../scene/SceneManager';
 import { CameraTerrain, marchToTerrain, type GroundSampler } from '../scene/CameraTerrain';
@@ -47,11 +48,30 @@ import type {
   DrapeLayerOptions,
   AnalysisLayerOptions,
   OverlayLayerOptions,
+  RasterLayerOptions,
   LayerHandle,
 } from '../layers/types';
 import type { LegendSpec, Ramp, SurfaceSample } from '../analysis/types';
 import { registerBuiltinAnalyses, slopeDegrees, aspectDegrees, curvatureOf } from '../analysis/builtins';
 import { startTween, type TweenHandle } from './tween';
+import {
+  AnalysisController,
+  REGION_ANALYSES,
+  type AnalysisJob,
+  type RegionOptions,
+  type ElevationGrid,
+  type ViewshedOptions,
+  type ViewshedResult,
+  type SunHoursOptions,
+  type SunHoursResult,
+  type SkyViewOptions,
+  type TpiOptions,
+  type GridResult,
+  type RegionAnalysisKind,
+} from './AnalysisController';
+import { sunPosition, type SunPosition } from '../analysis/solar';
+import { boundsAround } from '../analysis/region';
+import { gridRange, resampleRowsToMercator } from '../analysis/grid';
 import { TileGrid } from '../tiles/TileGrid';
 import { WebMercator } from '../crs/WebMercator';
 import { WorkerPool } from '../workers/WorkerPool';
@@ -227,6 +247,11 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
   private readonly corners = new Map<UICorner, HTMLDivElement>();
   /** Running parameter animations by layer id. */
   private readonly tweens = new Map<string, TweenHandle>();
+  private readonly analysisController: AnalysisController;
+  /** Date the sun is placed for (follows the map center), or null for a manual sun. */
+  private sunTime: Date | null = null;
+  /** The pending pickLocation(), if any. */
+  private picking: { finish: (pick: TerrainPick | null) => void } | null = null;
   private readonly scratch = new Vector3();
   private readonly scratchDir = new Vector3();
 
@@ -295,6 +320,15 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
       () => this.sceneManager.requestRender(),
       () => this.terrainRenderer.autoElevationRange,
     );
+    this.analysisController = new AnalysisController({
+      workerPool: this.workerPool,
+      layerRegistry: this.layerRegistry,
+      layerController: this.layerController,
+      emit: (event, data) => this.emit(event, data),
+      toWorld: (lngLat) => this.lngLatToWorld(lngLat),
+      defaultBounds: () => this.defaultRegionBounds(),
+      sunTime: () => this.sunTime,
+    });
     // A bare map shows shaded relief; imagery and analyses stack over it.
     this.layerController.addAnalysisLayer({ analysis: 'hillshade' });
     this.displayController.updateSunDirection();
@@ -497,8 +531,30 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
   /** Debounced end of a camera interaction. */
   private onCameraSettled(): void {
     if (!this.isRunning || this.destroyed) return;
+    // A sun placed by date follows the location
+    if (this.sunTime) this.applySunTime();
     this.sceneManager.requestRender();
     this.emit('moveend', { center: this.getCenter(), zoom: this.getZoom() });
+  }
+
+  /** The area in view around the screen center (at most twice the camera distance away). */
+  private defaultRegionBounds(): TileBounds | null {
+    const b = this.getBounds();
+    if (!b) return null;
+    const cc = this.sceneManager.cameraController;
+    const t = cc.controls.target;
+    const worldDist = cc.camera.position.distanceTo(t);
+    const k = WebMercator.scaleFactorAtWorldY(t.y, this.options.mapDisplay.worldScale);
+    const meters = worldDist / (this.metersToScene * k);
+    const c = this.getCenter();
+    const box = boundsAround(c.lng, c.lat, Math.max(2 * meters, 500));
+    const out = {
+      west: Math.max(b.sw.lng, box.west),
+      east: Math.min(b.ne.lng, box.east),
+      south: Math.max(b.sw.lat, box.south),
+      north: Math.min(b.ne.lat, box.north),
+    };
+    return out.east > out.west && out.north > out.south ? out : null;
   }
 
   private lngLatToWorld(lngLat: LngLat): { x: number; y: number } {
@@ -772,6 +828,177 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
   getLegends(): LegendSpec[] { return this.displayController.getLegends(); }
 
   // =========================================================================
+  // Rasters and region analyses (→ LayerController / AnalysisController)
+  // =========================================================================
+
+  /**
+   * Show a grid as a coat: single-band values colored by a ramp (Float32
+   * data) or an RGBA image (byte data). At most 4 raster coats at once.
+   */
+  addRasterLayer(options: RasterLayerOptions): LayerHandle {
+    const { width, height, bounds } = options;
+    const color = !(options.data instanceof Float32Array);
+    let data = options.data;
+    if (!color && options.nodata !== undefined) {
+      const nodata = options.nodata;
+      data = (data as Float32Array).map((v) => (v === nodata ? NaN : v));
+    }
+    if (options.crs === 'EPSG:4326') {
+      data = resampleRowsToMercator(data, width, height, bounds.south, bounds.north, color ? 4 : 1);
+    } else if (options.crs !== undefined && options.crs !== 'EPSG:3857') {
+      throw new Error(`treelet: unsupported raster crs "${options.crs}"`);
+    }
+    const nw = this.lngLatToWorld({ lng: bounds.west, lat: bounds.north });
+    const se = this.lngLatToWorld({ lng: bounds.east, lat: bounds.south });
+    let params: Record<string, unknown> = {};
+    if (!color) {
+      const r = options.range ?? gridRange(data) ?? [0, 1];
+      params = { range: r[1] > r[0] ? [r[0], r[1]] : [r[0], r[0] + 1] };
+    }
+    return this.layerController.addRasterLayer({
+      analysis: color ? 'image' : 'raster',
+      layerName: options.layerName ?? (color ? 'Image' : 'Raster'),
+      ramp: color ? undefined : options.ramp,
+      unit: options.unit,
+      params,
+      layerDisplay: options.layerDisplay,
+    }, { width, height, data, bounds: { west: nw.x, north: nw.y, east: se.x, south: se.y } });
+  }
+
+  /** Size, bounds and value range of a raster coat, or null. */
+  getRasterInfo(handle: LayerHandle | string): { width: number; height: number; bounds: TileBounds; range: [number, number] | null; color: boolean } | null {
+    const r = this.terrainRenderer.getRaster(typeof handle === 'string' ? handle : handle.id);
+    if (!r) return null;
+    const nw = this.worldToLngLat(r.bounds.west, r.bounds.north);
+    const se = this.worldToLngLat(r.bounds.east, r.bounds.south);
+    return {
+      width: r.width,
+      height: r.height,
+      bounds: { west: nw.lng, north: nw.lat, east: se.lng, south: se.lat },
+      range: r.range ? [r.range[0], r.range[1]] : null,
+      color: r.color,
+    };
+  }
+
+  /** Value of a raster coat at a position (filtered as drawn), or null outside it / without data. */
+  getRasterValue(handle: LayerHandle | string, lngLat: LngLat): number | null {
+    const w = this.lngLatToWorld(lngLat);
+    return this.terrainRenderer.sampleRaster(typeof handle === 'string' ? handle : handle.id, w.x, w.y);
+  }
+
+  /**
+   * Elevations of a region as one grid, from the active base layer's tiles
+   * at the finest zoom within the tile budget (default: the area in view).
+   */
+  getElevationGrid(options?: RegionOptions): Promise<ElevationGrid> {
+    return this.analysisController.getElevationGrid(options);
+  }
+
+  /** Ground visible from an observer (eye height, radius, field of view; Earth curvature and refraction). */
+  computeViewshed(observer: LngLat, options?: ViewshedOptions): Promise<ViewshedResult> {
+    return this.analysisController.computeViewshed(observer, options);
+  }
+
+  /** Hours of direct sun on a day, with terrain shadows (default: the sun time's day, or today). */
+  computeSunHours(options?: SunHoursOptions): Promise<SunHoursResult> {
+    return this.analysisController.computeSunHours(options);
+  }
+
+  /** Sky-view factor: the visible fraction of the sky (1 = open, lower in valleys). */
+  computeSkyView(options?: SkyViewOptions): Promise<GridResult> {
+    return this.analysisController.computeSkyView(options);
+  }
+
+  /** Topographic position index: height above (+) or below (−) the surrounding mean. */
+  computeTpi(options?: TpiOptions): Promise<GridResult> {
+    return this.analysisController.computeTpi(options);
+  }
+
+  /**
+   * Run a region analysis by kind with default options (the viewshed needs
+   * `observer`). Used by the layer panel.
+   */
+  computeAnalysis(
+    kind: RegionAnalysisKind,
+    options: (ViewshedOptions & { observer?: LngLat }) | SunHoursOptions | SkyViewOptions | TpiOptions = {},
+  ): Promise<ViewshedResult | SunHoursResult | GridResult> {
+    switch (kind) {
+      case 'viewshed': {
+        const { observer, ...rest } = options as ViewshedOptions & { observer?: LngLat };
+        if (!observer) return Promise.reject(new Error('treelet: a viewshed needs an observer'));
+        return this.computeViewshed(observer, rest);
+      }
+      case 'sunhours': return this.computeSunHours(options as SunHoursOptions);
+      case 'skyview': return this.computeSkyView(options as SkyViewOptions);
+      case 'tpi': return this.computeTpi(options as TpiOptions);
+      default: return Promise.reject(new Error(`treelet: "${kind as string}" is not a region analysis`));
+    }
+  }
+
+  /** Kinds computeAnalysis() runs. */
+  getRegionAnalyses(): readonly RegionAnalysisKind[] { return REGION_ANALYSES; }
+
+  /** Region analyses that are running. */
+  getAnalysisJobs(): AnalysisJob[] { return this.analysisController.getJobs(); }
+
+  /** Cancel a running region analysis (its promise rejects with an AbortError). */
+  cancelAnalysis(id: string): this { this.analysisController.cancel(id); return this; }
+
+  /**
+   * Wait for a click on the terrain (a press without dragging); resolves
+   * with the terrain under it, or null after Escape, cancelPick() or another
+   * pickLocation(). The cursor shows a crosshair meanwhile; `prompt` is
+   * shown in the legend.
+   */
+  pickLocation(options: { prompt?: string } = {}): Promise<TerrainPick | null> {
+    this.cancelPick();
+    if (this.destroyed) return Promise.resolve(null);
+    const canvas = this.sceneManager.renderer.domElement;
+    const container = this.container;
+    const cursor = container.style.cursor;
+    container.style.cursor = 'crosshair';
+    let down: { x: number; y: number; id: number } | null = null;
+    return new Promise<TerrainPick | null>((resolve) => {
+      const onDown = (e: PointerEvent) => { down = { x: e.clientX, y: e.clientY, id: e.pointerId }; };
+      const onUp = (e: PointerEvent) => {
+        if (!down || down.id !== e.pointerId) return;
+        const moved = Math.hypot(e.clientX - down.x, e.clientY - down.y);
+        down = null;
+        if (moved > 6) return;
+        const rect = container.getBoundingClientRect();
+        const pick = this.pick(e.clientX - rect.left, e.clientY - rect.top);
+        if (pick) finish(pick);
+      };
+      const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') finish(null); };
+      const finish = (pick: TerrainPick | null) => {
+        if (this.picking !== state) return;
+        this.picking = null;
+        canvas.removeEventListener('pointerdown', onDown);
+        canvas.removeEventListener('pointerup', onUp);
+        document.removeEventListener('keydown', onKey, true);
+        container.style.cursor = cursor;
+        this.emit('pickend', {});
+        resolve(pick);
+      };
+      const state = { finish };
+      this.picking = state;
+      canvas.addEventListener('pointerdown', onDown);
+      canvas.addEventListener('pointerup', onUp);
+      document.addEventListener('keydown', onKey, true);
+      this.emit('pickstart', { prompt: options.prompt ?? 'Click the terrain' });
+    });
+  }
+
+  /** Stop a pending pickLocation() (it resolves null). */
+  cancelPick(): this {
+    this.picking?.finish(null);
+    return this;
+  }
+
+  /** Whether a pickLocation() is waiting for a click. */
+  isPicking(): boolean { return this.picking !== null; }
+
+  // =========================================================================
   // Coat stack API
   // =========================================================================
 
@@ -815,10 +1042,60 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
   setExaggeration(handleOrValue: LayerHandle | string | number, value?: number): this { this.displayController.setExaggeration(handleOrValue, value); return this; }
   getExaggeration(): number { return this.displayController.getExaggeration(); }
 
-  setSunAzimuth(degrees: number): this { this.displayController.setSunAzimuth(degrees); return this; }
+  /** Sun direction in degrees clockwise from north (clears a sun time). */
+  setSunAzimuth(degrees: number): this {
+    this.sunTime = null;
+    this.displayController.setSunAzimuth(degrees);
+    this.emitSun();
+    return this;
+  }
   getSunAzimuth(): number { return this.displayController.getSunAzimuth(); }
-  setSunAltitude(degrees: number): this { this.displayController.setSunAltitude(degrees); return this; }
+  /** Sun altitude in degrees, 5–90 (clears a sun time). */
+  setSunAltitude(degrees: number): this {
+    this.sunTime = null;
+    this.displayController.setSunAltitude(degrees);
+    this.emitSun();
+    return this;
+  }
   getSunAltitude(): number { return this.displayController.getSunAltitude(); }
+
+  /**
+   * Place the sun where it stands at `date` over the map center (and keep
+   * it there as the map moves), or `null` to go back to the manual sun.
+   * The hillshade coat follows; sun hours default to this day.
+   */
+  setSunTime(date: Date | null): this {
+    if (date !== null && !(date instanceof Date && Number.isFinite(date.getTime()))) {
+      throw new Error('treelet: setSunTime expects a valid Date or null');
+    }
+    this.sunTime = date ? new Date(date.getTime()) : null;
+    if (this.sunTime) this.applySunTime();
+    else this.emitSun();
+    return this;
+  }
+  getSunTime(): Date | null { return this.sunTime ? new Date(this.sunTime.getTime()) : null; }
+
+  /** Where the sun stands at `date` (default: the sun time, or now) over `lngLat` (default: the map center). */
+  getSunPosition(date?: Date, lngLat?: LngLat): SunPosition {
+    const at = lngLat ?? this.getCenter();
+    return sunPosition(date ?? this.sunTime ?? new Date(), at.lng, at.lat);
+  }
+
+  private applySunTime(): void {
+    if (!this.sunTime || this.destroyed) return;
+    const p = this.getSunPosition(this.sunTime);
+    this.displayController.setSunPosition(p.azimuth, p.altitude);
+    this.sceneManager.requestRender();
+    this.emitSun();
+  }
+
+  private emitSun(): void {
+    this.emit('sunchange', {
+      azimuth: this.displayController.getSunAzimuth(),
+      altitude: this.displayController.getSunAltitude(),
+      time: this.getSunTime(),
+    });
+  }
 
   /** Draw the terrain mesh as a wireframe (colored by the coats, or white). */
   setWireframe(enabled: boolean): this { this.displayController.setWireframe(enabled); return this; }
@@ -888,6 +1165,8 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
 
     for (const tween of this.tweens.values()) tween.cancel();
     this.tweens.clear();
+    this.cancelPick();
+    this.analysisController.cancelAll();
     if (this.compass) { this.compass.remove(); this.compass = null; }
     if (this.attribution) { this.attribution.remove(); this.attribution = null; }
     if (this.legend) { this.legend.remove(); this.legend = null; }

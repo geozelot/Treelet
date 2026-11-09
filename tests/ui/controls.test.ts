@@ -44,7 +44,7 @@ function fakeMap(opts: { baseLayers?: number; stack?: unknown[]; legends?: unkno
     camera,
     on: vi.fn((event: string, fn: () => void) => { handlers.set(event, [...(handlers.get(event) ?? []), fn]); }),
     off: vi.fn(),
-    emit: (event: string) => handlers.get(event)?.forEach((fn) => fn()),
+    emit: (event: string, data?: unknown) => handlers.get(event)?.forEach((fn) => (fn as (d: unknown) => void)(data)),
     getCameraController: () => camera,
     getCenter: () => ({ lng: 11, lat: 47 }),
     getBounds: () => ({ sw: { lng: 10, lat: 46 }, ne: { lng: 12, lat: 48 } }),
@@ -55,6 +55,16 @@ function fakeMap(opts: { baseLayers?: number; stack?: unknown[]; legends?: unkno
     getLegend: () => ({ domain: [0, 4000] }),
     getLegends: () => opts.legends ?? [],
     getVisibleElevationRange: () => [800, 2600] as [number, number],
+    getRegionAnalyses: () => ['viewshed', 'sunhours', 'skyview', 'tpi'],
+    computeAnalysis: vi.fn(() => Promise.resolve({})),
+    pickLocation: vi.fn(() => Promise.resolve({ lngLat: { lng: 11.4, lat: 47.3 }, elevation: 2000, slope: 0, aspect: null, curvature: 0, normal: [0, 0, 1] })),
+    cancelPick: vi.fn(),
+    getAnalysisJobs: vi.fn(() => [] as unknown[]),
+    cancelAnalysis: vi.fn(),
+    getRasterInfo: vi.fn(() => ({ range: [0.2, 7.9] })),
+    sunTime: null as Date | null,
+    getSunTime() { return this.sunTime; },
+    setSunTime: vi.fn(function (this: { sunTime: Date | null }, d: Date | null) { this.sunTime = d; }),
     getContainer: () => document.body,
     pick: vi.fn((x: number, y: number) => (x < 0 || y < 0 ? null : {
       lngLat: { lng: 11, lat: 47 }, elevation: 1234.6, slope: 31.26, aspect: 212.4, curvature: 0, normal: [0, 0, 1],
@@ -128,7 +138,7 @@ describe('layer panel', () => {
     const labels = [...proot.querySelectorAll('.dropdown-group-label')].map((l) => l.textContent);
     expect(labels).toEqual(['Analysis', 'Layers']);
     const kinds = [...proot.querySelectorAll('.layer-entry[data-layer-type="analysis"]')].map((e) => (e as HTMLElement).dataset.kind);
-    expect(kinds).toEqual(['elevation', 'slope', 'aspect', 'contours', 'hillshade', 'curvature', 'water']);
+    expect(kinds).toEqual(['elevation', 'slope', 'aspect', 'contours', 'hillshade', 'curvature', 'water', 'viewshed', 'sunhours', 'skyview', 'tpi']);
     expect(proot.querySelector('[data-layer-type="drape"] .layer-btn')!.textContent).toBe('OpenStreetMap');
   });
 
@@ -481,5 +491,129 @@ describe('readout', () => {
     expect(el.hidden).toBe(false);
     document.body.dispatchEvent(new PointerEvent('pointerleave', { pointerType: 'mouse', bubbles: true }));
     expect(el.hidden).toBe(false); // pinned by the tap
+  });
+});
+
+describe('region analyses in the panel', () => {
+  function openDropdownEntry(map: ReturnType<typeof fakeMap>, kind: string) {
+    const { proot } = mount(map);
+    const entry = proot.querySelector(`.layer-entry[data-kind="${kind}"] .layer-btn`) as HTMLElement;
+    expect(entry).not.toBeNull();
+    entry.click();
+    return proot;
+  }
+
+  it('lists only the raster kinds the map can compute (not raster / image)', () => {
+    const { proot } = mount();
+    const kinds = [...proot.querySelectorAll('.layer-entry[data-layer-type="analysis"]')].map((e) => e.getAttribute('data-kind'));
+    expect(kinds).toContain('sunhours');
+    expect(kinds).not.toContain('raster');
+    expect(kinds).not.toContain('image');
+  });
+
+  it('a raster kind runs over the view, replacing an earlier result of that kind', () => {
+    const map = fakeMap({ stack: [fakeAnalysis('analysis-0', 'hillshade'), fakeAnalysis('analysis-4', 'skyview')] });
+    openDropdownEntry(map, 'skyview');
+    expect(map.addAnalysisLayer).not.toHaveBeenCalled();
+    expect(map.computeAnalysis).toHaveBeenCalledWith('skyview', { replaceLayer: 'analysis-4' });
+  });
+
+  it('the viewshed asks for the observer first, then computes from it', async () => {
+    const map = fakeMap();
+    openDropdownEntry(map, 'viewshed');
+    expect(map.pickLocation).toHaveBeenCalledWith({ prompt: 'Click the terrain to place the observer' });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(map.computeAnalysis).toHaveBeenCalledWith('viewshed', { observer: { lng: 11.4, lat: 47.3 }, replaceLayer: undefined });
+  });
+
+  it('a raster range spanning the data gets sliders over the data', () => {
+    const map = fakeMap({ stack: [fakeAnalysis('analysis-5', 'raster', { params: { range: [1, 6] } })] });
+    const { proot } = mount(map);
+    (proot.querySelector('.active-row[data-layer-id="__stack__"]') as HTMLElement).click();
+    (proot.querySelector('.stack-row[data-layer-id="analysis-5"] .stack-name') as HTMLElement).click();
+    const [lo, hi] = proot.querySelectorAll<HTMLInputElement>('input[data-param="range"]');
+    expect([lo.min, lo.max, lo.step, lo.value, hi.value]).toEqual(['0.2', '7.9', '0.05', '1', '6']);
+  });
+});
+
+describe('sun time in the light settings', () => {
+  function openTerrain(map = fakeMap()) {
+    const m = mount(map);
+    (m.proot.querySelector('.active-row[data-layer-type="base"]') as HTMLElement).click();
+    return m;
+  }
+
+  it('switches to a date and time and back to the manual sun', () => {
+    const { map, proot } = openTerrain();
+    expect(proot.querySelector('input[data-param="azimuth"]')).not.toBeNull();
+    (proot.querySelector('[data-action="suntime"][data-value="date"]') as HTMLElement).click();
+    expect(map.setSunTime).toHaveBeenCalledWith(expect.any(Date));
+    expect(proot.querySelector('input[data-param="azimuth"]')).toBeNull();
+    const day = proot.querySelector<HTMLInputElement>('input[data-param="sunday"]')!;
+    expect(day.type).toBe('date');
+    expect(proot.querySelector('input[data-param="sunhour"]')).not.toBeNull();
+    (proot.querySelector('[data-action="suntime"][data-value="manual"]') as HTMLElement).click();
+    expect(map.setSunTime).toHaveBeenLastCalledWith(null);
+  });
+
+  it('the day and time controls set the sun time', () => {
+    const map = fakeMap();
+    map.sunTime = new Date(2024, 11, 21, 9, 0);
+    const { proot } = openTerrain(map);
+    const hour = proot.querySelector<HTMLInputElement>('input[data-param="sunhour"]')!;
+    expect(hour.value).toBe('9');
+    hour.value = '14.5';
+    hour.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    const set = map.setSunTime.mock.calls.at(-1)![0] as Date;
+    expect([set.getFullYear(), set.getMonth(), set.getDate(), set.getHours(), set.getMinutes()]).toEqual([2024, 11, 21, 14, 30]);
+    expect(proot.querySelector('[data-value-for="sun:sunhour"]')!.textContent).toBe('14:30');
+    const day = proot.querySelector<HTMLInputElement>('input[data-param="sunday"]')!;
+    day.value = '2025-06-21';
+    day.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    const d = map.setSunTime.mock.calls.at(-1)![0] as Date;
+    expect([d.getFullYear(), d.getMonth(), d.getDate(), d.getHours(), d.getMinutes()]).toEqual([2025, 5, 21, 14, 30]);
+  });
+});
+
+describe('legend jobs', () => {
+  function mountWithJobs(jobs: unknown[]) {
+    const map = fakeMap();
+    map.getAnalysisJobs.mockImplementation(() => jobs);
+    const el = document.createElement('treelet-legend') as TreeletLegend;
+    document.body.appendChild(el);
+    el.attach(map as unknown as Treelet);
+    return { map, el, root: el.shadowRoot! };
+  }
+
+  it('shows running jobs with progress, updates them in place and cancels them', () => {
+    const jobs = [{ id: 'job-1', kind: 'skyview', label: 'Sky view', stage: 'loading', progress: 0.25 }];
+    const { map, el, root } = mountWithJobs(jobs);
+    expect(el.hidden).toBe(false);
+    const row = root.querySelector('.job[data-job="job-1"]')!;
+    expect(row.querySelector('.job-pct')!.textContent).toBe('Loading 25%');
+    map.emit('analysisprogress', { id: 'job-1', stage: 'computing', progress: 0.6 } as never);
+    expect(root.querySelector('.job[data-job="job-1"]')).toBe(row); // same element: clicks keep working
+    expect(row.querySelector('.job-pct')!.textContent).toBe('Computing 60%');
+    expect((row.querySelector('.job-fill') as HTMLElement).style.width).toBe('60%');
+    (row.querySelector('.job-cancel') as HTMLElement).click();
+    expect(map.cancelAnalysis).toHaveBeenCalledWith('job-1');
+    jobs.length = 0;
+    map.emit('analysisend', { id: 'job-1', label: 'Sky view', status: 'cancelled' } as never);
+    expect(el.hidden).toBe(true);
+  });
+
+  it('shows a pick prompt and a failed job until dismissed', () => {
+    const { map, el, root } = mountWithJobs([]);
+    map.emit('pickstart', { prompt: 'Click the terrain to place the observer' } as never);
+    expect(root.querySelector('.job.pick .job-label')!.textContent).toBe('Click the terrain to place the observer');
+    (root.querySelector('.job.pick .job-cancel') as HTMLElement).click();
+    expect(map.cancelPick).toHaveBeenCalled();
+    map.emit('pickend');
+    map.emit('analysisend', { id: 'job-2', label: 'Viewshed', status: 'error', error: 'no elevation data at the viewshed observer' } as never);
+    const err = root.querySelector('.job.error')!;
+    expect(err.querySelector('.job-pct')!.textContent).toBe('no elevation data at the viewshed observer');
+    (err.querySelector('.job-cancel') as HTMLElement).click();
+    expect(el.hidden).toBe(true);
   });
 });

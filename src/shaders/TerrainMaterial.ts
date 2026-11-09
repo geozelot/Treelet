@@ -25,6 +25,7 @@ import declarations from './glsl/includes/declarations.glsl?raw';
 import elevationSampling from './glsl/includes/elevation_sampling.glsl?raw';
 import surface from './glsl/includes/surface.glsl?raw';
 import coats from './glsl/includes/coats.glsl?raw';
+import rasters from './glsl/includes/rasters.glsl?raw';
 import vertexMain from './glsl/terrain.vert.glsl?raw';
 import fragmentMain from './glsl/terrain.frag.glsl?raw';
 
@@ -43,6 +44,7 @@ export function buildFragmentShader(analysisGlsl: string): string {
     declarations,
     elevationSampling,
     surface,
+    rasters,
     analysisGlsl,
     coats,
     fragmentMain,
@@ -63,8 +65,27 @@ export interface PackedCoat {
   opacity: number;
   /** Ramp texture row, or -1 for kinds that produce a color. */
   rampRow: number;
+  /** Raster slot the coat draws (coatRaster() in GLSL), or -1. */
+  raster: number;
   p0: Vec4;
   p1: Vec4;
+}
+
+/** Rasters the shader can sample at once (MAX_RASTERS in declarations.glsl). */
+export const MAX_RASTERS = 4;
+
+/** One bound raster as the shader receives it. */
+export interface RasterUniform {
+  texture: Texture;
+  /** NW corner relative to the render origin, world units. */
+  offsetX: number;
+  offsetY: number;
+  /** Texels per world unit. */
+  scaleX: number;
+  scaleY: number;
+  width: number;
+  height: number;
+  color: boolean;
 }
 
 /** Default sun: from the north-west (cartographic convention), 45° altitude. */
@@ -107,6 +128,14 @@ export function createTerrainMaterial(options: TerrainMaterialOptions): ShaderMa
     uCoatRamp: { value: new Array<number>(MAX_COATS).fill(-1) },
     uCoatP0: { value: Array.from({ length: MAX_COATS }, () => new Vector4()) },
     uCoatP1: { value: Array.from({ length: MAX_COATS }, () => new Vector4()) },
+    uCoatRaster: { value: new Array<number>(MAX_COATS).fill(-1) },
+    // Rasters
+    uRaster0: { value: null },
+    uRaster1: { value: null },
+    uRaster2: { value: null },
+    uRaster3: { value: null },
+    uRasterXform: { value: Array.from({ length: MAX_RASTERS }, () => new Vector4()) },
+    uRasterInfo: { value: Array.from({ length: MAX_RASTERS }, () => new Vector4(1, 1, 0, 0)) },
     uRampTex: { value: null },
     uRampSize: { value: new Vector2(1, 1) },
     // Drape
@@ -148,8 +177,10 @@ export function setTerrainCoats(material: ShaderMaterial, stack: readonly Packed
   const ramp = u.uCoatRamp.value as number[];
   const p0 = u.uCoatP0.value as Vector4[];
   const p1 = u.uCoatP1.value as Vector4[];
+  const raster = u.uCoatRaster.value as number[];
   for (let i = 0; i < n; i++) {
     const c = stack[i];
+    if (raster[i] !== c.raster) { raster[i] = c.raster; changed = true; }
     const b = BLEND_MODE_INDEX[c.blendMode] ?? 0;
     const o = Math.max(0, Math.min(1, c.opacity));
     if (kind[i] !== c.kind) { kind[i] = c.kind; changed = true; }
@@ -158,6 +189,34 @@ export function setTerrainCoats(material: ShaderMaterial, stack: readonly Packed
     if (ramp[i] !== c.rampRow) { ramp[i] = c.rampRow; changed = true; }
     if (!vec4Equals(p0[i], c.p0)) { p0[i].fromArray(c.p0); changed = true; }
     if (!vec4Equals(p1[i], c.p1)) { p1[i].fromArray(c.p1); changed = true; }
+  }
+  return changed;
+}
+
+/**
+ * Bind rasters to their slots (null = empty slot). Offsets are relative to
+ * the render origin, so call again whenever the origin moves.
+ */
+export function setTerrainRasters(material: ShaderMaterial, slots: ReadonlyArray<RasterUniform | null>): boolean {
+  const u = material.uniforms;
+  const xform = u.uRasterXform.value as Vector4[];
+  const info = u.uRasterInfo.value as Vector4[];
+  let changed = false;
+  for (let i = 0; i < MAX_RASTERS; i++) {
+    const r = slots[i] ?? null;
+    const sampler = u[`uRaster${i}`];
+    const tex = r ? r.texture : null;
+    if (sampler.value !== tex) { sampler.value = tex; changed = true; }
+    if (!r) continue;
+    if (xform[i].x !== r.offsetX || xform[i].y !== r.offsetY || xform[i].z !== r.scaleX || xform[i].w !== r.scaleY) {
+      xform[i].set(r.offsetX, r.offsetY, r.scaleX, r.scaleY);
+      changed = true;
+    }
+    const c = r.color ? 1 : 0;
+    if (info[i].x !== r.width || info[i].y !== r.height || info[i].z !== c) {
+      info[i].set(r.width, r.height, c, 0);
+      changed = true;
+    }
   }
   return changed;
 }

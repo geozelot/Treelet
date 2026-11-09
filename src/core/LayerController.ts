@@ -23,6 +23,7 @@ import type {
 import type { TreeletEventMap } from './types';
 import type { DisplayController } from './DisplayController';
 import { getAnalysis } from '../analysis/registry';
+import type { RasterInput } from '../terrain/RasterSet';
 
 /** Callback type for emitting events back to the Treelet EventEmitter. */
 type EmitFn = <K extends keyof TreeletEventMap>(event: K, data: TreeletEventMap[K]) => void;
@@ -159,8 +160,12 @@ export class LayerController {
   // =========================================================================
 
   addAnalysisLayer<P extends object>(options: AnalysisLayerOptions<P>): LayerHandle {
+    const descriptor = getAnalysis(options.analysis);
+    if (descriptor?.raster) {
+      throw new Error(`treelet: "${options.analysis}" draws a raster; add it with addRasterLayer or its compute method`);
+    }
     // Kinds with view-dependent defaults (a water level) start inside the view
-    const initial = getAnalysis(options.analysis)?.initialParams?.(this.visibleRange()) as Partial<P> | undefined;
+    const initial = descriptor?.initialParams?.(this.visibleRange()) as Partial<P> | undefined;
     const handle = this.layerRegistry.addAnalysisLayer(
       initial ? { ...options, params: { ...initial, ...options.params } as Partial<P> } : options,
     );
@@ -170,9 +175,30 @@ export class LayerController {
     return handle;
   }
 
+  /**
+   * Add a coat of a raster-backed kind (`raster`, `image`, `viewshed`…)
+   * drawing `raster`. Throws when all raster slots are taken.
+   */
+  addRasterLayer<P extends object>(options: AnalysisLayerOptions<P>, raster: RasterInput): LayerHandle {
+    const descriptor = getAnalysis(options.analysis);
+    if (!descriptor?.raster) throw new Error(`treelet: "${options.analysis}" is not a raster analysis`);
+    const handle = this.layerRegistry.addAnalysisLayer(options);
+    try {
+      this.terrainRenderer.bindRaster(handle.id, raster);
+    } catch (err) {
+      this.layerRegistry.removeAnalysisLayer(handle);
+      throw err;
+    }
+    this.displayController.applyMaterialState();
+    this.emitEvent('layeradd', { id: handle.id });
+    this.emitEvent('layerchange', {});
+    return handle;
+  }
+
   removeAnalysisLayer(handle: LayerHandle | string): boolean {
     const id = typeof handle === 'string' ? handle : handle.id;
     if (!this.layerRegistry.removeAnalysisLayer(handle)) return false;
+    this.terrainRenderer.releaseRaster(id);
     this.displayController.applyMaterialState();
     this.emitEvent('layerremove', { id });
     this.emitEvent('layerchange', {});

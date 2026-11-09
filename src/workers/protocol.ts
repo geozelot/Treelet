@@ -6,6 +6,10 @@
 // ============================================================================
 
 import type { NormalizedRegion } from './raster';
+import type { RegionWindow } from '../analysis/region';
+import type { ViewshedOptions } from '../analysis/compute/viewshed';
+import type { SunSample } from '../analysis/compute/sunHours';
+import type { SkyViewOptions, TpiOptions } from '../analysis/compute/skyView';
 
 export type { NormalizedRegion } from './raster';
 
@@ -67,3 +71,59 @@ export type DrapeResponse =
 
 /** HTTP statuses that mean "this tile does not exist" rather than "try again". */
 export const EMPTY_TILE_STATUSES: ReadonlySet<number> = new Set([204, 404, 410]);
+
+// ---------------------------------------------------------------------------
+// Region analyses (dedicated analysis worker)
+// ---------------------------------------------------------------------------
+
+/** Elevation tiles at one zoom, assembled into one grid covering `window`. */
+export interface RegionSpec {
+  /** Identifies the assembled grid (the worker keeps the last few). */
+  key: string;
+  zoom: number;
+  tiles: Array<{ x: number; y: number; url: string }>;
+  window: RegionWindow;
+  decoderType: string;
+  decoderSource?: string;
+  init?: TileRequestInit;
+}
+
+export type RegionTask =
+  | { kind: 'viewshed'; options: Omit<ViewshedOptions, 'x' | 'y'> & { tileX: number; tileY: number } }
+  | { kind: 'sunhours'; options: { samples: SunSample[]; stepMinutes: number } }
+  | { kind: 'skyview'; options: SkyViewOptions }
+  | { kind: 'tpi'; options: TpiOptions };
+
+export interface RegionAnalysisRequest {
+  id: number;
+  region: RegionSpec;
+  /** Latitude of the region's center (ground cell size). */
+  centerLat: number;
+  /** Analysis to run on the grid, or null to only load it. */
+  task: RegionTask | null;
+  /** Return a copy of the elevation grid. */
+  returnGrid?: boolean;
+}
+
+export interface RegionAnalysisResponse {
+  width: number;
+  height: number;
+  tileSize: number;
+  zoom: number;
+  /** The grid's NW corner in global pixels at `zoom`. */
+  px0: number;
+  py0: number;
+  /** Ground meters between cell centers at the region's center. */
+  cellSize: number;
+  min: number;
+  max: number;
+  /** Tiles the source doesn't have / that kept failing (nodata). */
+  missing: number;
+  failed: number;
+  grid?: Float32Array;
+  /** The analysis' output grids by name. */
+  outputs: Record<string, Float32Array>;
+  stats: Record<string, number>;
+}
+
+export type RegionProgress = (stage: 'loading' | 'computing', fraction: number) => void;

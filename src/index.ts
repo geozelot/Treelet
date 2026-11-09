@@ -23,6 +23,23 @@ export type {
   TreeletStats,
 } from './core/types';
 
+// Region analyses (viewshed, sun hours, sky view, TPI, elevation grids)
+export type {
+  RegionOptions,
+  ResultLayerOptions,
+  RegionInfo,
+  ElevationGrid,
+  ViewshedOptions,
+  ViewshedResult,
+  SunHoursOptions,
+  SunHoursResult,
+  SkyViewOptions,
+  TpiOptions,
+  GridResult,
+  AnalysisJob,
+  RegionAnalysisKind,
+} from './core/AnalysisController';
+
 // Re-export core classes
 export { Treelet } from './core/Treelet';
 export { EventEmitter } from './core/EventEmitter';
@@ -47,6 +64,7 @@ export type {
   DrapeLayerDisplay,
   AnalysisLayerOptions,
   AnalysisLayerDisplay,
+  RasterLayerOptions,
   OverlayLayerOptions,
   OverlayLayerDisplay,
   LayerHandle,

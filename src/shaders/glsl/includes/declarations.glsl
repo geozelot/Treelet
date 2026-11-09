@@ -7,6 +7,8 @@ precision highp sampler2DArray;
 
 // Coats the stack can hold (kept in sync with MAX_COATS in src/analysis/registry.ts).
 #define MAX_COATS 6
+// Rasters bound at once (kept in sync with MAX_RASTERS in src/terrain/RasterSet.ts).
+#define MAX_RASTERS 4
 
 // ==== Varyings from vertex shader ====
 in vec2 vTileUV;
@@ -17,6 +19,7 @@ flat in vec4 vElev;
 flat in vec4 vParent;
 flat in vec4 vDrape;
 in vec3 vCamVec;
+in vec2 vWorldLocal;
 
 // ==== Distance haze (sRGB color; camera distances where it starts / is opaque) ====
 uniform vec3 uFogColor;
@@ -39,6 +42,17 @@ uniform float uCoatOpacity[MAX_COATS];
 uniform float uCoatRamp[MAX_COATS];     // ramp texture row, or -1 for color kinds
 uniform vec4 uCoatP0[MAX_COATS];
 uniform vec4 uCoatP1[MAX_COATS];
+uniform int uCoatRaster[MAX_COATS];     // raster slot the coat draws, or -1
+
+// ==== Rasters (value grids or color images) sampled by world position ====
+// Value rasters are R32F (nodata below RASTER_NODATA_THRESHOLD), sampled with
+// texelFetch and a nodata-aware bilinear filter; color rasters are RGBA8.
+uniform highp sampler2D uRaster0;
+uniform highp sampler2D uRaster1;
+uniform highp sampler2D uRaster2;
+uniform highp sampler2D uRaster3;
+uniform vec4 uRasterXform[MAX_RASTERS]; // NW corner relative to the render origin (xy), texels per world unit (zw)
+uniform vec4 uRasterInfo[MAX_RASTERS];  // width, height, color (1) or value (0), unused
 
 // ==== Ramp texture: one RGBA row per coat (sRGB, nearest-filtered) ====
 uniform sampler2D uRampTex;

@@ -78,6 +78,11 @@ export const BUILTIN_RAMPS: Record<ColorRamp, RampSpec> = {
     [0.90, 0.15, 0.10],
     [0.60, 0.20, 0.70],
   ] },
+  /** Viewshed: hidden ground shaded, visible ground green. */
+  visibility: { type: 'classes', breaks: [0.5], colors: [
+    [0.06, 0.07, 0.12, 0.55],
+    [0.30, 0.85, 0.40],
+  ], labels: ['Hidden', 'Visible'] },
   /** Eight compass sectors (N wraps around 0°/360°). */
   aspect8: { type: 'classes',
     breaks: [22.5, 67.5, 112.5, 157.5, 202.5, 247.5, 292.5, 337.5],
@@ -92,6 +97,7 @@ export const BUILTIN_RAMP_NAMES = Object.keys(BUILTIN_RAMPS) as ColorRamp[];
 export const RAMP_PRESET_FOR: Partial<Record<ColorRamp, string>> = {
   avalanche: 'slope',
   aspect8: 'aspect',
+  visibility: 'viewshed',
 };
 
 /** Built-in ramps that suit an analysis: every general ramp plus its own class presets. */

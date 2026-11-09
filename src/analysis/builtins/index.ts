@@ -13,6 +13,7 @@ import { contours } from './contours';
 import { hillshade } from './hillshade';
 import { curvature } from './curvature';
 import { water } from './water';
+import { raster, image, viewshed, sunhours, skyview, tpi } from './rasters';
 
 export type { ElevationParams } from './elevation';
 export type { SlopeParams } from './slope';
@@ -21,6 +22,7 @@ export type { ContoursParams } from './contours';
 export type { HillshadeParams } from './hillshade';
 export type { CurvatureParams, CurvatureMode } from './curvature';
 export type { WaterParams } from './water';
+export type { RangeParams } from './rasters';
 export { slopeDegrees, inSector } from './slope';
 export { aspectDegrees } from './aspect';
 export { curvatureOf, curvatureValue } from './curvature';
@@ -31,6 +33,7 @@ export { CONTOUR_COLORS } from './contours';
 export function registerBuiltinAnalyses(): void {
   const builtins = [
     elevation, slope, aspect, contours, hillshade, curvature, water,
+    viewshed, sunhours, skyview, tpi, raster, image,
   ] as unknown as AnalysisDescriptor<object>[];
   for (const d of builtins) {
     if (!getAnalysis(d.id)) registerAnalysis(d);

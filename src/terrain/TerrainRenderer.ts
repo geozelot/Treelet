@@ -58,8 +58,10 @@ import {
   setTerrainDrapePlaceholder,
   setTerrainView,
   setTerrainFog,
+  setTerrainRasters,
 } from '../shaders/TerrainMaterial';
 import { CoatStack, type CoatInput } from './CoatStack';
+import { RasterSet, type RasterEntry, type RasterInput } from './RasterSet';
 import { analysisShaderSource, onAnalysisRegistered } from '../analysis/registry';
 import type { SurfaceSample } from '../analysis/types';
 import { WebMercator } from '../crs/WebMercator';
@@ -183,6 +185,7 @@ export class TerrainRenderer {
   private activeDrapeLayer: DrapeLayer | null = null;
   private drapeVisible = false;
   private readonly coatStack = new CoatStack();
+  private readonly rasters: RasterSet;
   private readonly unsubscribeAnalyses: () => void;
 
   /** Floating render origin (world units, float64). */
@@ -237,6 +240,7 @@ export class TerrainRenderer {
     this.tileGrid = options.tileGrid;
     this.workerPool = options.workerPool;
     this.renderer = options.renderer;
+    this.rasters = new RasterSet(options.renderer.capabilities?.maxTextureSize ?? 4096);
     this.layerRegistry = options.layerRegistry;
     this.slotSize = options.slotSize;
     this.drapeSlotSize = options.drapeSlotSize;
@@ -378,6 +382,7 @@ export class TerrainRenderer {
       this.originY = view.targetY;
       this.mesh.position.set(this.originX, this.originY, 0);
       this.mesh.updateMatrix();
+      this.syncRasters();
     }
     setTerrainView(
       this.material,
@@ -1009,6 +1014,43 @@ export class TerrainRenderer {
     this.markRender(); // ramp rows may have changed without a uniform change
   }
 
+  // =========================================================================
+  // Rasters
+  // =========================================================================
+
+  /** Bind a raster for the coat of layer `id` (throws when no slot is free). */
+  bindRaster(id: string, input: RasterInput): RasterEntry {
+    const entry = this.rasters.bind(id, input);
+    this.syncRasters();
+    this.markRender();
+    return entry;
+  }
+
+  releaseRaster(id: string): boolean {
+    if (!this.rasters.release(id)) return false;
+    this.syncRasters();
+    this.markRender();
+    return true;
+  }
+
+  /** Shader slot of layer `id`'s raster, or -1. */
+  rasterSlot(id: string): number {
+    return this.rasters.slotOf(id);
+  }
+
+  getRaster(id: string): RasterEntry | undefined {
+    return this.rasters.get(id);
+  }
+
+  /** Value of layer `id`'s raster at a world point (the shader's filter), or null. */
+  sampleRaster(id: string, worldX: number, worldY: number): number | null {
+    return this.rasters.sample(id, worldX, worldY);
+  }
+
+  private syncRasters(): void {
+    if (setTerrainRasters(this.material, this.rasters.uniforms(this.originX, this.originY))) this.markRender();
+  }
+
   /** The visible elevation range (min, max of the drawn tiles), as used by 'auto' ramp domains. */
   get autoElevationRange(): [number, number] {
     return this.coatStack.autoDomain;
@@ -1122,6 +1164,7 @@ export class TerrainRenderer {
     this.themeCleanup();
     this.unsubscribeAnalyses();
     this.coatStack.dispose();
+    this.rasters.dispose();
     this.atlas.dispose();
     this.drapeAtlas?.dispose();
     this.drapeAtlas = null;

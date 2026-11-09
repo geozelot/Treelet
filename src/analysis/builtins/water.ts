@@ -38,9 +38,9 @@ vec4 analysis_water(Surface s, vec4 p0, vec4 p1) {
   return vec4(color, a);
 }`,
   params: [
-    { key: 'level', label: 'Level', type: 'range', min: -500, max: 9000, step: 1, unit: 'm', bounds: 'elevation' },
-    { key: 'depthFade', label: 'Depth shading', type: 'range', min: 0, max: 500, step: 5, unit: 'm' },
-    { key: 'shoreline', label: 'Shore fade', type: 'range', min: 0, max: 50, step: 0.5, unit: 'm' },
+    { key: 'level', label: 'Level', type: 'range', min: -500, max: 9000, step: 1, unit: 'm', bounds: 'elevation', limits: [-Infinity, Infinity] },
+    { key: 'depthFade', label: 'Depth shading', type: 'range', min: 0, max: 500, step: 5, unit: 'm', limits: [0, Infinity] },
+    { key: 'shoreline', label: 'Shore fade', type: 'range', min: 0, max: 50, step: 0.5, unit: 'm', limits: [0, Infinity] },
     { key: 'color', label: 'Color', type: 'color', presets: WATER_COLORS },
   ],
   defaults: { level: 500, color: [0.14, 0.44, 0.70], depthFade: 100, shoreline: 2 },

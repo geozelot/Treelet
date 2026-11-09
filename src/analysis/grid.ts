@@ -10,6 +10,14 @@
 /** Value the raster textures store for "no data" (the shader tests < −1e37). */
 export const RASTER_NODATA = -3.0e38;
 
+/** Values at or below this are no data (RASTER_NODATA in the shader and on the CPU). */
+export const RASTER_NODATA_THRESHOLD = -1.0e37;
+
+/** Whether a grid value is data (finite and above the nodata sentinel). */
+export function isGridValue(v: number): boolean {
+  return Number.isFinite(v) && v > RASTER_NODATA_THRESHOLD;
+}
+
 /** Mercator y (unitless, radians) of a latitude in degrees. */
 export function mercatorY(lat: number): number {
   const phi = (Math.max(-85.05112878, Math.min(85.05112878, lat)) * Math.PI) / 180;
@@ -62,13 +70,13 @@ export function resampleRowsToMercator<T extends Float32Array | Uint8Array | Uin
   return out;
 }
 
-/** Min and max of the finite values (null when there are none). */
+/** Min and max of the values that are data (null when there are none). */
 export function gridRange(data: ArrayLike<number>, nodata?: number): [number, number] | null {
   let min = Infinity;
   let max = -Infinity;
   for (let i = 0; i < data.length; i++) {
     const v = data[i];
-    if (!Number.isFinite(v) || v === nodata) continue;
+    if (!isGridValue(v) || v === nodata) continue;
     if (v < min) min = v;
     if (v > max) max = v;
   }
@@ -78,7 +86,7 @@ export function gridRange(data: ArrayLike<number>, nodata?: number): [number, nu
 /**
  * Bilinear value at fractional cell coordinates (px, py) measured from the
  * grid's NW corner in cells (so the first cell center is at 0.5, 0.5),
- * ignoring nodata (NaN) taps, as rasters.glsl does. Null outside the grid
+ * ignoring nodata taps (NaN or RASTER_NODATA), as rasters.glsl does. Null outside the grid
  * or where all taps are nodata.
  */
 export function sampleGrid(data: ArrayLike<number>, width: number, height: number, px: number, py: number): number | null {
@@ -102,7 +110,7 @@ export function sampleGrid(data: ArrayLike<number>, width: number, height: numbe
   let sum = 0;
   let ws = 0;
   for (const [v, w] of taps) {
-    if (Number.isFinite(v)) {
+    if (isGridValue(v)) {
       sum += v * w;
       ws += w;
     }

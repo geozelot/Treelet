@@ -86,6 +86,46 @@ describe('viewshed', () => {
     const g = grid(5, 5, 10, () => NaN);
     expect(() => runSync(viewshedSteps(g, { x: 2.5, y: 2.5 }))).toThrow(/no elevation data/);
   });
+
+  it('every cell within the radius gets a sample, also on the rim (observer off the cell centers)', () => {
+    // Rim cells whose only ray samples lie just beyond the radius used to stay hidden
+    const g = grid(101, 101, 26, () => 100);
+    const x = 50.3;
+    const y = 50.7;
+    const radius = 1000;
+    const r = runSync(viewshedSteps(g, { x, y, radius, curvature: false, clearance: true }));
+    const R = radius / 26;
+    let inside = 0;
+    for (let j = 0; j < 101; j++) {
+      for (let i = 0; i < 101; i++) {
+        if (Math.hypot(i + 0.5 - x, j + 0.5 - y) <= R) {
+          inside++;
+          expect(at(g, r.visible, i, j), `cell ${i}, ${j}`).toBe(1);
+          expect(at(g, r.clearance!, i, j), `cell ${i}, ${j}`).toBe(0);
+        } else {
+          expect(at(g, r.visible, i, j), `cell ${i}, ${j}`).toBeNaN();
+        }
+      }
+    }
+    expect(r.analysedCells).toBe(inside);
+    expect(r.visibleCells).toBe(inside);
+  });
+
+  it('a field of view takes any bearing: 720° is north, 900° south', () => {
+    const g = grid(41, 41, 10, () => 100);
+    const run = (bearing: number) => runSync(viewshedSteps(g, { x: 20.5, y: 20.5, curvature: false, fov: 90, bearing }));
+    const mask = (v: Float32Array) => Array.from(v, (c) => (c === c ? c : -1));
+    const north = run(0);
+    const south = run(180);
+    expect(at(g, north.visible, 20, 5)).toBe(1);
+    expect(at(g, north.visible, 20, 35)).toBeNaN();
+    expect(at(g, south.visible, 20, 35)).toBe(1);
+    for (const [bearing, same] of [[720, north], [900, south], [-360, north], [-180, south], [1080, north]] as const) {
+      const r = run(bearing);
+      expect(r.analysedCells, `bearing ${bearing}`).toBe(same.analysedCells);
+      expect(mask(r.visible), `bearing ${bearing}`).toEqual(mask(same.visible));
+    }
+  });
 });
 
 describe('sun hours', () => {

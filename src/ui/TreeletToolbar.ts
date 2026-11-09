@@ -8,6 +8,7 @@
 // tool on the map).
 // ============================================================================
 
+import { runRegionAnalysis } from './regionAnalysis';
 import { BaseElement, escapeHtml } from './dom';
 import { cornerCardStyles } from './cornerStyles';
 import type { Treelet } from '../core/Treelet';
@@ -38,18 +39,16 @@ const toolbarStyles = /* css */ `
     color: var(--text); background: transparent;
   }
   .tool:hover { background: var(--border); }
-  .tool[aria-pressed="true"] { background: light-dark(#7a9400, #a5c500); color: light-dark(#fff, #111); }
-  .tool:focus-visible, .action:focus-visible { outline: 2px solid light-dark(#7a9400, #a5c500); outline-offset: 1px; }
+  .tool[aria-pressed="true"] { background: var(--accent); color: var(--on-accent); }
+  .tool:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   .status { display: flex; flex-direction: column; gap: 3px; padding: 0 4px 3px; }
   .status[hidden] { display: none; }
   .hint { color: var(--text-dim); }
   .result { font-variant-numeric: tabular-nums; }
   .result b { font-weight: 600; }
   .actions { display: flex; gap: 4px; margin-top: 2px; }
-  .action {
-    font: inherit; font-size: 11px; border: 0; border-radius: 6px; padding: 3px 8px; cursor: pointer;
-    color: var(--text); background: var(--border);
-  }
+  /* Read out by screen readers: the result when drawing ends, not every live update */
+  .announce { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 `;
 
 /** Result lines for the toolbar (also used by tests). */
@@ -82,41 +81,77 @@ export class TreeletToolbar extends BaseElement {
   private map: Treelet | null = null;
   private statusEl: HTMLDivElement | null = null;
   private result: ToolResult | null = null;
+  /** What the status block was built for (hint, actions); live results only patch its lines. */
+  private statusKey = '';
+  private subscribed = false;
   private readonly refresh = (): void => this.renderStatus();
-  private readonly onMeasure = (e: { result: ToolResult | null }): void => {
+  private readonly onMeasure = (e: { result: ToolResult | null; final?: boolean }): void => {
     this.result = e.result;
     this.renderStatus();
+    if (e.final) this.announce(describeResult(e.result).map((l) => l.replace(/<[^>]+>/g, '')).join('. '));
   };
+
+  /** Tell screen readers (once per finished result, not on every live update). */
+  private announce(text: string): void {
+    const el = this.shadow.querySelector<HTMLElement>('.announce');
+    if (el) el.textContent = text;
+  }
 
   constructor() {
     super();
     this.shadow = this.attachShadow({ mode: 'open' });
+    this.shadow.addEventListener('click', this.onClick);
   }
 
   attach(map: Treelet, options: { glass?: boolean } = {}): void {
+    if (this.map !== map) this.unsubscribe();
     this.map = map;
     if (options.glass) this.setAttribute('glass', ''); else this.removeAttribute('glass');
-    this.shadow.innerHTML = `<style>${toolbarStyles}</style>
-      <div class="card">
-        <div class="tools" role="toolbar" aria-label="Tools">
-          ${TOOLS.map((t) => `<button type="button" class="tool" data-tool="${t.id}" title="${escapeHtml(t.label)}" aria-label="${escapeHtml(t.label)}" aria-pressed="false">${t.icon}</button>`).join('')}
-        </div>
-        <div class="status" hidden aria-live="polite"></div>
-      </div>`;
-    this.statusEl = this.shadow.querySelector('.status');
-    this.shadow.addEventListener('click', this.onClick);
+    if (!this.statusEl) {
+      this.shadow.innerHTML = `<style>${toolbarStyles}</style>
+        <div class="card">
+          <div class="tools" role="toolbar" aria-label="Tools">
+            ${TOOLS.map((t) => `<button type="button" class="tool" data-tool="${t.id}" title="${escapeHtml(t.label)}" aria-label="${escapeHtml(t.label)}" aria-pressed="false">${t.icon}</button>`).join('')}
+          </div>
+          <div class="status" hidden></div>
+          <div class="announce" aria-live="polite"></div>
+        </div>`;
+      this.statusEl = this.shadow.querySelector('.status');
+    }
+    if (this.isConnected) this.subscribe();
+    this.renderStatus();
+  }
+
+  connectedCallback(): void {
+    // Moved in the page (disconnected, then connected): listen again
+    if (this.map && this.statusEl) {
+      this.subscribe();
+      this.renderStatus();
+    }
+  }
+
+  disconnectedCallback(): void {
+    this.unsubscribe();
+  }
+
+  private subscribe(): void {
+    const map = this.map;
+    if (!map || this.subscribed) return;
+    this.subscribed = true;
     map.on('toolchange', this.refresh);
     map.on('measure', this.onMeasure);
     map.on('pickstart', this.refresh);
     map.on('pickend', this.refresh);
-    this.renderStatus();
   }
 
-  disconnectedCallback(): void {
-    this.map?.off('toolchange', this.refresh);
-    this.map?.off('measure', this.onMeasure);
-    this.map?.off('pickstart', this.refresh);
-    this.map?.off('pickend', this.refresh);
+  private unsubscribe(): void {
+    const map = this.map;
+    if (!map || !this.subscribed) return;
+    this.subscribed = false;
+    map.off('toolchange', this.refresh);
+    map.off('measure', this.onMeasure);
+    map.off('pickstart', this.refresh);
+    map.off('pickend', this.refresh);
   }
 
   private onClick = (e: Event): void => {
@@ -129,12 +164,9 @@ export class TreeletToolbar extends BaseElement {
       e.stopPropagation();
       const current = map.getTool().mode;
       if (tool === 'viewshed') {
-        map.clearTool();
+        // A second press while waiting for the observer cancels (picking stops any tool)
         if (map.isPicking()) { map.cancelPick(); return; }
-        const previous = map.getLayerStack().find((l) => 'descriptor' in l && l.descriptor.id === 'viewshed')?.id;
-        map.pickLocation({ prompt: 'Click the terrain to place the observer' })
-          .then((pick) => pick && map.computeViewshed(pick.lngLat, { replaceLayer: previous }))
-          .catch((err) => { if ((err as Error)?.name !== 'AbortError') console.warn('treelet: viewshed failed:', (err as Error)?.message ?? err); });
+        runRegionAnalysis(map, 'viewshed');
       } else if (current === tool) {
         map.clearTool();
       } else {
@@ -163,18 +195,31 @@ export class TreeletToolbar extends BaseElement {
     if (!t.mode) {
       this.statusEl.hidden = true;
       this.statusEl.innerHTML = '';
+      this.statusKey = '';
       return;
     }
     if (!t.result) this.result = null;
     const lines = describeResult(this.result);
-    const hint = t.drawing ? `<div class="hint">${escapeHtml(TOOL_HINTS[t.mode])}</div>` : '';
     const canProfile = !!this.result && this.result.mode !== 'area' && !(this.result.mode === 'sight' && !this.result.sight);
+    const canFinish = t.drawing && t.mode !== 'sight';
+    const key = `${t.mode}|${t.drawing}|${canProfile}|${canFinish}`;
+    const results = lines.map((l) => `<div class="result">${l}</div>`).join('');
+    if (key === this.statusKey) {
+      // Live results while drawing: only the lines change (buttons keep focus and clicks)
+      const el = this.statusEl.querySelector<HTMLElement>('.results');
+      if (el) {
+        if (el.innerHTML !== results) el.innerHTML = results;
+        return;
+      }
+    }
+    this.statusKey = key;
+    const hint = t.drawing ? `<div class="hint">${escapeHtml(TOOL_HINTS[t.mode])}</div>` : '';
     const actions = [
-      canProfile ? '<button type="button" class="action" data-action="profile">Profile</button>' : '',
-      t.drawing && t.mode !== 'sight' ? '<button type="button" class="action" data-action="finish">Finish</button>' : '',
-      '<button type="button" class="action" data-action="clear">Clear</button>',
+      canProfile ? '<button type="button" class="card-btn" data-action="profile">Profile</button>' : '',
+      canFinish ? '<button type="button" class="card-btn" data-action="finish">Finish</button>' : '',
+      '<button type="button" class="card-btn" data-action="clear">Clear</button>',
     ].join('');
-    this.statusEl.innerHTML = `${hint}${lines.map((l) => `<div class="result">${l}</div>`).join('')}<div class="actions">${actions}</div>`;
+    this.statusEl.innerHTML = `${hint}<div class="results">${results}</div><div class="actions">${actions}</div>`;
     this.statusEl.hidden = false;
   }
 }

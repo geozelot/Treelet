@@ -120,3 +120,18 @@ describe('densify', () => {
     expect(densify([], 1)).toHaveLength(0);
   });
 });
+
+describe('positions must be numbers', () => {
+  it('drops null, empty, boolean and array coordinates with a warning instead of drawing them at 0, 0', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const o = normalizeGeoJSON({ type: 'FeatureCollection', features: [
+      { type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: [null, null] as never } },
+      { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: [[10, 45], ['', false] as never, [[] as never, 46], [11, 46]] } },
+      { type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: ['11.5', '47.25'] as never } },
+    ] });
+    expect(o.points.map((p) => p.lngLat)).toEqual([{ lng: 11.5, lat: 47.25 }]); // numeric strings are fine
+    expect(o.lines[0].coords).toEqual([{ lng: 10, lat: 45 }, { lng: 11, lat: 46 }]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+  });
+});

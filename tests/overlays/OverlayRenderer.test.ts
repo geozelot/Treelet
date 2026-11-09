@@ -1,13 +1,15 @@
 // ============================================================================
 // Tests for src/overlays/OverlayRenderer.ts with stand-ins for the map:
-// geometry built per overlay, draping again when the terrain changes,
-// visibility, fills as coats, labels.
+// geometry built per overlay, heights updated in place where the terrain
+// changed, exaggeration as a scale, opacity without rebuilding, visibility,
+// fills as owned coats, labels.
 // ============================================================================
 
 import { describe, it, expect, vi } from 'vitest';
 import { PerspectiveCamera, Points, Scene, Vector2 } from 'three';
 import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
-import { OverlayRenderer, type OverlayRendererDeps } from '../../src/overlays/OverlayRenderer';
+import { OverlayRenderer, type OverlayRendererDeps, type WorldRect } from '../../src/overlays/OverlayRenderer';
+import type { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import type { FeatureCollection } from '../../src/overlays/types';
 
 function setup(overrides: Partial<OverlayRendererDeps> = {}) {
@@ -17,10 +19,12 @@ function setup(overrides: Partial<OverlayRendererDeps> = {}) {
   camera.up.set(0, 1, 0);
   camera.lookAt(0, 0, 0);
   camera.updateMatrixWorld();
-  let key = 'a';
+  let version = 1;
+  let changes: WorldRect[] | null = [];
   let zoom = 10;
+  let exaggeration = 1;
   const labels = { show: vi.fn() };
-  const fills = { add: vi.fn(() => 'analysis-7'), remove: vi.fn(), setVisible: vi.fn(), setOpacity: vi.fn() };
+  const fills = { add: vi.fn(() => 'analysis-7'), update: vi.fn(() => true), remove: vi.fn() };
   const deps: OverlayRendererDeps = {
     scene,
     camera,
@@ -28,16 +32,23 @@ function setup(overrides: Partial<OverlayRendererDeps> = {}) {
     labels: labels as never,
     // lng/lat degrees → world units (1 unit per 0.01°), small enough to be in view
     toWorld: (p) => ({ x: p.lng * 100, y: p.lat * 100 }),
-    groundZ: vi.fn((x: number, y: number) => (x + y) * 0.01),
+    groundHeight: vi.fn((x: number, y: number) => (x + y) * 0.01),
+    exaggeration: () => exaggeration,
     texelWorld: () => 1,
-    terrainKey: () => key,
+    terrainVersion: () => version,
+    changesSince: vi.fn(() => changes),
     zoom: () => zoom,
     requestRender: vi.fn(),
     isOccluded: vi.fn(() => false),
     fills,
     ...overrides,
   };
-  return { r: new OverlayRenderer(deps), deps, scene, labels, fills, setKey: (k: string) => { key = k; }, setZoom: (z: number) => { zoom = z; } };
+  return {
+    r: new OverlayRenderer(deps), deps, scene, labels, fills,
+    terrainChanged: (rects: WorldRect[] | null) => { version++; changes = rects; },
+    setZoom: (z: number) => { zoom = z; },
+    setExaggeration: (e: number) => { exaggeration = e; },
+  };
 }
 
 const data: FeatureCollection = {
@@ -80,27 +91,72 @@ describe('OverlayRenderer', () => {
     expect([pos.getX(0), pos.getY(0), pos.getZ(0)]).toEqual([50, 25, 1]);
     // Fill: one image coat over the polygon's bounds, 2048 px on the long side
     expect(fills.add).toHaveBeenCalledTimes(1);
-    const [name, raster, opacity] = fills.add.mock.calls[0] as unknown as [string, { width: number; height: number; bounds: Record<string, number>; data: Uint8Array }, number];
+    const [name, raster, owner] = fills.add.mock.calls[0] as unknown as [string, { width: number; height: number; bounds: Record<string, number>; data: Uint8Array }, string];
     expect(name).toBe('Test');
     expect([raster.width, raster.height]).toEqual([2048, 2048]);
     expect(raster.bounds).toEqual({ west: 0, south: 0, east: 100, north: 100 });
     expect(raster.data[(1024 * 2048 + 1024) * 4 + 3]).toBe(Math.round(0.3 * 255));
-    expect(opacity).toBe(1);
+    expect(owner).toBe('o1'); // the overlay owns its fill coat
     // Labels: both points and the trail (polygon has no name) are placed
     const placed = labels.show.mock.calls.at(-1)![0] as Array<{ text: string }>;
     expect(placed.map((l) => l.text).sort()).toEqual(['A', 'B', 'Trail']);
   });
 
-  it('drapes again when the terrain changes, at most every 200 ms', () => {
-    const { r, deps, setKey } = setup();
+  it('updates heights in place where the terrain changed, at most every 200 ms', () => {
+    const { r, deps, scene, terrainChanged } = setup();
+    const height = deps.groundHeight as ReturnType<typeof vi.fn>;
     r.set('o1', { name: 'T', data });
     r.update(false, 0);
-    const calls = (deps.groundZ as ReturnType<typeof vi.fn>).mock.calls.length;
+    const [line] = objects(scene).lines;
+    const geometry = line.geometry;
     expect(r.update(false, 50)).toBe(false); // nothing changed
-    setKey('b');
+    // A tile over the eastern half of the trail (x 0…100) loaded
+    terrainChanged([{ west: 10, south: -10, east: 120, north: 10 }]);
     expect(r.update(false, 100)).toBe(false); // too soon
+    height.mockClear();
+    height.mockImplementation(() => 7);
     expect(r.update(false, 250)).toBe(true);
-    expect((deps.groundZ as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(calls);
+    // Only ends inside the changed area were sampled, and the geometry was kept
+    expect(height.mock.calls.length).toBeGreaterThan(0);
+    for (const [x, y] of height.mock.calls as Array<[number, number]>) {
+      expect(x).toBeGreaterThanOrEqual(10);
+      expect(Math.abs(y)).toBeLessThanOrEqual(10);
+    }
+    expect(objects(scene).lines[0]).toBe(line);
+    expect(line.geometry).toBe(geometry);
+    const start = geometry.getAttribute('instanceStart');
+    const heights = Array.from({ length: start.count }, (_, i) => start.getZ(i));
+    expect(heights).toContain(7);
+    // Unknown changes (a cleared atlas): everything again
+    height.mockClear();
+    terrainChanged(null);
+    r.update(false, 500);
+    expect(height.mock.calls.length).toBeGreaterThan(300);
+  });
+
+  it('exaggeration scales the overlay; opacity changes materials without rebuilding', () => {
+    const { r, deps, scene, setExaggeration } = setup();
+    r.set('o1', { name: 'T', data });
+    r.update(false, 0);
+    const [line] = objects(scene).lines;
+    const height = deps.groundHeight as ReturnType<typeof vi.fn>;
+    height.mockClear();
+    setExaggeration(2.5);
+    expect(r.update(false, 10)).toBe(true);
+    expect(line.parent!.scale.z).toBe(2.5);
+    expect(height).not.toHaveBeenCalled();
+    r.setOpacity('o1', 0.5);
+    r.update(false, 20);
+    expect(objects(scene).lines[0]).toBe(line);
+    const m = line.material as LineMaterial;
+    expect(m.opacity).toBe(0.5);
+    expect(m.transparent).toBe(true);
+    // Translucent lines cover each pixel once: a stencil test per line object
+    expect(m.stencilWrite).toBe(true);
+    expect(m.stencilRef).toBeGreaterThan(0);
+    r.setOpacity('o1', 1);
+    expect(m.transparent).toBe(false);
+    expect(m.stencilWrite).toBe(false);
   });
 
   it('groups lines by width, hides by visibility and zoom, and cleans up on remove', () => {
@@ -125,15 +181,29 @@ describe('OverlayRenderer', () => {
     expect(r.remove('o1')).toBe(false);
   });
 
-  it('fill coats follow visibility and opacity and go away with the overlay', () => {
+  it('the fill coat keeps its id across style and data changes and goes when there is nothing to fill', () => {
     const { r, fills } = setup();
     r.set('o1', { name: 'T', data });
-    r.setOpacity('o1', 0.5);
-    expect(fills.setOpacity).toHaveBeenCalledWith('analysis-7', 0.5);
-    r.setVisible('o1', false);
-    expect(fills.setVisible).toHaveBeenCalledWith('analysis-7', false);
+    expect(r.getFillCoat('o1')).toBe('analysis-7');
+    r.setStyle('o1', { fillColor: '#ff0000' });
+    r.set('o1', { name: 'T', data });
+    expect(fills.add).toHaveBeenCalledTimes(1);
+    expect(fills.update).toHaveBeenCalledTimes(2);
+    expect((fills.update.mock.calls[0] as unknown[])[0]).toBe('analysis-7');
     r.set('o1', { name: 'T', data: { type: 'Point', coordinates: [0, 0] } });
     expect(fills.remove).toHaveBeenCalledWith('analysis-7');
+    expect(r.getFillCoat('o1')).toBeNull();
+  });
+
+  it('a fill coat removed from outside turns the fills off', () => {
+    const { r, fills } = setup();
+    r.set('o1', { name: 'T', data });
+    r.fillRemoved('o1');
+    r.setStyle('o1', { fillColor: '#00ff00' });
+    expect(fills.add).toHaveBeenCalledTimes(1);
+    expect(fills.update).not.toHaveBeenCalled();
+    r.setFills('o1', true);
+    expect(fills.add).toHaveBeenCalledTimes(2);
   });
 
   it('labels behind terrain or overlapping an earlier one are left out', () => {

@@ -30,7 +30,7 @@ export const raster: AnalysisDescriptor<RangeParams> = {
   raster: true,
   glsl: valueGlsl('raster'),
   params: [
-    { key: 'range', label: 'Range', type: 'span', min: -1e9, max: 1e9, step: 1, bounds: 'data' },
+    { key: 'range', label: 'Range', type: 'span', min: -1e9, max: 1e9, step: 1, bounds: 'data', limits: [-Infinity, Infinity] },
   ],
   defaults: { range: [0, 1] },
   ramp: 'viridis',
@@ -104,7 +104,7 @@ export const tpi: AnalysisDescriptor<RangeParams> = {
   raster: true,
   glsl: valueGlsl('tpi'),
   params: [
-    { key: 'range', label: 'Range', type: 'span', min: -500, max: 500, step: 5, unit: 'm' },
+    { key: 'range', label: 'Range', type: 'span', min: -500, max: 500, step: 5, unit: 'm', limits: [-Infinity, Infinity] },
   ],
   defaults: { range: [-50, 50] },
   ramp: 'diverging',

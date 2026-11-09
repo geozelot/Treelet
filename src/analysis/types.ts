@@ -62,9 +62,15 @@ interface ParamBase {
 /** A single number on a slider. */
 export interface RangeParam extends ParamBase {
   type: 'range';
+  /** Slider range of the panel; values set from code may lie outside it (see `limits`). */
   min: number;
   max: number;
   step: number;
+  /**
+   * Values outside these bounds are clamped (with a warning). Default: the
+   * slider range `[min, max]`. Use ±Infinity for an open end.
+   */
+  limits?: [number, number];
   unit?: string;
   /** `'elevation'`: the panel's slider spans the visible elevation range instead of min–max. */
   bounds?: 'elevation';
@@ -74,14 +80,23 @@ export interface RangeParam extends ParamBase {
  * A [low, high] pair, e.g. the value range a ramp spans. With `auto` the
  * value may also be the string 'auto' (fit to the visible data); with
  * `optional` it may be null (not applied). `wrap` marks a circular range
- * (bearings): [from, to] runs clockwise and may pass through min/max, so
- * the pair is not sorted.
+ * (bearings) of period `max − min`: [from, to] runs clockwise and may pass
+ * through min/max, so the pair is not sorted; ends are reduced into
+ * [min, max) and a pair spanning a whole turn or more becomes [min, max]
+ * (everything).
  */
 export interface SpanParam extends ParamBase {
   type: 'span';
+  /** Slider range of the panel; values set from code may lie outside it (see `limits`). */
   min: number;
   max: number;
   step: number;
+  /**
+   * Values outside these bounds are clamped (with a warning). Default: the
+   * slider range `[min, max]`. Use ±Infinity for an open end. Ignored for
+   * `wrap` spans.
+   */
+  limits?: [number, number];
   unit?: string;
   auto?: boolean;
   optional?: boolean;
@@ -170,10 +185,12 @@ export interface AnalysisDescriptor<P extends object = Record<string, unknown>> 
   /** Default opacity of a new coat of this kind. Default 1. */
   opacity?: number;
   /**
-   * Value domain the ramp spans (value kinds). `auto` is the visible
-   * elevation range; return it for parameters set to 'auto'.
+   * Value domain the ramp spans (value kinds). `visible` is the current
+   * visible elevation range [min, max] in meters; the domain is evaluated
+   * again whenever it changes, so a domain derived from it (a parameter set
+   * to 'auto', or e.g. `[visible[0], visible[0] + 500]`) follows the view.
    */
-  domain?: (params: P, auto: [number, number]) => [number, number];
+  domain?: (params: P, visible: [number, number]) => [number, number];
   /** Pack parameters into the two uniforms the shader receives. */
   pack: (params: P, domain: [number, number]) => { p0: Vec4; p1: Vec4 };
   /** The same quantity on the CPU, for readouts and tests (value kinds). */

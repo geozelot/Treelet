@@ -73,7 +73,14 @@ export class TreeletAttribution extends BaseElement {
       }
     }
 
-    // Deduplicate (same text may appear across base + drape)
+    // Visible overlays (their data may require a notice, e.g. ODbL)
+    for (const overlay of this.map.getOverlayLayers()) {
+      if (overlay.visible && overlay.attribution) {
+        parts.push(overlay.attribution);
+      }
+    }
+
+    // Deduplicate (same text may appear across base, drape and overlays)
     const unique = [...new Set(parts)];
 
     this.attrEl.replaceChildren();

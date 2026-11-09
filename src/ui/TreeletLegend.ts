@@ -4,9 +4,11 @@
 // <treelet-legend> - legends of the visible value analyses (elevation,
 // slope…): a ramp bar with its range, or class swatches with labels. Sits
 // in a corner container the map provides (stacked with the readout when
-// they share a corner). Re-renders on 'layerchange' and when an 'auto'
-// range follows the view. Running region analyses show above the legends
-// with their progress and a cancel button; so does a pending location pick.
+// they share a corner). Legends follow layer changes, value updates and the
+// visible range, at most once per frame. Running region analyses show above
+// them with their progress and a cancel button (so does a pending location
+// pick); those rows are rebuilt only when a job starts or ends, so a click
+// on cancel is never lost to a re-render.
 // ============================================================================
 
 import { BaseElement, escapeHtml } from './dom';
@@ -53,7 +55,7 @@ const legendStyles = /* css */ `
   .job-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .job-pct { color: var(--text-dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
   .job-bar { height: 3px; border-radius: 2px; background: var(--border); overflow: hidden; }
-  .job-fill { height: 100%; width: 0; background: light-dark(#7a9400, #a5c500); transition: width 120ms linear; }
+  .job-fill { height: 100%; width: 0; background: var(--accent); transition: width 120ms linear; }
   .job.error .job-pct { color: light-dark(#b42318, #ff8a7a); white-space: normal; }
   .job-cancel {
     flex-shrink: 0;
@@ -64,7 +66,9 @@ const legendStyles = /* css */ `
     color: var(--text-dim); background: transparent; cursor: pointer;
   }
   .job-cancel:hover { color: var(--text); background: var(--border); }
-  .job-cancel:focus-visible { outline: 2px solid light-dark(#7a9400, #a5c500); outline-offset: 1px; }
+  .job-cancel:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .jobs:empty, .legends:empty { display: none; }
+  .jobs:not(:empty) + .legends:not(:empty) { margin-top: 6px; }
 `;
 
 /** How long a failed analysis stays listed (ms). */
@@ -81,7 +85,24 @@ export class TreeletLegend extends BaseElement {
   private shadow: ShadowRoot;
   private map: Treelet | null = null;
   private bodyEl: HTMLDivElement | null = null;
-  private readonly rerender = (): void => this.render();
+  private jobsEl: HTMLDivElement | null = null;
+  private legendsEl: HTMLDivElement | null = null;
+  /** Markup of the legends last shown (unchanged legends aren't rebuilt). */
+  private legendsHtml = '';
+  private legendFrame = 0;
+  private subscribed = false;
+  /** Legends follow layers, values and the visible range, at most once per frame. */
+  private readonly scheduleLegends = (): void => {
+    if (this.legendFrame || typeof requestAnimationFrame === 'undefined') {
+      if (!this.legendFrame) this.renderLegends();
+      return;
+    }
+    this.legendFrame = requestAnimationFrame(() => {
+      this.legendFrame = 0;
+      this.renderLegends();
+    });
+  };
+  private readonly rerenderJobs = (): void => this.renderJobs();
   /** Prompt of a pending location pick. */
   private pickPrompt: string | null = null;
   /** Failed analyses, listed for a while. */
@@ -94,8 +115,8 @@ export class TreeletLegend extends BaseElement {
   }
 
   private readonly onProgress = (e: { id: string; stage: 'loading' | 'computing'; progress: number }): void => {
-    const row = this.bodyEl?.querySelector<HTMLElement>(`.job[data-job="${CSS.escape(e.id)}"]`);
-    if (!row) { this.render(); return; }
+    const row = this.jobsEl?.querySelector<HTMLElement>(`.job[data-job="${CSS.escape(e.id)}"]`);
+    if (!row) { this.renderJobs(); return; }
     const fill = row.querySelector<HTMLElement>('.job-fill');
     const pct = row.querySelector<HTMLElement>('.job-pct');
     if (fill) fill.style.width = `${Math.round(e.progress * 100)}%`;
@@ -104,20 +125,20 @@ export class TreeletLegend extends BaseElement {
 
   private readonly onEnd = (e: { id: string; label: string; status: string; error?: string }): void => {
     if (e.status === 'error') {
-      const timer = setTimeout(() => { this.errors.delete(e.id); this.render(); }, ERROR_MS);
+      const timer = setTimeout(() => { this.errors.delete(e.id); this.renderJobs(); }, ERROR_MS);
       this.errors.set(e.id, { label: e.label, message: e.error ?? 'failed', timer });
     }
-    this.render();
+    this.renderJobs();
   };
 
   private readonly onPickStart = (e: { prompt: string }): void => {
     this.pickPrompt = e.prompt;
-    this.render();
+    this.renderJobs();
   };
 
   private readonly onPickEnd = (): void => {
     this.pickPrompt = null;
-    this.render();
+    this.renderJobs();
   };
 
   private readonly onClick = (ev: Event): void => {
@@ -130,7 +151,7 @@ export class TreeletLegend extends BaseElement {
     } else if (this.errors.has(id)) {
       clearTimeout(this.errors.get(id)!.timer);
       this.errors.delete(id);
-      this.render();
+      this.renderJobs();
     } else {
       this.map.cancelAnalysis(id);
     }
@@ -138,35 +159,62 @@ export class TreeletLegend extends BaseElement {
 
   /** Attach to a Treelet instance (the map places the element in its corner). */
   attach(map: Treelet, options: { glass?: boolean } = {}): void {
+    if (this.map !== map) this.unsubscribe();
     this.map = map;
     if (options.glass) this.setAttribute('glass', '');
     else this.removeAttribute('glass');
     if (!this.bodyEl) {
-      this.shadow.innerHTML = `<style>${legendStyles}</style><div class="card legend" role="list" aria-label="Legend"></div>`;
+      this.shadow.innerHTML = `<style>${legendStyles}</style><div class="card legend" role="list" aria-label="Legend"><div class="jobs"></div><div class="legends"></div></div>`;
       this.bodyEl = this.shadow.querySelector('.legend') as HTMLDivElement;
-      map.on('layerchange', this.rerender);
-      map.on('rangechange', this.rerender);
-      map.on('analysisstart', this.rerender);
-      map.on('analysisprogress', this.onProgress);
-      map.on('analysisend', this.onEnd);
-      map.on('pickstart', this.onPickStart);
-      map.on('pickend', this.onPickEnd);
+      this.jobsEl = this.shadow.querySelector('.jobs') as HTMLDivElement;
+      this.legendsEl = this.shadow.querySelector('.legends') as HTMLDivElement;
     }
+    if (this.isConnected) this.subscribe();
     this.render();
   }
 
+  connectedCallback(): void {
+    // Moved in the page (disconnected, then connected): listen again
+    if (this.map && this.bodyEl) {
+      this.subscribe();
+      this.render();
+    }
+  }
+
   disconnectedCallback(): void {
+    this.unsubscribe();
+    for (const e of this.errors.values()) clearTimeout(e.timer);
+    this.errors.clear();
+  }
+
+  private subscribe(): void {
     const map = this.map;
-    if (!map) return;
-    map.off('layerchange', this.rerender);
-    map.off('rangechange', this.rerender);
-    map.off('analysisstart', this.rerender);
+    if (!map || this.subscribed) return;
+    this.subscribed = true;
+    map.on('layerchange', this.scheduleLegends);
+    map.on('layerupdate', this.scheduleLegends);
+    map.on('rangechange', this.scheduleLegends);
+    map.on('analysisstart', this.rerenderJobs);
+    map.on('analysisprogress', this.onProgress);
+    map.on('analysisend', this.onEnd);
+    map.on('pickstart', this.onPickStart);
+    map.on('pickend', this.onPickEnd);
+  }
+
+  private unsubscribe(): void {
+    const map = this.map;
+    if (!map || !this.subscribed) return;
+    this.subscribed = false;
+    map.off('layerchange', this.scheduleLegends);
+    map.off('layerupdate', this.scheduleLegends);
+    map.off('rangechange', this.scheduleLegends);
+    map.off('analysisstart', this.rerenderJobs);
     map.off('analysisprogress', this.onProgress);
     map.off('analysisend', this.onEnd);
     map.off('pickstart', this.onPickStart);
     map.off('pickend', this.onPickEnd);
-    for (const e of this.errors.values()) clearTimeout(e.timer);
-    this.errors.clear();
+    if (this.legendFrame) cancelAnimationFrame(this.legendFrame);
+    this.legendFrame = 0;
   }
 
   refresh(): void {
@@ -174,8 +222,13 @@ export class TreeletLegend extends BaseElement {
   }
 
   private render(): void {
-    if (!this.map || !this.bodyEl) return;
-    const legends = this.map.getLegends();
+    this.renderJobs();
+    this.renderLegends();
+  }
+
+  /** Running jobs, failures and a pending pick (rebuilt only when one starts or ends). */
+  private renderJobs(): void {
+    if (!this.map || !this.jobsEl) return;
     const jobs = this.map.getAnalysisJobs?.() ?? [];
     const rows: string[] = [];
     if (this.pickPrompt) {
@@ -183,8 +236,22 @@ export class TreeletLegend extends BaseElement {
     }
     for (const j of jobs) rows.push(this.renderJob(j.id, j.label, stageText(j.stage, j.progress), j.progress));
     for (const [id, e] of this.errors) rows.push(this.renderJob(id, e.label, e.message, null, 'error'));
-    this.hidden = legends.length === 0 && rows.length === 0;
-    this.bodyEl.innerHTML = rows.join('') + legends.map((l) => this.renderLegend(l)).join('');
+    this.jobsEl.innerHTML = rows.join('');
+    this.updateHidden();
+  }
+
+  private renderLegends(): void {
+    if (!this.map || !this.legendsEl) return;
+    const html = this.map.getLegends().map((l) => this.renderLegend(l)).join('');
+    if (html !== this.legendsHtml) {
+      this.legendsHtml = html;
+      this.legendsEl.innerHTML = html;
+    }
+    this.updateHidden();
+  }
+
+  private updateHidden(): void {
+    this.hidden = !this.jobsEl?.hasChildNodes() && !this.legendsEl?.hasChildNodes();
   }
 
   private renderJob(id: string, label: string, status: string, progress: number | null, variant = ''): string {

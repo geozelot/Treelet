@@ -6,10 +6,10 @@ const vec3 COAT_BASE_COLOR = vec3(0.72);
 
 vec3 blendCoat(int mode, vec3 base, vec3 c, float a) {
   vec3 r;
-  if (mode == 1) r = base * c;                                           // multiply
-  else if (mode == 2) r = 1.0 - (1.0 - base) * (1.0 - c);                // screen
-  else if (mode == 3) r = (1.0 - 2.0 * c) * base * base + 2.0 * c * base; // soft light (Pegtop)
-  else r = c;                                                            // normal
+  if (mode == BLEND_MULTIPLY) r = base * c;
+  else if (mode == BLEND_SCREEN) r = 1.0 - (1.0 - base) * (1.0 - c);
+  else if (mode == BLEND_SOFTLIGHT) r = (1.0 - 2.0 * c) * base * base + 2.0 * c * base; // Pegtop
+  else r = c; // BLEND_NORMAL
   return mix(base, r, clamp(a, 0.0, 1.0));
 }
 
@@ -36,7 +36,7 @@ vec3 applyCoats(Surface s, vec4 drape) {
     if (i >= uCoatCount) break;
     int kind = uCoatKind[i];
     gCoatRaster = uCoatRaster[i];
-    vec4 c = kind == 0 ? imageryCoat(drape) : evalAnalysis(kind, s, uCoatP0[i], uCoatP1[i]);
+    vec4 c = kind == IMAGERY_KIND ? imageryCoat(drape) : evalAnalysis(kind, s, uCoatP0[i], uCoatP1[i]);
     if (uCoatRamp[i] >= 0.0) {
       vec4 rc = rampColor(uCoatRamp[i], c.x);
       c = vec4(rc.rgb, c.w * rc.a);

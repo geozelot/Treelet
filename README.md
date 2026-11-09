@@ -129,7 +129,9 @@ const osm = map.addDrapeLayer({
 });
 
 // The ground is a stack of coats: imagery at the bottom, analyses above it.
-// A new map starts with a hillshade coat.
+// Parameters set from code are clamped to each parameter's limits (with a warning), not to the panel's slider range: contours take any positive interval, elevation and water ranges any elevation (bathymetry included); the panel's sliders widen to show such values.
+
+A new map starts with a hillshade coat.
 map.activateDrapeLayer(osm);
 map.addAnalysisLayer({ analysis: 'slope', layerDisplay: { opacity: 0.6 } });
 map.addAnalysisLayer({ analysis: 'contours', params: { interval: 50 } });
@@ -204,7 +206,7 @@ The defaults fit a typical view in well under the tile budget at any screen size
 | `compassPosition` | `UICorner` | `'top-right'` | Compass widget corner |
 | `layerPosition` | `UICorner` | `'bottom-right'` | Layer panel corner |
 | `legendPosition` | `UICorner \| false` | `'bottom-left'` | Corner of the legend for the visible analyses, or `false` for none |
-| `readoutPosition` | `UICorner \| false` | `'bottom-left'` | Corner of the cursor readout (elevation, slope, aspect under the pointer), or `false` for none; stacks with the legend in a shared corner |
+| `readoutPosition` | `UICorner \| false` | `'bottom-left'` | Corner of the cursor readout (elevation, slope, aspect under the pointer, and the value of the topmost other analysis coat; hidden over the map's controls), or `false` for none; stacks with the legend in a shared corner |
 | `tools` | `UICorner \| boolean` | `false` | The measuring toolbar: a corner, `true` for `'top-left'`, or `false` for none |
 | `glass` | `boolean` | `false` | Frosted-glass controls (translucent, map blurred behind); costs some GPU time while the map redraws |
 
@@ -275,7 +277,8 @@ map.on('tileerror', ({ coord, layer, error }) => { /* request failed; retried wi
 | `'tileerror'` | `{ coord, layer, error }` | Tile request failed (`layer`: `'elevation' \| 'drape'`) |
 | `'layeradd'` | `{ id }` | Layer added |
 | `'layerremove'` | `{ id }` | Layer removed |
-| `'layerchange'` | `{}` | Layer configuration changed |
+| `'layerchange'` | `{}` | Layers added, removed, shown, hidden or reordered; the active base or drape layer; an overlay's data |
+| `'layerupdate'` | `{ id }` | A layer's values changed: analysis parameters or ramp, opacity, blend mode, an overlay's style (fires often while a slider is dragged or an animation runs) |
 | `'rangechange'` | `{ min, max }` | Visible elevation range changed (`'auto'` ramps) |
 | `'analysisstart'` | `{ id, kind, label }` | A region analysis started |
 | `'analysisprogress'` | `{ id, kind, label, stage, progress }` | `stage`: `'loading'` (tiles) or `'computing'`; `progress` 0–1 of the stage |
@@ -460,13 +463,13 @@ The ground color is a stack of coats, bottom first: the active drape (imagery) a
 | `getLayerStack()` | `(DrapeLayer \| AnalysisLayer)[]` | The coats in drawing order, bottom first |
 | `moveLayer(handle, index)` | `this` | Move a coat (0 = bottom) |
 | `setLayerVisible(handle, visible)` | `this` | Show or hide a coat or an overlay (for a base layer, `true` activates it) |
-| `setLayerOpacity(handle, opacity)` | `this` | Opacity 0–1 of a coat or an overlay |
+| `setLayerOpacity(handle, opacity)` | `this` | Opacity 0–1 of a coat (an analysis layer or a drape; an inactive drape keeps it for when it is shown) or an overlay |
 | `getLayerOpacity(handle)` | `number` | |
 | `removeLayer(handle)` | `this` | Remove a layer of any kind (base, drape, analysis, raster, overlay) |
-| `setLayerBlendMode(handle, mode)` | `this` | `'normal' \| 'multiply' \| 'screen' \| 'softlight'` |
+| `setLayerBlendMode(handle, mode)` | `this` | `'normal' \| 'multiply' \| 'screen' \| 'softlight'` (any drape, active or not) |
 | `getLayerBlendMode(handle)` | `BlendMode` | |
 
-At most 6 coats are drawn (the lowest visible ones). The layer panel's *Overlay* row opens the stack: visibility, order, removal and each coat's settings, rendered from its parameter schema.
+At most 6 coats are drawn (the lowest ones; a coat at opacity 0 or outside its `minZoom`–`maxZoom` isn't drawn and doesn't count). An active drape outside its zoom range shows the coats below it. The layer panel's *Overlay* row opens the stack: visibility, order, removal and each coat's settings, rendered from its parameter schema.
 
 #### Drape layers
 
@@ -501,8 +504,9 @@ An analysis layer is a coat computed from the terrain: elevation, slope, aspect,
 | `addAnalysisLayer(options)` | `LayerHandle` | Add a coat. Value kinds go in just above the imagery and the other value coats; contours and hillshade go on top |
 | `removeAnalysisLayer(handle)` | `this` | Remove the coat |
 | `setAnalysisParams(handle, params)` | `this` | Merge parameters (see the kind's parameters below) |
-| `getAnalysisParams(handle)` | `object \| null` | Current parameters |
-| `animateAnalysisParams(handle, targets, duration?)` | `Promise<boolean>` | Tween numeric parameters to `value` or from `[from, to]` over `duration` ms (default 1000); resolves `false` when replaced |
+| `getAnalysisParams(handle)` | `object \| null` | A copy of the current parameters |
+| `animateAnalysisParams(handle, targets, duration?)` | `Promise<boolean>` | Tween numeric parameters to `value` or from `[from, to]` over `duration` ms (default 1000); resolves `false` when replaced or the layer is removed |
+| `getAnalysisValue(handle, lngLat)` | `number \| null` | The value a value coat colors at a position, in its unit (computed on the CPU like the shader; a raster's value for raster kinds) |
 | `setAnalysisRamp(handle, ramp)` | `this` | Ramp of a value kind: a built-in name or stops / classes |
 | `getAnalysisRamp(handle)` | `Ramp \| undefined` | Current ramp |
 | `getLegend(handle)` | `LegendSpec \| null` | Legend of a value coat (title, unit, domain, stops or classes) |
@@ -524,17 +528,17 @@ An analysis layer is a coat computed from the terrain: elevation, slope, aspect,
 | Kind | Parameters | Ramp | Default display |
 |---|---|---|---|
 | `'elevation'` | `range: [min, max] \| 'auto'` (m; `'auto'` fits the visible data) | `'hypsometric'` | normal, opacity 1 |
-| `'slope'` | `range: [min, max]` (degrees), `aspectMask: [from, to] \| null` (draw only slopes facing this sector, clockwise; `[315, 45]` is north) | `'viridis'` | normal, opacity 1 |
-| `'aspect'` | — (0° = north; flat ground fades out) | `'cyclic'` | normal, opacity 1 |
+| `'slope'` | `range: [min, max]` (degrees), `aspectMask: [from, to] \| null` (draw only slopes facing this sector, clockwise; `[315, 45]` is north; ends are taken modulo 360°, and a clockwise span of a whole turn, e.g. `[0, 360]`, is every bearing) | `'viridis'` | normal, opacity 1 |
+| `'aspect'` | — (0° = north; transparent below 1° of slope, fully drawn from 5°) | `'cyclic'` | normal, opacity 1 |
 | `'curvature'` | `mode: 'total' \| 'profile' \| 'plan'`, `range: [min, max]` (1/km; convex positive) | `'diverging'` | normal, opacity 1 |
 | `'contours'` | `interval` (m), `thickness` (px), `index` (every Nth line bolder, 0 = off), `color: [r, g, b]` | — | normal, opacity 0.75 |
 | `'water'` | `level` (m), `color: [r, g, b]`, `depthFade` (m over which the water darkens), `shoreline` (m of fade at the shore) | — | normal, opacity 0.85 |
 | `'hillshade'` | `mode: 'single' \| 'multi'`, `ambient` (light on slopes facing away from the sun, 0–1) | — | multiply, opacity 0.6 |
 | `'shadows'` | `darkness` (0–1, default 0.5) | — | multiply, opacity 1 |
 
-The `'multi'` hillshade lights the terrain from four directions at the sun's altitude (the sun azimuth and 45°, 90° and 135° around it), each weighted by how squarely it crosses the slope (multidirectional oblique weighting, Mark 1992): slopes facing away from the sun keep their form and slopes facing it get less glare.
+The `'multi'` hillshade lights the terrain from four directions at the sun's altitude (the sun azimuth, 45° on either side of it and 90° counter-clockwise), each weighted by cos² of the angle between its azimuth and the slope's aspect (multidirectional oblique weighting, Mark 1992): the light in line with a slope, across the ridge or valley it belongs to, counts most, so ridges and valleys running toward the sun keep their relief instead of going flat, and slopes facing the sun get a little less glare.
 
-`'shadows'` darkens ground that the terrain hides from the sun. While a shadows coat is visible the renderer keeps a shadow map: the terrain drawn into a 2048 × 2048 depth texture from the sun, fitted around the part of the view where terrain is seen (at most four times the camera's distance, a third of the visible range), snapped to whole texels so it doesn't shimmer, and drawn again only when the sun, the view or the terrain changes. Shadows fade out at its far edge, are filtered over 3 × 3 texels, and follow the drawn terrain (exaggeration included). Only terrain in view casts them, so a mountain behind the camera doesn't. Place the sun with `setSunTime(date)` for the shadows of a given moment.
+`'shadows'` darkens ground that the terrain hides from the sun. While a shadows coat is visible the renderer keeps a shadow map: the terrain drawn into a 2048 × 2048 depth texture from the sun, fitted with a margin around the part of the view where terrain is seen (at most four times the camera's distance, a third of the visible range), snapped to whole texels so it doesn't shimmer, and drawn again only when the sun moves, the view leaves the fitted area or zooming in calls for more detail (finer terrain as it loads at most every 150 ms). Shadows fade out at its far edge, are filtered over 3 × 3 texels, and follow the drawn terrain (exaggeration included). Only terrain in view casts them, so a mountain behind the camera doesn't. Place the sun with `setSunTime(date)` for the shadows of a given moment.
 
 A new map starts with a hillshade coat. Slope, aspect and curvature are true-scale (unaffected by exaggeration); curvature is computed at the rendered tile's resolution, so its values grow as finer tiles load. A new water coat starts a third of the way up the visible elevation range unless `level` is given.
 
@@ -556,7 +560,7 @@ await map.animateAnalysisParams(water, { level: [lo, (lo + hi) / 2] }, 4000);
 
 ##### Custom analyses
 
-`registerAnalysis(descriptor)` adds a kind. The descriptor's `glsl` defines `vec4 analysis_<id>(Surface s, vec4 p0, vec4 p1)`; `s.h` is the elevation in meters, `s.n` the true-scale unit normal (x east, y north, z up), `s.g` the gradient (dh/dx east, dh/dy north, m/m), `s.c` the second derivatives (hxx, hyy, hxy in 1/m), `s.fw` the screen-space derivative of `s.h`, and `uSunDirection` the sun. A value kind (with a `ramp`) returns the normalized value in `.x` and the alpha in `.w`; a color kind returns `rgb` and alpha. `params` is the schema the panel renders (`range`, `span`, `select`, `color`, `boolean`; a `span` may be `optional` and `wrap` for compass sectors, a `range` may take its slider `bounds` from the visible elevation), `pack(params, domain)` fills `p0`/`p1`, `domain(params, auto)` gives the ramp's value range, `initialParams(visible)` derives defaults from the visible elevation range, and `cpu(sample, params)` computes the same value for readouts. See `src/analysis/builtins/` for examples.
+`registerAnalysis(descriptor)` adds a kind. The descriptor's `glsl` defines `vec4 analysis_<id>(Surface s, vec4 p0, vec4 p1)`; `s.h` is the elevation in meters, `s.n` the true-scale unit normal (x east, y north, z up), `s.g` the gradient (dh/dx east, dh/dy north, m/m), `s.c` the second derivatives (hxx, hyy, hxy in 1/m), `s.fw` the screen-space derivative of `s.h`, and `uSunDirection` the sun. A value kind (with a `ramp`) returns the normalized value in `.x` and the alpha in `.w`; a color kind returns `rgb` and alpha. `params` is the schema the panel renders (`range`, `span`, `select`, `color`, `boolean`; a `span` may be `optional` and `wrap` for compass sectors, a `range` may take its slider `bounds` from the visible elevation; `min`–`max` is the slider range and `limits` the range values are clamped to, by default the same), `pack(params, domain)` fills `p0`/`p1`, `domain(params, visible)` gives the ramp's value range for the visible elevation range (evaluated again as it changes, so a domain derived from it follows the view), `initialParams(visible)` derives defaults from the visible elevation range, and `cpu(sample, params)` computes the same value on the CPU (`getAnalysisValue`, the readout). `registerAnalysis` checks the ramp and blend mode. See `src/analysis/builtins/` for examples.
 
 #### Color ramps
 
@@ -593,7 +597,7 @@ The sun lights the hillshade and casts the shadows coat; place it by hand or by 
 | `getSunAzimuth()` | `number` | |
 | `setSunAltitude(degrees)` | `this` | Sun altitude for hillshade (default 45°) |
 | `getSunAltitude()` | `number` | |
-| `setSunTime(date \| null)` | `this` | Place the sun where it stands at `date` over the map center (it follows the map as it moves); `null` returns to the manual sun |
+| `setSunTime(date \| null)` | `this` | Place the sun where it stands at `date` over the map center (it follows the map as it moves); `null` returns to the manual sun where it was |
 | `getSunTime()` | `Date \| null` | |
 | `getSunPosition(date?, lngLat?)` | `SunPosition` | `{ azimuth, altitude, declination, equationOfTime }` (NOAA algorithm, refraction-corrected) |
 
@@ -611,7 +615,7 @@ Analyses that need more than one point of the surface run in a dedicated worker 
 | `computeSunHours(options?)` | `Promise<SunHoursResult>` | Hours of direct sun on a day, with terrain shadows |
 | `computeSkyView(options?)` | `Promise<GridResult>` | Sky-view factor: the visible fraction of the sky (1 open, lower in valleys) |
 | `computeTpi(options?)` | `Promise<GridResult>` | Topographic position index: meters above (+) or below (−) the surrounding mean |
-| `computeAnalysis(kind, options?)` | `Promise<…>` | Any of the above by kind (`'viewshed'` needs `observer`) |
+| `computeAnalysis(kind, options?)` | `Promise<…>` | Any of the above by kind (`'viewshed'` needs `observer`; `REGION_ANALYSIS_INPUT[kind]` says which kinds need a point) |
 | `getElevationGrid(options?)` | `Promise<ElevationGrid>` | The region's elevations (`data`, `min`, `max`) |
 | `getAnalysisJobs()` | `AnalysisJob[]` | Running analyses `{ id, kind, label, stage, progress }` |
 | `cancelAnalysis(id)` | `this` | Cancel one; its promise rejects with an `AbortError` |
@@ -626,7 +630,7 @@ Options of every region analysis (`RegionOptions`, `ResultLayerOptions`):
 | `signal` | `AbortSignal` | — | Cancels the job |
 | `addLayer` | `boolean` | `true` | Show the result as a coat |
 | `layerName`, `layerDisplay` | | | Name and `{ opacity, blendMode, visible }` of the coat |
-| `replaceLayer` | `LayerHandle \| string` | — | A coat the result replaces once it is ready |
+| `replaceLayer` | `LayerHandle \| string` | — | A coat the result replaces: removed once the result is shown, which takes its place in the stack |
 
 | Analysis | Own options | Result |
 |---|---|---|
@@ -635,7 +639,7 @@ Options of every region analysis (`RegionOptions`, `ResultLayerOptions`):
 | Sky view | `radius` (whole region), `directions` (16) | `data` (0–1) |
 | TPI | `radius` (500 m), `innerRadius` (0: a box; > 0: a ring) | `data` (m) |
 
-Every result carries `bounds`, `width`, `height`, `zoom`, `cellSize` (meters) and `missingTiles`. The viewshed casts rays from the observer to every cell on the edge of the search square and drops distant ground by the Earth's curvature less refraction (`d² (1 − k) / 2R`). Sun hours sweep the terrain's shadow along the sun's azimuth for every sun position of the day; terrain outside the region casts no shadow. Without a radius the sky view searches the whole region exactly (one sweep per direction); with one it samples up to 128 cells per direction, which is slower. While an analysis runs, the legend shows its progress and a cancel button; the layer panel's *Analysis* list runs them over the view (the viewshed asks for a click on the observer first).
+Every result carries `bounds`, `width`, `height`, `zoom`, `cellSize` (meters) and `missingTiles`. A job that would have no raster slot for its coat fails before loading anything; `'done'` is reported once the result is shown (a failure to show it ends the job with `'error'`). A region whose tiles failed to load is loaded again by the next analysis (the failed tiles are retried). The viewshed casts rays from the observer to every cell on the edge of the search square and drops distant ground by the Earth's curvature less refraction (`d² (1 − k) / 2R`). Sun hours sweep the terrain's shadow along the sun's azimuth for every sun position of the day; terrain outside the region casts no shadow. Without a radius the sky view searches the whole region exactly (one sweep per direction); with one it samples up to 128 cells per direction, which is slower. While an analysis runs, the legend shows its progress and a cancel button; the layer panel's *Analysis* list runs them over the view (the viewshed asks for a click on the observer first).
 
 ```ts
 const summit = { lng: 11.3853, lat: 47.3122 };
@@ -659,12 +663,12 @@ Your own grids, drawn like any coat: single-band values (`Float32Array`, colored
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `data` | `Float32Array \| Uint8Array \| Uint8ClampedArray` | *required* | `width·height` values (NaN = no data) or `width·height·4` RGBA bytes |
+| `data` | `Float32Array \| Uint8Array \| Uint8ClampedArray` | *required* | `width·height` values (NaN = no data) or `width·height·4` RGBA bytes (straight alpha) |
 | `width`, `height` | `number` | *required* | Grid size in cells |
 | `bounds` | `TileBounds` | *required* | Outer edges in degrees |
 | `crs` | `'EPSG:3857' \| 'EPSG:4326'` | `'EPSG:3857'` | Rows evenly spaced in Web Mercator (like map tiles) or in latitude (resampled once) |
-| `nodata` | `number` | — | A value that marks missing data |
-| `range` | `[number, number]` | data min / max | Ramp range |
+| `nodata` | `number` | — | A value that marks missing data (matched as the float32 it is stored as, so e.g. `-3.4e38` works) |
+| `range` | `[number, number]` | data min / max | Ramp range (either order) |
 | `ramp`, `unit`, `layerName`, `layerDisplay` | | `'viridis'` | As for analysis layers |
 
 ```ts
@@ -682,7 +686,7 @@ Value rasters are filtered bilinearly between cell centers in the shader (no-dat
 
 #### Overlay layers
 
-GeoJSON features drawn on the terrain: lines draped along it (densified to the loaded terrain and draped again as finer tiles load), points as round markers, polygon fills rasterized into a coat (so they lie exactly on the ground; they take one of the 4 raster slots), labels from a property. Terrain in front hides them.
+GeoJSON features drawn on the terrain: lines draped along it (densified to the terrain in view; where finer tiles load, their heights are updated in place), points as round markers, polygon fills rasterized into a coat (so they lie exactly on the ground; they take one of the 4 raster slots), labels from a property. Terrain in front hides them; a translucent line covers each pixel once. The fill coat belongs to its overlay: it shows only while the overlay is visible and in its zoom range, at the overlay's opacity times its own, and keeps its place in the stack (and its blend mode) when the data or style changes; removing it from the stack turns the overlay's fills off. A visible overlay's `layerAttribution` shows in the attribution bar. Positions must be numbers (or numeric strings); others are skipped with a warning.
 
 | Method | Returns | Description |
 |---|---|---|

@@ -7,14 +7,22 @@
 // (the material is rebuilt once).
 // ============================================================================
 
-import type { AnalysisDescriptor, ParamSpec, RGB } from './types';
-import { validateRamp } from './ramps';
+import type { AnalysisDescriptor, CoatBlendMode, ParamSpec, RGB } from './types';
+import { resolveRamp } from './ramps';
 
 /** Kind index of the imagery coat (the active drape); analyses start at 1. */
 export const IMAGERY_KIND = 0;
 
 /** Coats the shader evaluates per fragment; more are ignored with a warning. */
 export const MAX_COATS = 6;
+
+/** Blend modes of a coat, in the order of the shader's blend codes. */
+export const BLEND_MODES: readonly CoatBlendMode[] = ['normal', 'multiply', 'screen', 'softlight'];
+
+/** Whether `mode` is a coat blend mode. */
+export function isBlendMode(mode: unknown): mode is CoatBlendMode {
+  return typeof mode === 'string' && (BLEND_MODES as readonly string[]).includes(mode);
+}
 
 const descriptors = new Map<string, AnalysisDescriptor<object>>();
 const kinds = new Map<string, number>();
@@ -35,7 +43,10 @@ export function registerAnalysis<P extends object>(descriptor: AnalysisDescripto
   if (!descriptor.glsl.includes(`analysis_${id}`)) {
     throw new Error(`treelet: analysis "${id}" GLSL must define analysis_${id}(Surface s, vec4 p0, vec4 p1)`);
   }
-  if (descriptor.ramp && typeof descriptor.ramp !== 'string') validateRamp(descriptor.ramp);
+  if (descriptor.ramp !== undefined) resolveRamp(descriptor.ramp); // validates names and specs (throws)
+  if (descriptor.blendMode !== undefined && !isBlendMode(descriptor.blendMode)) {
+    throw new Error(`treelet: analysis "${id}" has an unknown blend mode "${String(descriptor.blendMode)}"`);
+  }
   descriptors.set(id, descriptor as unknown as AnalysisDescriptor<object>);
   kinds.set(id, nextKind++);
   version++;
@@ -94,45 +105,71 @@ function isRGB(v: unknown): v is RGB {
   return Array.isArray(v) && v.length === 3 && v.every((c) => typeof c === 'number' && Number.isFinite(c));
 }
 
-function clampNum(v: number, lo: number, hi: number): number {
-  return Math.max(lo, Math.min(hi, v));
+const isFiniteNumber = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+
+/** Copy of a parameter set; arrays (spans, colors) are copied, so no two layers share one. */
+export function copyParams<P extends object>(params: P): P {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(params)) out[k] = Array.isArray(v) ? v.slice() : v;
+  return out as P;
+}
+
+/** Reduce `v` into [lo, lo + period). */
+function wrapInto(v: number, lo: number, period: number): number {
+  const r = (v - lo) % period;
+  return lo + (r < 0 ? r + period : r);
 }
 
 /**
- * Merge user parameters over the descriptor's defaults, dropping values
- * that don't fit the schema (with a warning), clamping numbers to their
- * slider range. Keys without a schema entry pass through unchanged. A null
- * value is accepted only for optional spans.
+ * Merge user parameters over `base` (default: the descriptor's defaults)
+ * into a new object. Values that don't fit the schema are dropped with a
+ * warning; numbers outside a parameter's `limits` (default: its slider
+ * range) are clamped with a warning. Circular (`wrap`) spans are reduced
+ * into one turn instead. Keys without a schema entry pass through
+ * unchanged. A null value is accepted only for optional spans.
  */
 export function resolveParams<P extends object>(
   descriptor: AnalysisDescriptor<P>, params: Partial<P> | undefined, base?: P,
 ): P {
-  const out = { ...(base ?? descriptor.defaults) } as Record<string, unknown>;
+  const out = copyParams(base ?? descriptor.defaults) as Record<string, unknown>;
   if (!params) return out as P;
   const specs = new Map<string, ParamSpec>(descriptor.params.map((p) => [p.key, p]));
   for (const [key, value] of Object.entries(params)) {
     if (value === undefined) continue;
     const spec = specs.get(key);
     const reject = () => console.warn(`treelet: ignoring invalid value for ${descriptor.id}.${key}:`, value);
+    const clamp = (v: number, lo: number, hi: number): number => {
+      if (v >= lo && v <= hi) return v;
+      const c = Math.max(lo, Math.min(hi, v));
+      console.warn(`treelet: ${descriptor.id}.${key} ${v} is outside [${lo}, ${hi}]; using ${c}`);
+      return c;
+    };
     if (!spec) {
-      out[key] = value;
+      out[key] = Array.isArray(value) ? value.slice() : value;
     } else if (value === null) {
       if (spec.type === 'span' && spec.optional) out[key] = null;
       else reject();
     } else if (spec.type === 'range') {
-      if (typeof value === 'number' && Number.isFinite(value)) out[key] = clampNum(value, spec.min, spec.max);
+      const [lo, hi] = spec.limits ?? [spec.min, spec.max];
+      if (isFiniteNumber(value)) out[key] = clamp(value, lo, hi);
       else reject();
     } else if (spec.type === 'span') {
       if (value === 'auto' && spec.auto) out[key] = 'auto';
-      else if (Array.isArray(value) && value.length === 2 && value.every((v) => typeof v === 'number' && Number.isFinite(v))) {
-        const a = clampNum(value[0], spec.min, spec.max);
-        const b = clampNum(value[1], spec.min, spec.max);
+      else if (Array.isArray(value) && value.length === 2 && value.every(isFiniteNumber)) {
+        const [a, b] = value as [number, number];
         if (spec.wrap) {
-          out[key] = [a, b]; // clockwise from a to b; a > b passes through min/max
+          // Clockwise from a to b through min/max; a whole turn or more is everything
+          const period = spec.max - spec.min;
+          out[key] = b - a >= period
+            ? [spec.min, spec.max]
+            : [wrapInto(a, spec.min, period), wrapInto(b, spec.min, period)];
         } else {
-          const lo = Math.min(a, b);
-          const hi = Math.max(a, b);
-          out[key] = hi > lo ? [lo, hi] : [lo, lo + spec.step];
+          const [lo, hi] = spec.limits ?? [spec.min, spec.max];
+          const ca = clamp(a, lo, hi);
+          const cb = clamp(b, lo, hi);
+          const low = Math.min(ca, cb);
+          const high = Math.max(ca, cb);
+          out[key] = high > low ? [low, high] : [low, low + spec.step];
         }
       } else reject();
     } else if (spec.type === 'select') {

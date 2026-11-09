@@ -3,9 +3,11 @@
 //
 // The rasters the terrain shader can sample (up to MAX_RASTERS at once):
 // value grids (R32F, nodata as RASTER_NODATA, filtered in the shader) and
-// color images (RGBA8, linear). Each raster has world-plane bounds; the
-// shader receives them relative to the floating render origin. A CPU copy
-// of value grids answers point queries with the shader's filter.
+// color images (RGBA8 with premultiplied alpha, so linear filtering doesn't
+// darken edges; the shader un-premultiplies). Each raster has world-plane
+// bounds; the shader receives them relative to the floating render origin.
+// A value grid's single array serves both the texture and point queries
+// (with the shader's filter).
 // ============================================================================
 
 import {
@@ -20,7 +22,7 @@ import {
   NoColorSpace,
 } from 'three';
 import { MAX_RASTERS, type RasterUniform } from '../shaders/TerrainMaterial';
-import { RASTER_NODATA, gridRange, sampleGrid } from '../analysis/grid';
+import { RASTER_NODATA, isGridValue, sampleGrid } from '../analysis/grid';
 
 export { MAX_RASTERS };
 
@@ -35,9 +37,10 @@ export interface WorldRect {
 export interface RasterInput {
   width: number;
   height: number;
-  /** Values (width·height, NaN or `nodata` = no data) or RGBA bytes (width·height·4), row 0 to the north. */
+  /** Values (width·height, NaN or `nodata` = no data) or RGBA bytes (width·height·4, straight alpha), row 0 to the north. */
   data: Float32Array | Uint8Array | Uint8ClampedArray;
   bounds: WorldRect;
+  /** A value meaning no data (compared as the float32 it is stored as). */
   nodata?: number;
 }
 
@@ -48,7 +51,7 @@ export interface RasterEntry {
   color: boolean;
   bounds: WorldRect;
   texture: DataTexture;
-  /** CPU copy of a value grid (NaN = nodata); null for color rasters. */
+  /** A value grid's values (RASTER_NODATA = no data), shared with the texture; null for color rasters. */
   values: Float32Array | null;
   /** Range of the finite values (value grids), or null. */
   range: [number, number] | null;
@@ -104,23 +107,37 @@ export class RasterSet {
     let values: Float32Array | null = null;
     let range: [number, number] | null = null;
     if (color) {
-      const bytes = Uint8Array.from(data as ArrayLike<number>);
+      // Premultiplied: filtering toward a transparent texel fades the color instead of darkening it
+      const bytes = new Uint8Array(data.length);
+      for (let i = 0; i < data.length; i += 4) {
+        const a = data[i + 3];
+        bytes[i] = Math.round((data[i] * a) / 255);
+        bytes[i + 1] = Math.round((data[i + 1] * a) / 255);
+        bytes[i + 2] = Math.round((data[i + 2] * a) / 255);
+        bytes[i + 3] = a;
+      }
       texture = new DataTexture(bytes, width, height, RGBAFormat, UnsignedByteType);
       texture.magFilter = LinearFilter;
       texture.minFilter = LinearFilter;
     } else {
       const src = data as Float32Array;
+      // One array for the GPU and for point queries; float32 data matches nodata as a float32
       values = new Float32Array(src.length);
-      const gpu = new Float32Array(src.length);
-      const nodata = input.nodata;
+      const nodata = input.nodata === undefined ? undefined : Math.fround(input.nodata);
+      let min = Infinity;
+      let max = -Infinity;
       for (let i = 0; i < src.length; i++) {
         const v = src[i];
-        const missing = !Number.isFinite(v) || v === nodata;
-        values[i] = missing ? NaN : v;
-        gpu[i] = missing ? RASTER_NODATA : v;
+        if (!isGridValue(v) || v === nodata) {
+          values[i] = RASTER_NODATA;
+          continue;
+        }
+        values[i] = v;
+        if (v < min) min = v;
+        if (v > max) max = v;
       }
-      range = gridRange(values);
-      texture = new DataTexture(gpu, width, height, RedFormat, FloatType);
+      range = min <= max ? [min, max] : null;
+      texture = new DataTexture(values, width, height, RedFormat, FloatType);
       texture.magFilter = NearestFilter;
       texture.minFilter = NearestFilter;
     }

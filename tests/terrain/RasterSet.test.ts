@@ -11,25 +11,39 @@ import { RASTER_NODATA } from '../../src/analysis/grid';
 const bounds = { west: 100, south: 50, east: 104, north: 52 };
 
 describe('RasterSet', () => {
-  it('binds value grids as R32F with nodata replaced, and keeps a CPU copy', () => {
+  it('binds value grids as R32F with nodata replaced; one array serves the GPU and point queries', () => {
     const set = new RasterSet();
-    const e = set.bind('a', { width: 2, height: 1, data: Float32Array.from([5, NaN]), bounds });
+    const src = Float32Array.from([5, NaN]);
+    const e = set.bind('a', { width: 2, height: 1, data: src, bounds });
     expect(set.slotOf('a')).toBe(0);
     expect(e.texture.format).toBe(RedFormat);
     expect(e.texture.type).toBe(FloatType);
-    expect((e.texture.image.data as Float32Array)[1]).toBe(Math.fround(RASTER_NODATA));
-    expect(e.values![1]).toBeNaN();
+    expect(e.texture.image.data).toBe(e.values);
+    expect(e.values![1]).toBe(Math.fround(RASTER_NODATA));
+    expect(src[1]).toBeNaN(); // the caller's array is left alone
     expect(e.range).toEqual([5, 5]);
     const n = set.bind('b', { width: 1, height: 1, data: Float32Array.from([-1]), bounds, nodata: -1 });
-    expect(n.values![0]).toBeNaN();
+    expect(n.values![0]).toBe(Math.fround(RASTER_NODATA));
+    expect(n.range).toBeNull();
   });
 
-  it('binds RGBA images as color rasters', () => {
+  it('matches nodata as the float32 it is stored as', () => {
     const set = new RasterSet();
-    const e = set.bind('img', { width: 1, height: 1, data: new Uint8ClampedArray([1, 2, 3, 4]), bounds });
+    for (const nodata of [-3.4e38, -9999.9, 0.1]) {
+      const e = set.bind('nd', { width: 2, height: 1, data: Float32Array.from([nodata, 7]), bounds, nodata });
+      expect(e.values![0]).toBe(Math.fround(RASTER_NODATA));
+      expect(e.range).toEqual([7, 7]);
+      expect(set.sample('nd', 101, 51)).toBeNull(); // on the nodata cell
+      expect(set.sample('nd', 103, 51)).toBe(7);
+    }
+  });
+
+  it('binds RGBA images as color rasters with premultiplied alpha', () => {
+    const set = new RasterSet();
+    const e = set.bind('img', { width: 2, height: 1, data: new Uint8ClampedArray([200, 100, 50, 255, 200, 100, 50, 128]), bounds });
     expect(e.color).toBe(true);
     expect(e.texture.format).toBe(RGBAFormat);
-    expect([...(e.texture.image.data as Uint8Array)]).toEqual([1, 2, 3, 4]);
+    expect([...(e.texture.image.data as Uint8Array)]).toEqual([200, 100, 50, 255, 100, 50, 25, 128]);
     expect(set.sample('img', 101, 51)).toBeNull();
   });
 

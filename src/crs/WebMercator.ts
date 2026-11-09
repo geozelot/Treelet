@@ -4,6 +4,7 @@
 
 import { WEB_MERCATOR_EXTENT, WEB_MERCATOR_MAX_LAT } from '../core/constants';
 import type { LngLat, WorldPoint, TileCoord, TileBounds } from '../core/types';
+import { haversineDistance, WGS84_A } from '../analysis/geodesy';
 
 const DEG2RAD = Math.PI / 180;
 const RAD2DEG = 180 / Math.PI;
@@ -114,10 +115,6 @@ export const WebMercator = {
    * (haversine on the WGS84 equatorial sphere).
    */
   groundDistance(a: LngLat, b: LngLat): number {
-    const dLat = (b.lat - a.lat) * DEG2RAD;
-    const dLng = (b.lng - a.lng) * DEG2RAD;
-    const s = Math.sin(dLat / 2) ** 2 +
-      Math.cos(a.lat * DEG2RAD) * Math.cos(b.lat * DEG2RAD) * Math.sin(dLng / 2) ** 2;
-    return 2 * 6378137 * Math.asin(Math.min(1, Math.sqrt(s)));
+    return haversineDistance(a, b, WGS84_A);
   },
 } as const;

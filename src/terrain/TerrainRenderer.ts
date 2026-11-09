@@ -62,8 +62,8 @@ import {
   setTerrainShadows,
 } from '../shaders/TerrainMaterial';
 import { CoatStack, type CoatInput } from './CoatStack';
-import { RasterSet, type RasterEntry, type RasterInput } from './RasterSet';
-import { ShadowMap, shadowReach } from './ShadowMap';
+import { RasterSet, MAX_RASTERS, type RasterEntry, type RasterInput } from './RasterSet';
+import { ShadowMap, shadowReach, SHADOW_NIGHT_SUN_Z, SHADOW_DETAIL_INTERVAL_MS } from './ShadowMap';
 import { analysisShaderSource, onAnalysisRegistered } from '../analysis/registry';
 import type { SurfaceSample } from '../analysis/types';
 import { WebMercator } from '../crs/WebMercator';
@@ -202,9 +202,12 @@ export class TerrainRenderer {
 
   private lodQuality: number;
   private morphWidth: number;
-  private autoRange = false;
-  private lastAutoMin = NaN;
-  private lastAutoMax = NaN;
+  /** Whether the active drape's coat is drawn (visible, opacity above 0); otherwise its imagery isn't fetched. */
+  private drapeShown = true;
+  /** Finest tile level among the tiles drawn in the last frame. */
+  private lastViewLevel = 0;
+  /** A frame requested for terrain detail the shadow map is waiting to draw. */
+  private shadowWake: ReturnType<typeof setTimeout> | null = null;
 
   /** Something changed that requires a render (uniforms, uploads, instances). */
   private renderDirty = true;
@@ -370,6 +373,7 @@ export class TerrainRenderer {
     this.exaggeration = view.exaggeration;
     if (setTerrainExaggeration(this.material, view.exaggeration)) this.renderDirty = true;
     this.updateDrapeVisibility(view.zoom);
+    if (this.coatStack.setZoom(view.zoom)) this.syncCoats();
     const now = performance.now();
 
     // ==== GPU uploads (data that arrived since the last frame) ====
@@ -390,6 +394,8 @@ export class TerrainRenderer {
       this.originY = view.targetY;
       this.mesh.position.set(this.originX, this.originY, 0);
       this.mesh.updateMatrix();
+      // The shadow pass reads matrixWorld before the main render refreshes it
+      this.mesh.updateMatrixWorld();
       this.syncRasters();
     }
     setTerrainView(
@@ -436,6 +442,10 @@ export class TerrainRenderer {
         : `mapDisplay.maxInstances (now ${this.opts.maxInstances})`;
       console.info(`treelet: this view needs more than ${this.budget} tiles, so distant detail was reduced. Raise ${limit} for full detail.`);
     }
+
+    let viewLevel = minLevel;
+    for (const t of tiles) if (t.z > viewLevel) viewLevel = t.z;
+    this.lastViewLevel = viewLevel;
 
     // ==== Instances ====
     this.buildInstances(tiles, base);
@@ -489,7 +499,7 @@ export class TerrainRenderer {
 
   private updateDrapeVisibility(zoom: number): void {
     const d = this.activeDrapeLayer;
-    const visible = d !== null && this.drapeAtlas !== null && zoom >= d.minZoom && zoom <= d.maxZoom;
+    const visible = d !== null && this.drapeAtlas !== null && this.drapeShown && zoom >= d.minZoom && zoom <= d.maxZoom;
     if (visible !== this.drapeVisible) {
       this.drapeVisible = visible;
       if (setTerrainDrape(this.material, visible ? this.drapeAtlas!.texture : null)) {
@@ -753,20 +763,19 @@ export class TerrainRenderer {
     for (const t of tiles) {
       const slot = this.atlas.get(t.key);
       if (!slot || slot.empty) continue;
-      if (slot.min < min) min = slot.min;
-      if (slot.max > max) max = slot.max;
+      // Robust per-tile range: a few spikes in the source data don't stretch it
+      if (slot.low < min) min = slot.low;
+      if (slot.high > max) max = slot.high;
     }
     if (!Number.isFinite(min) || !Number.isFinite(max)) return;
     if (max - min < 1) max = min + 1;
-    if (min !== this.lastAutoMin || max !== this.lastAutoMax) {
-      this.lastAutoMin = min;
-      this.lastAutoMax = max;
-      if (this.coatStack.setAutoRange(min, max)) {
-        setTerrainCoats(this.material, this.coatStack.packed);
-        this.renderDirty = true;
-      }
-      this.opts.onRangeChange?.(min, max);
+    const [lo, hi] = this.coatStack.autoDomain;
+    if (min === lo && max === hi) return;
+    if (this.coatStack.setAutoRange(min, max)) {
+      setTerrainCoats(this.material, this.coatStack.packed);
+      this.renderDirty = true;
     }
+    this.opts.onRangeChange?.(min, max);
   }
 
   // =========================================================================
@@ -877,7 +886,7 @@ export class TerrainRenderer {
         if (!this.atlas.writeEmpty(z, x, y)) return 'stale';
         return 'empty';
       }
-      if (!this.atlas.write(z, x, y, res.data, res.min, res.max, res.texelsPerPixel)) return 'stale';
+      if (!this.atlas.write(z, x, y, res.data, res.min, res.max, res.texelsPerPixel, res.low, res.high)) return 'stale';
       this.queueTileEvent('load', z, x, y);
       return 'ok';
     }, (id) => this.workerPool.cancel(id));
@@ -942,8 +951,6 @@ export class TerrainRenderer {
     this.atlas.clear();
     this.resetDrapeState();
     this.prevInstanceCount = -1;
-    this.lastAutoMin = NaN;
-    this.lastAutoMax = NaN;
     this.markDirty();
   }
 
@@ -1008,19 +1015,28 @@ export class TerrainRenderer {
   }
 
   /**
-   * Replace the coat stack (visible coats, bottom first). Coats whose ramp
-   * domain is 'auto' follow the visible elevation range from the next frame.
+   * Replace the coat stack (visible coats, bottom first). Domains that
+   * depend on the visible elevation range are resolved with the current one
+   * and follow it as it changes; coats outside their zoom range or at
+   * opacity 0 are not drawn.
    */
   setCoats(coats: readonly CoatInput[]): void {
     if (this.disposed) return;
     this.coatStack.set(coats);
-    this.autoRange = this.coatStack.needsAutoRange;
-    if (this.autoRange) {
-      this.lastAutoMin = NaN;
-      this.lastAutoMax = NaN;
-      this.prevInstanceCount = -1; // refresh the range on the next frame
-    }
+    this.syncCoats();
+  }
+
+  /** Whether the active drape's coat is drawn; imagery that isn't is neither fetched nor sampled. */
+  setDrapeShown(shown: boolean): void {
+    if (this.disposed || shown === this.drapeShown) return;
+    this.drapeShown = shown;
+    this.markDirty(); // drape visibility is re-evaluated on the next frame
+  }
+
+  /** Upload the drawn coats and keep a shadow map exactly while one of them reads it. */
+  private syncCoats(): void {
     setTerrainCoats(this.material, this.coatStack.packed);
+    this.setShadowsEnabled(this.coatStack.needsShadows);
     this.markRender(); // ramp rows may have changed without a uniform change
   }
 
@@ -1047,8 +1063,8 @@ export class TerrainRenderer {
   // Shadows
   // =========================================================================
 
-  /** Keep a shadow map (while a coat that reads it is visible). */
-  setShadowsEnabled(enabled: boolean): void {
+  /** Keep a shadow map (while a drawn coat reads it). */
+  private setShadowsEnabled(enabled: boolean): void {
     if (this.disposed || enabled === this.shadowsEnabled) return;
     this.shadowsEnabled = enabled;
     if (enabled) {
@@ -1077,14 +1093,13 @@ export class TerrainRenderer {
     const map = this.shadowMap;
     if (!this.shadowsEnabled || !map || this.disposed || this.geometry.instanceCount === 0) return false;
     const sun = this.material.uniforms.uSunDirection.value as Vector3;
-    if (sun.z <= 0.005) {
-      // Night: the shader shades everything without the map
+    if (sun.z <= SHADOW_NIGHT_SUN_Z) {
+      // Night: the shader shades everything without reading the map (same threshold)
       const was = this.material.uniforms.uShadowOn.value;
       setTerrainShadows(this.material, { texture: map.target.depthTexture!, matrix: map.matrix, params: map.params });
       return was !== 1;
     }
-    const lo = Number.isFinite(this.lastAutoMin) ? this.lastAutoMin : 0;
-    const hi = Number.isFinite(this.lastAutoMax) ? this.lastAutoMax : 4000;
+    const [lo, hi] = this.coatStack.autoDomain;
     const k = WebMercator.scaleFactorAtWorldY(this.originY, this.tileGrid.worldScale);
     const heightSpan = Math.max(hi - lo, 0) * this.opts.metersToScene * k * this.exaggeration;
     // Only as far as the view can see terrain: where the corner rays meet the lowest of it
@@ -1096,8 +1111,13 @@ export class TerrainRenderer {
       fadeDistance: reach.distance,
       heightSpan,
       sun,
-      version: `${this.atlas.version}|${this.instanceVersion}|${this.exaggeration}`,
+      version: String(this.exaggeration),
+      detail: `${this.atlas.version}|${this.instanceVersion}`,
     });
+    if (map.pending && !this.shadowWake) {
+      // Finer terrain waits a moment to be drawn into the map: come back for it
+      this.shadowWake = setTimeout(() => { this.shadowWake = null; this.opts.requestRender(); }, SHADOW_DETAIL_INTERVAL_MS);
+    }
     if (!drawn) return false;
     setTerrainShadows(this.material, { texture: map.target.depthTexture!, matrix: map.matrix, params: map.params });
     return true;
@@ -1105,7 +1125,17 @@ export class TerrainRenderer {
 
   /** World size of a texel of the finest terrain level in view (draping and sampling step). */
   finestTexelWorld(): number {
-    return this.tileGrid.worldScale / 2 ** this.lastMaxLevel / Math.max(this.atlas.slotSize - 1, 1);
+    return this.texelWorld(this.lastViewLevel);
+  }
+
+  /** World size of a terrain texel at tile level `z`. */
+  private texelWorld(z: number): number {
+    return this.tileGrid.worldScale / 2 ** z / Math.max(this.atlas.slotSize - 1, 1);
+  }
+
+  /** Raster slots not in use. */
+  freeRasterSlots(): number {
+    return MAX_RASTERS - this.rasters.size;
   }
 
   /** Shader slot of layer `id`'s raster, or -1. */
@@ -1159,6 +1189,30 @@ export class TerrainRenderer {
     return this.atlas.version;
   }
 
+  /**
+   * World rectangles (with a margin for stitched tile edges) where sampled
+   * elevations may differ since `version`, or null when that isn't known
+   * (everything may have changed).
+   */
+  elevationChangesSince(version: number): Array<{ west: number; south: number; east: number; north: number }> | null {
+    const keys = this.atlas.changedSince(version);
+    if (keys === null) return null;
+    const W = this.tileGrid.worldScale;
+    const seen = new Set<number>();
+    const out: Array<{ west: number; south: number; east: number; north: number }> = [];
+    for (const key of keys) {
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const { z, x, y } = parseTileKey(key);
+      const size = W / 2 ** z;
+      const margin = size / 16;
+      const west = -W / 2 + x * size;
+      const north = W / 2 - y * size;
+      out.push({ west: west - margin, south: north - size - margin, east: west + size + margin, north: north + margin });
+    }
+    return out;
+  }
+
   /** Number of tile instances drawn in the last frame. */
   getInstanceCount(): number {
     return this.geometry.instanceCount;
@@ -1183,10 +1237,11 @@ export class TerrainRenderer {
   }
 
   /**
-   * Elevation in meters at a world-plane point from the CPU atlas copy,
-   * using the finest loaded tile. Returns null where no data is loaded.
+   * Read the finest loaded tile at a world-plane point: `read` gets its key,
+   * the point's fraction within it and its level, and may return null to
+   * fall back to coarser tiles. Null where no tile answers.
    */
-  sampleElevationAtWorld(worldX: number, worldY: number): number | null {
+  private readFinestTile<T>(worldX: number, worldY: number, read: (key: number, fu: number, fv: number, z: number) => T | null): T | null {
     if (this.disposed) return null;
     const W = this.tileGrid.worldScale;
     const u = (worldX + W / 2) / W;
@@ -1198,10 +1253,18 @@ export class TerrainRenderer {
       const ty = Math.floor(v * n);
       const key = packTileKey(z, tx, ty);
       if (!this.atlas.has(key)) continue;
-      const h = this.atlas.sample(key, u * n - tx, v * n - ty);
-      if (h !== null) return h;
+      const result = read(key, u * n - tx, v * n - ty, z);
+      if (result !== null) return result;
     }
     return null;
+  }
+
+  /**
+   * Elevation in meters at a world-plane point from the CPU atlas copy,
+   * using the finest loaded tile. Returns null where no data is loaded.
+   */
+  sampleElevationAtWorld(worldX: number, worldY: number): number | null {
+    return this.readFinestTile(worldX, worldY, (key, fu, fv) => this.atlas.sample(key, fu, fv));
   }
 
   /**
@@ -1210,25 +1273,10 @@ export class TerrainRenderer {
    * is loaded. Same stencil as the fragment shader.
    */
   sampleSurfaceAtWorld(worldX: number, worldY: number): SurfaceSample | null {
-    if (this.disposed) return null;
-    const W = this.tileGrid.worldScale;
-    const u = (worldX + W / 2) / W;
-    const v = (W / 2 - worldY) / W;
-    if (!(u >= 0 && u < 1 && v >= 0 && v < 1)) return null;
     // Ground meters per world unit at this latitude
-    const metersPerWorld = 1 / (this.opts.metersToScene * WebMercator.scaleFactorAtWorldY(worldY, W));
-    const texels = Math.max(this.atlas.slotSize - 1, 1);
-    for (let z = this.lastMaxLevel; z >= 0; z--) {
-      const n = 2 ** z;
-      const tx = Math.floor(u * n);
-      const ty = Math.floor(v * n);
-      const key = packTileKey(z, tx, ty);
-      if (!this.atlas.has(key)) continue;
-      const texelMeters = (W / n / texels) * metersPerWorld;
-      const sample = this.atlas.sampleSurface(key, u * n - tx, v * n - ty, texelMeters);
-      if (sample !== null) return sample;
-    }
-    return null;
+    const metersPerWorld = 1 / (this.opts.metersToScene * WebMercator.scaleFactorAtWorldY(worldY, this.tileGrid.worldScale));
+    return this.readFinestTile(worldX, worldY, (key, fu, fv, z) =>
+      this.atlas.sampleSurface(key, fu, fv, this.texelWorld(z) * metersPerWorld));
   }
 
   dispose(): void {
@@ -1240,6 +1288,8 @@ export class TerrainRenderer {
     this.drapeChannel.clear();
     if (this.wakeTimer !== null) clearTimeout(this.wakeTimer);
     this.wakeTimer = null;
+    if (this.shadowWake !== null) clearTimeout(this.shadowWake);
+    this.shadowWake = null;
     this.themeCleanup();
     this.unsubscribeAnalyses();
     this.coatStack.dispose();

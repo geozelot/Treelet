@@ -10,12 +10,26 @@
 import type { TileSource } from '../sources/TileSource';
 import type { DrapePart } from '../workers/protocol';
 import type { Layer } from './Layer';
+import type { CoatBlendMode } from '../analysis/types';
+import { isBlendMode } from '../analysis/registry';
 import type {
   DrapeLayerOptions,
   ResolvedDrapeLayerDisplay,
 } from './types';
 
 /** Auto-incrementing ID counter for drape layers. */
+/**
+ * A coat blend mode from layer options; anything else (such as 0.3's
+ * 'hillshade') is reported and drawn as 'normal'.
+ */
+export function validBlendMode(mode: unknown, layerName: string): CoatBlendMode {
+  if (mode === undefined) return 'normal';
+  if (isBlendMode(mode)) return mode;
+  const hint = mode === 'hillshade' ? ' (0.3\'s hillshade blend is now a hillshade coat: addAnalysisLayer({ analysis: \'hillshade\' }))' : '';
+  console.warn(`treelet: layer "${layerName}" has an unknown blend mode "${String(mode)}"; using normal${hint}`);
+  return 'normal';
+}
+
 let nextDrapeLayerId = 0;
 
 /** Most source zoom levels finer than the terrain tile one slot composites (4×4 tiles). */
@@ -66,8 +80,8 @@ export class DrapeLayer implements Layer {
     const ld = options.layerDisplay;
     this.display = {
       visible: ld?.visible ?? true,
-      opacity: ld?.opacity ?? 1.0,
-      blendMode: ld?.blendMode ?? 'normal',
+      opacity: Math.max(0, Math.min(1, Number.isFinite(ld?.opacity) ? ld!.opacity! : 1)),
+      blendMode: validBlendMode(ld?.blendMode, this.layerName),
     };
     this.visible = this.display.visible;
   }

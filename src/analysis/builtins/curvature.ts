@@ -74,7 +74,7 @@ vec4 analysis_curvature(Surface s, vec4 p0, vec4 p1) {
     { key: 'mode', label: 'Mode', type: 'select', options: [
       { value: 'total', label: 'Total' }, { value: 'profile', label: 'Profile' }, { value: 'plan', label: 'Plan' },
     ] },
-    { key: 'range', label: 'Range', type: 'span', min: -200, max: 200, step: 1, unit: '/km' },
+    { key: 'range', label: 'Range', type: 'span', min: -200, max: 200, step: 1, unit: '/km', limits: [-Infinity, Infinity] },
   ],
   defaults: { mode: 'total', range: [-20, 20] },
   ramp: 'diverging',

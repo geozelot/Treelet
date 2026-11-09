@@ -25,7 +25,10 @@ function response(req: RegionAnalysisRequest, outputs: Record<string, Float32Arr
   };
 }
 
-function setup(analyze?: (req: RegionAnalysisRequest, onProgress?: RegionProgress) => Promise<RegionAnalysisResponse>) {
+function setup(
+  analyze?: (req: RegionAnalysisRequest, onProgress?: RegionProgress) => Promise<RegionAnalysisResponse>,
+  { freeSlots = 4, stack = [] as Array<{ id: string; descriptor: { raster: boolean } }> } = {},
+) {
   const base = {
     id: 'base-0', minZoom: 0, maxZoom: 22, decoderType: 'terrarium', decoderSource: null,
     source: { minZoom: 0, maxZoom: 14, ensureReady: vi.fn(async () => {}), getRequestInit: () => undefined },
@@ -40,20 +43,40 @@ function setup(analyze?: (req: RegionAnalysisRequest, onProgress?: RegionProgres
     })),
     cancelAnalysis: vi.fn(),
   };
+  const layers = [...stack];
   const layerController = {
-    addRasterLayer: vi.fn((opts: { analysis: string }) => ({ id: `layer-${opts.analysis}`, layerName: opts.analysis })),
-    removeAnalysisLayer: vi.fn(() => true),
+    addRasterLayer: vi.fn((opts: { analysis: string }) => {
+      const layer = { id: `layer-${opts.analysis}`, layerName: opts.analysis, descriptor: { raster: true } };
+      layers.push(layer);
+      return { id: layer.id, layerName: layer.layerName };
+    }),
+    removeAnalysisLayer: vi.fn((id: string) => {
+      const i = layers.findIndex((l) => l.id === id);
+      if (i >= 0) layers.splice(i, 1);
+      return i >= 0;
+    }),
+    moveLayer: vi.fn((h: { id: string }, index: number) => {
+      const i = layers.findIndex((l) => l.id === h.id);
+      const [l] = layers.splice(i, 1);
+      layers.splice(index, 0, l);
+      return true;
+    }),
   };
   const deps = {
     workerPool,
-    layerRegistry: { getActiveBaseLayer: () => base },
+    layerRegistry: {
+      getActiveBaseLayer: () => base,
+      getAnalysisLayer: (h: string | { id: string }) => layers.find((l) => l.id === (typeof h === 'string' ? h : h.id)),
+      getStack: () => [...layers],
+    },
     layerController,
+    freeRasterSlots: () => freeSlots,
     emit: vi.fn((event: string, data: Record<string, unknown>) => { events.push([event, data]); }),
     toWorld: (ll: { lng: number; lat: number }) => ({ x: ll.lng * 100, y: ll.lat * 100 }),
     defaultBounds: () => innsbruck,
     sunTime: () => null,
   } as unknown as AnalysisControllerDeps;
-  return { ac: new AnalysisController(deps), workerPool, layerController, events, base };
+  return { ac: new AnalysisController(deps), workerPool, layerController, events, base, layers };
 }
 
 describe('AnalysisController', () => {
@@ -114,12 +137,41 @@ describe('AnalysisController', () => {
     expect(layerController.addRasterLayer).toHaveBeenCalledTimes(1);
   });
 
-  it('replaceLayer removes the earlier result once the new one is ready', async () => {
-    const { ac, layerController } = setup();
+  it('replaceLayer removes the earlier result once the new one is shown, in its place', async () => {
+    const stack = [{ id: 'hillshade', descriptor: { raster: false } }, { id: 'analysis-3', descriptor: { raster: true } }, { id: 'contours', descriptor: { raster: false } }];
+    const { ac, layerController, layers } = setup(undefined, { freeSlots: 2, stack });
     await ac.computeSkyView({ replaceLayer: 'analysis-3' });
     expect(layerController.removeAnalysisLayer).toHaveBeenCalledWith('analysis-3');
+    // The old result goes only after the new one bound (it stays if that fails)
+    expect(layerController.addRasterLayer.mock.invocationCallOrder[0])
+      .toBeLessThan(layerController.removeAnalysisLayer.mock.invocationCallOrder[0]);
+    expect(layers.map((l) => l.id)).toEqual(['hillshade', 'layer-skyview', 'contours']);
+  });
+
+  it('with every raster slot taken, the replaced result frees its slot first', async () => {
+    const stack = [{ id: 'analysis-3', descriptor: { raster: true } }];
+    const { ac, layerController } = setup(undefined, { freeSlots: 0, stack });
+    await ac.computeTpi({ replaceLayer: 'analysis-3' });
     expect(layerController.removeAnalysisLayer.mock.invocationCallOrder[0])
       .toBeLessThan(layerController.addRasterLayer.mock.invocationCallOrder[0]);
+  });
+
+  it('with every raster slot taken and nothing to replace, it fails before loading anything', async () => {
+    const { ac, workerPool, events } = setup(undefined, { freeSlots: 0 });
+    await expect(ac.computeSkyView()).rejects.toThrow(/raster slot/);
+    expect(workerPool.analyzeRegion).not.toHaveBeenCalled();
+    expect(events).toEqual([]);
+    // Without a layer it runs
+    await expect(ac.computeSkyView({ addLayer: false })).resolves.toMatchObject({ layer: null });
+  });
+
+  it("'done' means the result is shown; failing to show it ends the job with 'error'", async () => {
+    const { ac, layerController, events } = setup();
+    layerController.addRasterLayer.mockImplementationOnce(() => { throw new Error('treelet: raster 9000×9000 exceeds the GPU\'s texture size limit'); });
+    await expect(ac.computeSkyView()).rejects.toThrow(/texture size/);
+    const end = events.filter(([e]) => e === 'analysisend');
+    expect(end).toHaveLength(1);
+    expect(end[0][1]).toMatchObject({ status: 'error', error: expect.stringMatching(/texture size/) });
   });
 
   it('cancel aborts the worker request, ends the job as cancelled and rejects with an AbortError', async () => {

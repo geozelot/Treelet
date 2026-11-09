@@ -4,8 +4,8 @@
 // ============================================================================
 
 import { describe, it, expect, beforeAll } from 'vitest';
-import { PerspectiveCamera, Vector3 } from 'three';
-import { frustumSphere, fitLight, shadowReach } from '../../src/terrain/ShadowMap';
+import { BufferGeometry, Mesh, PerspectiveCamera, Vector3 } from 'three';
+import { frustumSphere, fitLight, shadowReach, ShadowMap, SHADOW_DETAIL_INTERVAL_MS } from '../../src/terrain/ShadowMap';
 import { buildFragmentShader, createTerrainMaterial, setTerrainShadows } from '../../src/shaders/TerrainMaterial';
 import { registerBuiltinAnalyses, hillshadeLight } from '../../src/analysis/builtins';
 import { getAnalysis, analysisShaderSource } from '../../src/analysis/registry';
@@ -110,24 +110,101 @@ describe('multidirectional hillshade', () => {
     expect(hillshadeLight(flat, 315, 45, 'multi')).toBeCloseTo(Math.SQRT1_2, 9);
   });
 
-  it('multi evens the light out: slopes facing away keep some, slopes facing the sun get less', () => {
-    // Sun in the north-west at 30°; 40° slopes facing every way
-    const aspects = [0, 45, 90, 135, 180, 225, 270, 315];
-    const single = aspects.map((a) => hillshadeLight(tilt(a, 40), 315, 30, 'single'));
-    const multi = aspects.map((a) => hillshadeLight(tilt(a, 40), 315, 30, 'multi'));
-    // Facing away (south-east, 135°): dark with one sun, modelled with four
-    expect(single[3]).toBe(0);
-    expect(multi[3]).toBeGreaterThan(0.1);
-    // Facing the sun (north-west, 315°): less than the single sun gives
-    expect(multi[7]).toBeLessThan(single[7]);
-    // Smaller spread over all aspects
-    const spread = (v: number[]) => Math.max(...v) - Math.min(...v);
-    expect(spread(multi)).toBeLessThan(spread(single) * 0.8);
+  it('multi models a ridge pointing at the sun, whose flanks one sun lights alike', () => {
+    // Sun in the north-west at 45°; a ridge running north-west to south-east
+    // with 30° flanks facing north-east (45°) and south-west (225°)
+    const ne = tilt(45, 30);
+    const sw = tilt(225, 30);
+    expect(hillshadeLight(ne, 315, 45, 'single')).toBeCloseTo(hillshadeLight(sw, 315, 45, 'single'), 9);
+    // The 225° light, in line with both flanks, counts most: it lights the
+    // south-west flank and leaves the north-east one in shade
+    const multiNe = hillshadeLight(ne, 315, 45, 'multi');
+    const multiSw = hillshadeLight(sw, 315, 45, 'multi');
+    expect(multiSw - multiNe).toBeGreaterThan(0.2);
+    expect(multiNe).toBeCloseTo(0.4436, 3);
+    expect(multiSw).toBeCloseTo(0.7811, 3);
+  });
+
+  it('multi weights each light by cos² of its angle to the slope\'s aspect', () => {
+    // Sun in the north-west at 30°; 40° slopes
+    const light = (aspect: number, mode: 'single' | 'multi') => hillshadeLight(tilt(aspect, 40), 315, 30, mode);
+    // Facing the sun (315°) or away from it (135°): the sun's own light counts
+    // most, so the slope keeps its contrast, with a little less glare
+    expect(light(315, 'multi')).toBeLessThan(light(315, 'single'));
+    expect(light(315, 'multi')).toBeGreaterThan(0.8);
+    expect(light(135, 'single')).toBe(0);
+    expect(light(135, 'multi')).toBeLessThan(0.05);
+    // Facing the 270° light: lit mostly by it, more than by the sun alone
+    expect(light(270, 'multi')).toBeGreaterThan(light(270, 'single') + 0.05);
+    // The weighted mean of the four lights, by hand (lights at −90°, −45°, 0°, +45°)
+    const n = tilt(100, 40).n;
+    const alt = Math.PI / 6;
+    let sum = 0;
+    let wsum = 0;
+    for (const az of [225, 270, 315, 360]) {
+      const a = (az * Math.PI) / 180;
+      const l = Math.max(0, n[0] * Math.sin(a) * Math.cos(alt) + n[1] * Math.cos(a) * Math.cos(alt) + n[2] * Math.sin(alt));
+      const w = Math.cos(((100 - az) * Math.PI) / 180) ** 2 + 0.05;
+      sum += w * l;
+      wsum += w;
+    }
+    expect(light(100, 'multi')).toBeCloseTo(sum / wsum, 9);
   });
 
   it('the descriptor packs the mode', () => {
     const d = getAnalysis('hillshade')!;
     expect(d.pack({ ambient: 0.4, mode: 'multi' }, [0, 1]).p0).toEqual([0.4, 1, 0, 0]);
     expect(d.pack({ ambient: 0.4, mode: 'single' }, [0, 1]).p0).toEqual([0.4, 0, 0, 0]);
+  });
+});
+
+describe('shadow map reuse', () => {
+  function setup() {
+    const material = createTerrainMaterial({ metersToScene: 1, worldScale: 40075, slotSize: 256, gridSize: 64, analysisGlsl: analysisShaderSource() });
+    const map = new ShadowMap(new BufferGeometry(), material, 512);
+    let draws = 0;
+    const renderer = {
+      getRenderTarget: () => null,
+      setRenderTarget: () => {},
+      clear: () => {},
+      render: () => { draws++; },
+    } as never;
+    const terrain = new Mesh();
+    terrain.updateMatrixWorld();
+    const view = (cam: PerspectiveCamera, over: Record<string, unknown> = {}) => ({
+      camera: cam, terrain, range: 3000, fadeDistance: 4000, heightSpan: 200,
+      sun: new Vector3(0.3, -0.6, 0.7).normalize(), version: '1', detail: 'a', ...over,
+    });
+    return { map, renderer, view, draws: () => draws };
+  }
+
+  it('keeps the map while the view stays in the light box; redraws when it leaves, the sun moves or detail settles', () => {
+    const { map, renderer, view, draws } = setup();
+    const cam = camera(45);
+    expect(map.update(renderer, view(cam), 0)).toBe(true);
+    expect(draws()).toBe(1);
+    // A small pan: inside the margin
+    cam.position.x += 20;
+    cam.updateMatrixWorld();
+    expect(map.update(renderer, view(cam), 10)).toBe(false);
+    expect(draws()).toBe(1);
+    // Only the fade moved: uniforms change, no redraw
+    expect(map.update(renderer, view(cam, { fadeDistance: 5000 }), 20)).toBe(true);
+    expect(draws()).toBe(1);
+    // Terrain detail changed: waits, then draws
+    expect(map.update(renderer, view(cam, { fadeDistance: 5000, detail: 'b' }), 30)).toBe(false);
+    expect(map.pending).toBe(true);
+    map.update(renderer, view(cam, { fadeDistance: 5000, detail: 'b' }), 30 + SHADOW_DETAIL_INTERVAL_MS);
+    expect(draws()).toBe(2);
+    expect(map.pending).toBe(false);
+    // A long pan leaves the box
+    cam.position.x += 5000;
+    cam.updateMatrixWorld();
+    map.update(renderer, view(cam, { fadeDistance: 5000, detail: 'b' }), 400);
+    expect(draws()).toBe(3);
+    // The sun moved
+    map.update(renderer, view(cam, { fadeDistance: 5000, detail: 'b', sun: new Vector3(0, -0.5, 0.8).normalize() }), 410);
+    expect(draws()).toBe(4);
+    map.dispose();
   });
 });

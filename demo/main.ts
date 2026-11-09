@@ -8,6 +8,17 @@
 
 import { Treelet, XYZSource, WMTSSource } from '../src/index';
 
+/** Innsbruck's offset from UTC in winter (CET). */
+const INNSBRUCK_WINTER_UTC_OFFSET = 1;
+
+/**
+ * A time of day in Innsbruck in December this year, whatever the viewer's
+ * time zone (the presets show the Alps, not the viewer's local time).
+ */
+function innsbruckDecember(day: number, hour: number, minute = 0): Date {
+  return new Date(Date.UTC(new Date().getFullYear(), 11, day, hour - INNSBRUCK_WINTER_UTC_OFFSET, minute));
+}
+
 // @ts-ignore - expose for debugging
 const map = (window as any).__treelet = Treelet.map('map', {
   initCenter: { lng: 11.39, lat: 47.27 }, // Innsbruck, Austria - surrounded by Alps
@@ -168,9 +179,8 @@ function applyPreset(name: Preset): void {
       map.addAnalysisLayer({ analysis: 'elevation', params: { range: [0, 4000] } }),
       map.addAnalysisLayer({ analysis: 'shadows', params: { darkness: 0.55 } }),
     );
-    const year = new Date().getFullYear();
-    const from = new Date(year, 11, 21, 8, 30).getTime();
-    const to = new Date(year, 11, 21, 15, 30).getTime();
+    const from = innsbruckDecember(21, 8, 30).getTime();
+    const to = innsbruckDecember(21, 15, 30).getTime();
     const token = sunAnimation;
     const start = performance.now();
     const step = (now: number) => {
@@ -193,9 +203,10 @@ function applyPreset(name: Preset): void {
     // Winter solstice: hours of direct sun in the Inn valley, sun placed at 10:30
     map.deactivateDrapeLayer();
     map.setView({ lng: 11.39, lat: 47.27 }, 11);
-    const day = new Date(new Date().getFullYear(), 11, 21, 10, 30);
+    const day = innsbruckDecember(21, 10, 30);
     map.setSunTime(day);
-    keep(map.computeSunHours({ date: day, layerDisplay: { opacity: 0.85 } }));
+    // The day in Innsbruck's time zone (the default is the viewer's)
+    keep(map.computeSunHours({ date: day, utcOffset: INNSBRUCK_WINTER_UTC_OFFSET, layerDisplay: { opacity: 0.85 } }));
   }
 
   document.querySelectorAll<HTMLButtonElement>('#presets button').forEach((b) => {

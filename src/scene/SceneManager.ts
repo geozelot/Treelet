@@ -82,7 +82,8 @@ export class SceneManager {
     this.renderOnDemand = md.renderOnDemand;
 
     // Renderer
-    this.renderer = new WebGLRenderer({ antialias: md.antialias, powerPreference: 'high-performance' });
+    // A stencil buffer lets a translucent overlay line cover each pixel once
+    this.renderer = new WebGLRenderer({ antialias: md.antialias, powerPreference: 'high-performance', stencil: true });
     const width = Math.max(1, container.clientWidth);
     const height = Math.max(1, container.clientHeight);
     this.renderer.setSize(width, height);

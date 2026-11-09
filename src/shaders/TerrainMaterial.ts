@@ -19,7 +19,9 @@ import {
   type Texture,
 } from 'three';
 import type { CoatBlendMode, Vec4 } from '../analysis/types';
-import { MAX_COATS } from '../analysis/registry';
+import { MAX_COATS, IMAGERY_KIND, BLEND_MODES } from '../analysis/registry';
+import { RASTER_NODATA_THRESHOLD } from '../analysis/grid';
+import { SHADOW_NIGHT_SUN_Z } from '../terrain/ShadowMap';
 
 // ==== Import modular GLSL ====
 import declarations from './glsl/includes/declarations.glsl?raw';
@@ -41,12 +43,55 @@ const vertexShader = [
   vertexMain,
 ].join('\n');
 
+/** A GLSL float literal. */
+function glslFloat(v: number): string {
+  const s = String(v);
+  return /[.eE]/.test(s) ? s : `${s}.0`;
+}
+
+/** Shader constants generated from their TypeScript sources, so the two can't drift apart. */
+export function shaderConstants(): string {
+  return [
+    `#define MAX_COATS ${MAX_COATS}`,
+    `#define MAX_RASTERS ${MAX_RASTERS}`,
+    `#define IMAGERY_KIND ${IMAGERY_KIND}`,
+    ...BLEND_MODES.map((mode, i) => `#define BLEND_${mode.toUpperCase()} ${i}`),
+    `#define RASTER_NODATA_THRESHOLD ${glslFloat(RASTER_NODATA_THRESHOLD)}`,
+    `#define SHADOW_NIGHT_SUN_Z ${glslFloat(SHADOW_NIGHT_SUN_Z)}`,
+  ].join('\n');
+}
+
+const slots = (): number[] => Array.from({ length: MAX_RASTERS }, (_, i) => i);
+
+/** One sampler uniform per raster slot. */
+function rasterSamplers(): string {
+  return slots().map((i) => `uniform highp sampler2D uRaster${i};`).join('\n');
+}
+
+/** rasterTexel / rasterColor with one branch per raster slot. */
+function rasterAccessors(): string {
+  const last = MAX_RASTERS - 1;
+  const branches = (call: (i: number) => string) => [
+    ...slots().slice(0, last).map((i) => `  if (slot == ${i}) return ${call(i)};`),
+    `  return ${call(last)};`,
+  ].join('\n');
+  return [
+    'float rasterTexel(int slot, ivec2 p) {',
+    branches((i) => `texelFetch(uRaster${i}, p, 0).r`),
+    '}',
+    'vec4 rasterColor(int slot, vec2 uv) {',
+    branches((i) => `textureLod(uRaster${i}, uv, 0.0)`),
+    '}',
+  ].join('\n');
+}
+
 export function buildFragmentShader(analysisGlsl: string): string {
   return [
-    declarations,
+    shaderConstants(),
+    declarations.replace('// @RASTER_SAMPLERS', rasterSamplers()),
     elevationSampling,
     surface,
-    rasters,
+    rasters.replace('// @RASTER_ACCESSORS', rasterAccessors()),
     shadows,
     analysisGlsl,
     coats,
@@ -54,12 +99,10 @@ export function buildFragmentShader(analysisGlsl: string): string {
   ].join('\n');
 }
 
-const BLEND_MODE_INDEX: Record<CoatBlendMode, number> = {
-  normal: 0,
-  multiply: 1,
-  screen: 2,
-  softlight: 3,
-};
+/** Blend code of a coat blend mode in the shader (BLEND_* above); unknown modes draw normally. */
+function blendIndex(mode: CoatBlendMode): number {
+  return Math.max(0, BLEND_MODES.indexOf(mode));
+}
 
 /** One coat as the shader receives it. */
 export interface PackedCoat {
@@ -133,10 +176,7 @@ export function createTerrainMaterial(options: TerrainMaterialOptions): ShaderMa
     uCoatP1: { value: Array.from({ length: MAX_COATS }, () => new Vector4()) },
     uCoatRaster: { value: new Array<number>(MAX_COATS).fill(-1) },
     // Rasters
-    uRaster0: { value: null },
-    uRaster1: { value: null },
-    uRaster2: { value: null },
-    uRaster3: { value: null },
+    ...Object.fromEntries(slots().map((i) => [`uRaster${i}`, { value: null }])),
     uRasterXform: { value: Array.from({ length: MAX_RASTERS }, () => new Vector4()) },
     uRasterInfo: { value: Array.from({ length: MAX_RASTERS }, () => new Vector4(1, 1, 0, 0)) },
     // Terrain-cast shadows
@@ -189,7 +229,7 @@ export function setTerrainCoats(material: ShaderMaterial, stack: readonly Packed
   for (let i = 0; i < n; i++) {
     const c = stack[i];
     if (raster[i] !== c.raster) { raster[i] = c.raster; changed = true; }
-    const b = BLEND_MODE_INDEX[c.blendMode] ?? 0;
+    const b = blendIndex(c.blendMode);
     const o = Math.max(0, Math.min(1, c.opacity));
     if (kind[i] !== c.kind) { kind[i] = c.kind; changed = true; }
     if (blend[i] !== b) { blend[i] = b; changed = true; }

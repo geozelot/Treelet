@@ -12,20 +12,28 @@
 import { Vector3 } from 'three';
 import type { TerrainRenderer } from '../terrain/TerrainRenderer';
 import type { LayerRegistry, StackLayer } from '../layers/LayerRegistry';
+import type { DrapeLayer } from '../layers/DrapeLayer';
 import type { SceneManager } from '../scene/SceneManager';
 import type { BaseLayer } from '../layers/BaseLayer';
 import type { AnalysisLayer } from '../layers/AnalysisLayer';
 import type { ResolvedTreeletOptions } from './types';
 import type { LayerHandle } from '../layers/types';
 import type { CoatBlendMode, LegendSpec, Ramp } from '../analysis/types';
-import { IMAGERY_KIND, MAX_COATS, analysisKind } from '../analysis/registry';
-import { resolveRamp, legendFor } from '../analysis/ramps';
+import { IMAGERY_KIND, analysisKind, copyParams, isBlendMode } from '../analysis/registry';
+import { resolveRamp, legendFor, RAMP_PRESET_FOR, isRampName } from '../analysis/ramps';
 import type { CoatInput } from '../terrain/CoatStack';
 
-const BLEND_MODES: readonly CoatBlendMode[] = ['normal', 'multiply', 'screen', 'softlight'];
-
-/** Passed to descriptors' `domain()`; returned as-is it means "follow the visible range". */
-const AUTO_DOMAIN: [number, number] = [0, 1];
+/**
+ * Whether `ramp` suits an analysis kind: class presets made for one kind
+ * (avalanche → slope…) are refused for the others, with a warning.
+ */
+export function rampSuits(ramp: Ramp, analysisId: string): boolean {
+  if (!isRampName(ramp)) return true;
+  const only = RAMP_PRESET_FOR[ramp];
+  if (only === undefined || only === analysisId) return true;
+  console.warn(`treelet: ramp "${ramp}" is made for "${only}" layers, not "${analysisId}"`);
+  return false;
+}
 
 export class DisplayController {
   private readonly terrainRenderer: TerrainRenderer;
@@ -44,10 +52,12 @@ export class DisplayController {
   /** Sun altitude in degrees above the horizon (5–90). 90° = straight down. */
   private _sunAltitude = 45;
 
+  /** The manual sun (setSunAzimuth / setSunAltitude), restored when a sun time is cleared. */
+  private _manualAzimuth = 315;
+  private _manualAltitude = 45;
+
   /** Reusable Vector3 for sun direction computation. */
   private readonly _sunDir = new Vector3();
-
-  private coatLimitWarned = false;
 
   constructor(
     terrainRenderer: TerrainRenderer,
@@ -74,6 +84,11 @@ export class DisplayController {
     return layer;
   }
 
+  /** A layer with coat display settings: an analysis layer or any drape (active or not). */
+  private displayLayer(handle: LayerHandle | string): AnalysisLayer | DrapeLayer | undefined {
+    return this.layerRegistry.getAnalysisLayer(handle) ?? this.layerRegistry.getDrapeLayer(handle);
+  }
+
   private analysisLayer(handle: LayerHandle | string): AnalysisLayer | null {
     const layer = this.layerRegistry.getAnalysisLayer(handle);
     if (!layer) {
@@ -92,33 +107,48 @@ export class DisplayController {
     return true;
   }
 
+  /**
+   * Opacity of a coat: an analysis layer or a drape (an inactive drape
+   * keeps it for when it becomes the imagery coat). Returns false when
+   * nothing changed.
+   */
   setLayerOpacity(handle: LayerHandle | string, opacity: number): boolean {
     if (!Number.isFinite(opacity)) return false;
-    const layer = this.stackLayer(handle);
-    if (!layer) return false;
-    (layer.display as { opacity: number }).opacity = Math.max(0, Math.min(1, opacity));
+    const layer = this.displayLayer(handle);
+    if (!layer) {
+      console.warn(`treelet: layer "${typeof handle === 'string' ? handle : handle.id}" has no coat opacity`);
+      return false;
+    }
+    const value = Math.max(0, Math.min(1, opacity));
+    if (layer.display.opacity === value) return false;
+    (layer.display as { opacity: number }).opacity = value;
     this.applyMaterialState();
     return true;
   }
 
   getLayerOpacity(handle: LayerHandle | string): number {
-    return this.layerRegistry.getStackLayer(handle)?.display.opacity ?? 1;
+    return this.displayLayer(handle)?.display.opacity ?? 1;
   }
 
+  /** Blend mode of a coat (analysis layer or drape, active or not). Returns false when nothing changed. */
   setLayerBlendMode(handle: LayerHandle | string, mode: CoatBlendMode): boolean {
-    if (!BLEND_MODES.includes(mode)) {
-      console.warn(`treelet: unknown blend mode "${mode}"`);
+    if (!isBlendMode(mode)) {
+      console.warn(`treelet: unknown blend mode "${String(mode)}"`);
       return false;
     }
-    const layer = this.stackLayer(handle);
-    if (!layer) return false;
+    const layer = this.displayLayer(handle);
+    if (!layer) {
+      console.warn(`treelet: layer "${typeof handle === 'string' ? handle : handle.id}" has no coat blend mode`);
+      return false;
+    }
+    if (layer.display.blendMode === mode) return false;
     (layer.display as { blendMode: CoatBlendMode }).blendMode = mode;
     this.applyMaterialState();
     return true;
   }
 
   getLayerBlendMode(handle: LayerHandle | string): CoatBlendMode {
-    return this.layerRegistry.getStackLayer(handle)?.display.blendMode ?? 'normal';
+    return this.displayLayer(handle)?.display.blendMode ?? 'normal';
   }
 
   setAnalysisParams(handle: LayerHandle | string, params: object): boolean {
@@ -129,15 +159,17 @@ export class DisplayController {
     return true;
   }
 
+  /** A copy of an analysis layer's parameters (changing it changes nothing). */
   getAnalysisParams(handle: LayerHandle | string): Record<string, unknown> | null {
     const layer = this.layerRegistry.getAnalysisLayer(handle);
-    return layer ? { ...layer.params } : null;
+    return layer ? copyParams(layer.params as Record<string, unknown>) : null;
   }
 
   setAnalysisRamp(handle: LayerHandle | string, ramp: Ramp): boolean {
     const layer = this.analysisLayer(handle);
     if (!layer) return false;
     resolveRamp(ramp); // validates (throws)
+    if (!rampSuits(ramp, layer.descriptor.id)) return false;
     layer.ramp = ramp;
     this.applyMaterialState();
     return true;
@@ -151,12 +183,11 @@ export class DisplayController {
   // Legends
   // =========================================================================
 
-  /** Value domain of an analysis layer's ramp ('auto' resolved to the visible range). */
+  /** Value domain of an analysis layer's ramp, for the current visible elevation range. */
   getAnalysisDomain(layer: AnalysisLayer): [number, number] | null {
     const d = layer.descriptor;
     if (!d.domain) return null;
-    const domain = d.domain(layer.params, AUTO_DOMAIN);
-    return domain === AUTO_DOMAIN ? this.terrainRenderer.autoElevationRange : domain;
+    return d.domain(layer.params, this.terrainRenderer.autoElevationRange);
   }
 
   /** Legend of a value analysis layer; null for color kinds and unknown layers. */
@@ -187,6 +218,8 @@ export class DisplayController {
   setSunAzimuth(degrees: number): void {
     if (!Number.isFinite(degrees)) return;
     this._sunAzimuth = ((degrees % 360) + 360) % 360;
+    this._manualAzimuth = this._sunAzimuth;
+    this._sunAltitude = this._manualAltitude;
     this.updateSunDirection();
   }
 
@@ -197,6 +230,15 @@ export class DisplayController {
   setSunAltitude(degrees: number): void {
     if (!Number.isFinite(degrees)) return;
     this._sunAltitude = Math.max(5, Math.min(90, degrees));
+    this._manualAltitude = this._sunAltitude;
+    this._sunAzimuth = this._manualAzimuth;
+    this.updateSunDirection();
+  }
+
+  /** Put the sun back where setSunAzimuth / setSunAltitude left it (after a sun time). */
+  restoreManualSun(): void {
+    this._sunAzimuth = this._manualAzimuth;
+    this._sunAltitude = this._manualAltitude;
     this.updateSunDirection();
   }
 
@@ -307,19 +349,27 @@ export class DisplayController {
   // =========================================================================
 
   /**
-   * Hand the visible coats, bottom first, to the terrain renderer.
-   * Public so LayerController can call it after layer changes.
+   * Hand the visible coats, bottom first, to the terrain renderer (it skips
+   * coats outside their zoom range or at opacity 0, and keeps a shadow map
+   * while a drawn coat reads one). Public so LayerController can call it
+   * after layer changes.
    */
   applyMaterialState(): void {
     const coats: CoatInput[] = [];
-    let shadows = false;
     for (const layer of this.layerRegistry.getStack()) {
       if (!layer.visible) continue;
       if ('descriptor' in layer) {
-        coats.push(this.analysisCoat(layer));
-        if (layer.descriptor.shadowMap && coats.length <= MAX_COATS) shadows = true;
-      }
-      else {
+        const coat = this.analysisCoat(layer);
+        if (layer.owner !== null) {
+          // An overlay's fills: drawn with the overlay (shown, in its zoom range, its opacity)
+          const owner = this.layerRegistry.getOverlayLayer(layer.owner);
+          if (!owner || !owner.visible) continue;
+          coat.opacity *= owner.display.opacity;
+          coat.minZoom = owner.minZoom;
+          coat.maxZoom = owner.maxZoom;
+        }
+        coats.push(coat);
+      } else {
         coats.push({
           id: layer.id,
           kind: IMAGERY_KIND,
@@ -327,34 +377,33 @@ export class DisplayController {
           opacity: layer.display.opacity,
           ramp: null,
           domain: [0, 1],
+          minZoom: layer.minZoom,
+          maxZoom: layer.maxZoom,
           pack: () => ({ p0: [0, 0, 0, 0], p1: [0, 0, 0, 0] }),
         });
       }
     }
-    if (coats.length > MAX_COATS && !this.coatLimitWarned) {
-      this.coatLimitWarned = true;
-      console.warn(`treelet: only the lowest ${MAX_COATS} visible coats are drawn (${coats.length} visible)`);
-    }
+    // Imagery that isn't drawn isn't fetched either
+    const drape = this.layerRegistry.getActiveDrape();
+    this.terrainRenderer.setDrapeShown(drape !== null && drape.visible && drape.display.opacity > 0);
     this.terrainRenderer.setCoats(coats);
-    this.terrainRenderer.setShadowsEnabled(shadows);
   }
 
   private analysisCoat(layer: AnalysisLayer): CoatInput {
     const d = layer.descriptor;
     const params = layer.params;
-    let domain: [number, number] | 'auto' = [0, 1];
-    if (d.domain) {
-      const dom = d.domain(params, AUTO_DOMAIN);
-      domain = dom === AUTO_DOMAIN ? 'auto' : dom;
-    }
+    const domainOf = d.domain;
     return {
       id: layer.id,
       kind: analysisKind(d.id),
       blendMode: layer.display.blendMode,
       opacity: layer.display.opacity,
       ramp: layer.isValueKind ? resolveRamp(layer.ramp ?? d.ramp!) : null,
-      domain,
+      domain: domainOf ? (visible) => domainOf(params, visible) : [0, 1],
       raster: d.raster ? this.terrainRenderer.rasterSlot(layer.id) : -1,
+      minZoom: layer.minZoom,
+      maxZoom: layer.maxZoom,
+      shadowMap: d.shadowMap === true,
       pack: (dom) => d.pack(params, dom),
     };
   }

@@ -71,8 +71,13 @@ describe('resolveParams', () => {
   it('starts from the defaults and clamps ranges', () => {
     const d = getAnalysis('contours')!;
     expect(resolveParams(d, undefined)).toEqual(d.defaults);
-    expect(resolveParams(d, { interval: 5000 }).interval).toBe(500);
-    expect(resolveParams(d, { thickness: -1 }).thickness).toBe(0.5);
+    // Limits, not the slider range: a 5 km or 5 m interval is fine, a negative thickness is not
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(resolveParams(d, { interval: 5000 }).interval).toBe(5000);
+    expect(resolveParams(d, { interval: 5 }).interval).toBe(5);
+    expect(resolveParams(d, { thickness: -1 }).thickness).toBe(0);
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
   });
 
   it('merges over a base and leaves unknown keys alone', () => {
@@ -141,10 +146,38 @@ describe('resolveParams: optional and wrapping spans', () => {
     expect(warn).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps the order of a wrapping span (clockwise through north)', () => {
+  it('keeps the order of a wrapping span (clockwise through north) and reduces it into one turn', () => {
     expect(resolveParams(slope, { aspectMask: [315, 45] }).aspectMask).toEqual([315, 45]);
-    expect(resolveParams(slope, { aspectMask: [400, -10] }).aspectMask).toEqual([360, 0]);
+    // Clockwise from 40° to 350° (not clamped to an empty sector)
+    expect(resolveParams(slope, { aspectMask: [400, -10] }).aspectMask).toEqual([40, 350]);
+    // North-west through north-east keeps both halves
+    expect(resolveParams(slope, { aspectMask: [-45, 45] }).aspectMask).toEqual([315, 45]);
+    // A whole turn or more is every bearing
+    expect(resolveParams(slope, { aspectMask: [0, 360] }).aspectMask).toEqual([0, 360]);
+    expect(resolveParams(slope, { aspectMask: [-180, 200] }).aspectMask).toEqual([0, 360]);
     expect(resolveParams(slope, { range: [50, 10] }).range).toEqual([10, 50]);
+  });
+
+  it('clamps to the limits, not to the slider range, and warns', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const contours = getAnalysis('contours')!;
+    const elevation = getAnalysis('elevation')!;
+    // Bathymetry beyond the slider range is kept
+    expect(resolveParams(elevation, { range: [-11000, 0] }).range).toEqual([-11000, 0]);
+    expect(warn).not.toHaveBeenCalled();
+    // Slope stays within 0–90°
+    expect(resolveParams(slope, { range: [-5, 120] }).range).toEqual([0, 90]);
+    expect(warn).toHaveBeenCalledTimes(2);
+    expect(contours).toBeDefined();
+    warn.mockRestore();
+  });
+
+  it('copies array defaults, so no layer shares (or can change) them', () => {
+    const a = resolveParams(slope, {}) as { range: [number, number] };
+    a.range[0] = 30;
+    const b = resolveParams(slope, {}) as { range: [number, number] };
+    expect(b.range).toEqual([0, 60]);
+    expect((slope.defaults as { range: [number, number] }).range).toEqual([0, 60]);
   });
 
   it('slope packs the aspect mask into p0.zw with a flag in p1.x', () => {

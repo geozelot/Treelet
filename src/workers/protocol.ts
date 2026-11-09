@@ -40,6 +40,9 @@ export type ElevationResponse =
     data: Float32Array;
     min: number;
     max: number;
+    /** The range without isolated spikes (see robustRange): what the tile shows. */
+    low: number;
+    high: number;
     /** Slot texels per source pixel (> 1 when overzoomed); sizes the edge-stitch band. */
     texelsPerPixel: number;
   }
@@ -121,9 +124,33 @@ export interface RegionAnalysisResponse {
   missing: number;
   failed: number;
   grid?: Float32Array;
-  /** The analysis' output grids by name. */
-  outputs: Record<string, Float32Array>;
-  stats: Record<string, number>;
+  /** The analysis' output grids (which ones depends on the task's kind). */
+  outputs: RegionOutputs;
+  stats: RegionStats;
+}
+
+/** Output grids of the region analyses, by kind. */
+export interface RegionOutputs {
+  /** viewshed: 1 visible, 0 hidden, NaN outside the radius / field of view. */
+  visible?: Float32Array;
+  /** viewshed (with `clearance`): meters hidden ground would have to rise to be seen. */
+  clearance?: Float32Array;
+  /** sunhours: hours of direct sun, and the first and last sun (hours of the day). */
+  hours?: Float32Array;
+  firstSun?: Float32Array;
+  lastSun?: Float32Array;
+  /** skyview: visible fraction of the sky. */
+  skyview?: Float32Array;
+  /** tpi: height above (+) or below (−) the surrounding mean, meters. */
+  tpi?: Float32Array;
+}
+
+/** Scalar results of the region analyses, by kind. */
+export interface RegionStats {
+  visibleCells?: number;
+  analysedCells?: number;
+  observerElevation?: number;
+  daylight?: number;
 }
 
 export type RegionProgress = (stage: 'loading' | 'computing', fraction: number) => void;

@@ -127,6 +127,57 @@ export function measurePath(
   };
 }
 
+/**
+ * Join two path measures where `b` starts at the last vertex of `a`: the
+ * measure of the joined path, equal to measuring it whole up to sampling
+ * (each part keeps its own sample spacing and length rescaling). Used to
+ * measure a path that grows or changes at one place without sampling all of
+ * it again. The samples of `a` are shared with the result, not copied.
+ */
+export function joinPathMeasures(a: PathMeasure, b: PathMeasure): PathMeasure {
+  const offset = a.distance;
+  let gain = a.gain + b.gain;
+  let loss = a.loss + b.loss;
+  let surfaceDistance = a.surfaceDistance + b.surfaceDistance;
+  // No data at the joint: the whole path climbs from the last elevation
+  // before it to the first one after it, which neither part sees
+  const joint = a.profile[a.profile.length - 1];
+  if (joint && joint.elevation === null && b.profile.length > 1 && b.profile[0].elevation === null) {
+    let before: number | null = null;
+    for (let i = a.profile.length - 2; i >= 0 && before === null; i--) before = a.profile[i].elevation;
+    let k = 1;
+    while (k < b.profile.length && b.profile[k].elevation === null) k++;
+    const after = b.profile[k]?.elevation ?? null;
+    if (before !== null && after !== null) {
+      const dh = after - before;
+      if (dh > 0) gain += dh; else loss -= dh;
+      const ds = b.profile[k].distance - b.profile[k - 1].distance;
+      surfaceDistance += Math.sqrt(ds * ds + dh * dh) - ds;
+    }
+  }
+  const lo = [a.minElevation, b.minElevation].filter((v): v is number => v !== null);
+  const hi = [a.maxElevation, b.maxElevation].filter((v): v is number => v !== null);
+  // b's first sample and vertex are a's last
+  const skip = a.profile.length > 0 ? 1 : 0;
+  const profile = a.profile.slice();
+  for (let i = skip; i < b.profile.length; i++) {
+    const s = b.profile[i];
+    profile.push({ ...s, distance: s.distance + offset });
+  }
+  const vertexDistances = a.vertexDistances.slice();
+  for (let i = vertexDistances.length > 0 ? 1 : 0; i < b.vertexDistances.length; i++) vertexDistances.push(b.vertexDistances[i] + offset);
+  return {
+    distance: a.distance + b.distance,
+    surfaceDistance,
+    gain,
+    loss,
+    minElevation: lo.length ? Math.min(...lo) : null,
+    maxElevation: hi.length ? Math.max(...hi) : null,
+    vertexDistances,
+    profile,
+  };
+}
+
 /** Whether (x, y) lies inside a ring (even-odd rule). */
 export function pointInRing(x: number, y: number, ring: ReadonlyArray<readonly [number, number]>): boolean {
   let inside = false;

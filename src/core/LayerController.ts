@@ -131,7 +131,8 @@ export class LayerController {
       return;
     }
     if (this.layerRegistry.getActiveDrapeId() === id) {
-      if (!drapeLayer.visible) this.displayController.setLayerVisible(id, true);
+      // Already the imagery coat: activating shows it again if it was hidden
+      if (!drapeLayer.visible && this.displayController.setLayerVisible(id, true)) this.emitEvent('layerchange', {});
       return;
     }
 
@@ -169,7 +170,14 @@ export class LayerController {
     const handle = this.layerRegistry.addAnalysisLayer(
       initial ? { ...options, params: { ...initial, ...options.params } as Partial<P> } : options,
     );
-    this.displayController.applyMaterialState();
+    try {
+      this.displayController.applyMaterialState();
+    } catch (err) {
+      // Leave the stack as it was (a bad custom descriptor must not break every later change)
+      this.layerRegistry.removeAnalysisLayer(handle);
+      this.displayController.applyMaterialState();
+      throw err;
+    }
     this.emitEvent('layeradd', { id: handle.id });
     this.emitEvent('layerchange', {});
     return handle;
@@ -177,19 +185,26 @@ export class LayerController {
 
   /**
    * Add a coat of a raster-backed kind (`raster`, `image`, `viewshed`…)
-   * drawing `raster`. Throws when all raster slots are taken.
+   * drawing `raster`. With `fitRange`, a value raster's `range` parameter
+   * becomes the range of its data. Throws when all raster slots are taken.
    */
-  addRasterLayer<P extends object>(options: AnalysisLayerOptions<P>, raster: RasterInput): LayerHandle {
+  addRasterLayer<P extends object>(options: AnalysisLayerOptions<P>, raster: RasterInput, fitRange = false): LayerHandle {
     const descriptor = getAnalysis(options.analysis);
     if (!descriptor?.raster) throw new Error(`treelet: "${options.analysis}" is not a raster analysis`);
     const handle = this.layerRegistry.addAnalysisLayer(options);
     try {
-      this.terrainRenderer.bindRaster(handle.id, raster);
+      const entry = this.terrainRenderer.bindRaster(handle.id, raster);
+      if (fitRange) {
+        const r = entry.range ?? [0, 1];
+        this.layerRegistry.getAnalysisLayer(handle)!.setParams({ range: r[1] > r[0] ? [r[0], r[1]] : [r[0], r[0] + 1] } as Partial<object>);
+      }
+      this.displayController.applyMaterialState();
     } catch (err) {
       this.layerRegistry.removeAnalysisLayer(handle);
+      this.terrainRenderer.releaseRaster(handle.id);
+      this.displayController.applyMaterialState();
       throw err;
     }
-    this.displayController.applyMaterialState();
     this.emitEvent('layeradd', { id: handle.id });
     this.emitEvent('layerchange', {});
     return handle;

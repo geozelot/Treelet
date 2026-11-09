@@ -15,6 +15,8 @@
 //       tree; do not remove variables that appear unused in this file alone.
 // ============================================================================
 
+import { themeTokens, glassTokens, lightShadowRule } from './themeTokens';
+
 export const compassStyles = /* css */ `
   :host {
     position: absolute;
@@ -26,26 +28,16 @@ export const compassStyles = /* css */ `
     /* Map width for cqw units and @container rules, here and in <treelet-panel> */
     container-type: inline-size;
 
-    color-scheme: light dark;
-
-    --bg: light-dark(#fafafa, #181818);
-    /* Boxes and slide-outs, and the menus that open from them (dropdowns,
-       settings); translucent with [glass], menus a little less so. */
-    --surface-bg: var(--bg);
-    --surface-filter: none;
+    ${themeTokens}
+    /* The menus that open from the boxes and slide-outs (dropdowns,
+       settings); translucent with [glass], a little less than the boxes. */
     --menu-bg: var(--bg);
     --menu-filter: none;
-    --border: light-dark(rgba(0, 0, 0, 0.10), rgba(255, 255, 255, 0.08));
-    --shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
-    --text: light-dark(#333333, #e8e8e8);
-    --text-dim: light-dark(rgba(0, 0, 0, 0.55), rgba(255, 255, 255, 0.55));
     --text-muted: light-dark(rgba(0, 0, 0, 0.40), rgba(255, 255, 255, 0.45));
     --hover-bg: light-dark(rgba(0, 0, 0, 0.05), rgba(255, 255, 255, 0.06));
     --hover-text: light-dark(#222222, #e8e8e8);
     --active-bg: light-dark(rgba(0, 0, 0, 0.10), rgba(255, 255, 255, 0.14));
     --active-text: light-dark(#000000, #ffffff);
-    /* The logo's leaf green; darker on light backgrounds for 3:1 contrast */
-    --accent: light-dark(#7a9400, #a5c500);
     --control-border: light-dark(rgba(0, 0, 0, 0.12), rgba(255, 255, 255, 0.12));
     --control-bg: light-dark(rgba(0, 0, 0, 0.04), rgba(255, 255, 255, 0.04));
     /* Buttons: resting, hovered/selected, pressed */
@@ -57,8 +49,7 @@ export const compassStyles = /* css */ `
     --fs-label: 10px;
     --fs-small: 11px;
     --fs-body: 12px;
-    /* Corner radii: surfaces (boxes, panels, menus) and the controls in them */
-    --radius: 10px;
+    /* Corner radius of the controls in surfaces (surfaces: --radius) */
     --radius-sm: 5px;
     --fade: 0.15s;
 
@@ -71,13 +62,10 @@ export const compassStyles = /* css */ `
     color: var(--text);
   }
 
-  @media (prefers-color-scheme: light) {
-    :host { --shadow: 0 4px 16px rgba(0, 0, 0, 0.10); }
-  }
+  ${lightShadowRule}
 
   :host([glass]) {
-    --surface-bg: light-dark(rgba(250, 250, 250, 0.72), rgba(24, 24, 24, 0.66));
-    --surface-filter: blur(14px) saturate(1.5);
+    ${glassTokens}
     --menu-bg: light-dark(rgba(250, 250, 250, 0.8), rgba(24, 24, 24, 0.74));
     --menu-filter: blur(14px) saturate(1.5);
   }

@@ -8,6 +8,8 @@
 import { describe, it, expect } from 'vitest';
 import { sampleSurfaceGrid } from '../../src/analysis/surface';
 import { slopeDegrees, aspectDegrees, curvatureOf, curvatureValue, inSector } from '../../src/analysis/builtins';
+import { slope } from '../../src/analysis/builtins/slope';
+import { aspect } from '../../src/analysis/builtins/aspect';
 import type { SurfaceSample } from '../../src/analysis/types';
 
 const NODATA = -99998;
@@ -110,5 +112,66 @@ describe('descriptor CPU formulas', () => {
     expect(inSector(90, 45, 135)).toBe(true);
     expect(inSector(200, 45, 135)).toBe(false);
     expect(inSector(-10, 315, 45)).toBe(true);
+  });
+
+  it('the aspect coat fades in on sin(slope) from 1° to 5° of slope', () => {
+    const fade = /smoothstep\(([\d.]+), ([\d.]+), sinSlope\)/.exec(aspect.glsl);
+    expect(fade).not.toBeNull();
+    expect(aspect.glsl).toContain('float sinSlope = length(s.n.xy);');
+    expect(Number(fade![1])).toBeCloseTo(Math.sin(Math.PI / 180), 6);
+    expect(Number(fade![2])).toBeCloseTo(Math.sin((5 * Math.PI) / 180), 6);
+  });
+
+  it('inSector: a clockwise span of 360° or more is every bearing', () => {
+    for (const b of [0, 0.5, 90, 180, 270, 359.9, 360, -45, 725]) {
+      expect(inSector(b, 0, 360)).toBe(true);
+      expect(inSector(b, -180, 180)).toBe(true);
+      expect(inSector(b, 90, 450)).toBe(true);
+      expect(inSector(b, 10, 1000)).toBe(true);
+    }
+    // Counter-clockwise ends are a sector, as the parameter resolver reads them:
+    // [400, -10] runs clockwise from 40° to 350°
+    expect(inSector(180, 400, -10)).toBe(true);
+    expect(inSector(20, 400, -10)).toBe(false);
+  });
+
+  it('inSector: [350, 10] wraps through north, [10, 350] goes the long way round', () => {
+    for (const b of [350, 355, 0, 360, 5, 10, -5]) expect(inSector(b, 350, 10)).toBe(true);
+    for (const b of [11, 90, 180, 270, 349]) expect(inSector(b, 350, 10)).toBe(false);
+    for (const b of [10, 11, 90, 180, 270, 349, 350]) expect(inSector(b, 10, 350)).toBe(true);
+    for (const b of [351, 355, 0, 360, 5, 9]) expect(inSector(b, 10, 350)).toBe(false);
+    // Ends outside [0, 360) mean the same bearings
+    expect(inSector(0, -10, 10)).toBe(true);
+    expect(inSector(180, -10, 10)).toBe(false);
+    expect(inSector(25, 370, 400)).toBe(true);
+    expect(inSector(5, 370, 400)).toBe(false);
+  });
+
+  it('slope packs a full-circle aspect mask as no mask; other masks reduced to [0, 360)', () => {
+    const pack = (aspectMask: [number, number] | null) => slope.pack({ range: [0, 60], aspectMask }, [0, 60]);
+    const off = { p0: [0, 60, 0, 360], p1: [0, 0, 0, 0] };
+    expect(pack(null)).toEqual(off);
+    expect(pack([0, 360])).toEqual(off);
+    expect(pack([10, 370])).toEqual(off);
+    // [360, 0] runs clockwise from north to north: just that bearing
+    expect(pack([360, 0])).toEqual({ p0: [0, 60, 0, 0], p1: [1, 0, 0, 0] });
+    expect(pack([350, 10])).toEqual({ p0: [0, 60, 350, 10], p1: [1, 0, 0, 0] });
+    expect(pack([10, 350])).toEqual({ p0: [0, 60, 10, 350], p1: [1, 0, 0, 0] });
+    expect(pack([-10, 10])).toEqual({ p0: [0, 60, 350, 10], p1: [1, 0, 0, 0] });
+    expect(pack([370, 400])).toEqual({ p0: [0, 60, 10, 40], p1: [1, 0, 0, 0] });
+  });
+
+  it('the packed mask, tested as the shader tests it, agrees with inSector', () => {
+    // The shader: mask off (p1.x ≤ 0.5) passes every bearing; otherwise
+    // p0.z ≤ p0.w is a plain range, p0.z > p0.w passes through north
+    const shaderInside = (b: number, p0: number[], p1: number[]) =>
+      p1[0] <= 0.5 || (p0[2] <= p0[3] ? b >= p0[2] && b <= p0[3] : b >= p0[2] || b <= p0[3]);
+    const spans: Array<[number, number]> = [
+      [0, 360], [360, 0], [-180, 180], [350, 10], [10, 350], [315, 45], [45, 135], [-10, 10], [370, 400], [0, 0], [90, 89],
+    ];
+    for (const [from, to] of spans) {
+      const { p0, p1 } = slope.pack({ range: [0, 60], aspectMask: [from, to] }, [0, 60]);
+      for (let b = 0; b < 360; b += 2.5) expect(shaderInside(b, p0, p1), `${b} in [${from}, ${to}]`).toBe(inSector(b, from, to));
+    }
   });
 });

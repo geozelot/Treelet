@@ -7,6 +7,7 @@
 // a cancel message can abort the job. Tests run them with `runSync`.
 // ============================================================================
 
+import { abortError as makeAbortError } from '../../core/abort';
 /** A computation that yields its progress (0–1) and returns its result. */
 export type Steps<T> = Generator<number, T, void>;
 
@@ -19,10 +20,9 @@ export interface Grid {
   cellSize: number;
 }
 
+/** The error a cancelled analysis rejects with. */
 export function abortError(): Error {
-  const err = new Error('treelet: analysis cancelled');
-  err.name = 'AbortError';
-  return err;
+  return makeAbortError('treelet: analysis cancelled');
 }
 
 /** Run a computation to completion synchronously. */

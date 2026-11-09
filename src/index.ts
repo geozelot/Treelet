@@ -62,7 +62,7 @@ export type {
   AnalysisJob,
   RegionAnalysisKind,
 } from './core/AnalysisController';
-export { REGION_ANALYSES } from './core/AnalysisController';
+export { REGION_ANALYSES, REGION_ANALYSIS_INPUT } from './core/AnalysisController';
 
 // Re-export core classes
 export { Treelet } from './core/Treelet';

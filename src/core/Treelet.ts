@@ -80,9 +80,8 @@ import { ToolController, type ToolMode, type ToolResult } from '../tools/ToolCon
 import { formatDistance, formatElevation } from '../tools/format';
 import { measurePath, measureSurfaceArea, geodesicAreaOf, type PathMeasure, type AreaMeasure } from '../tools/measure';
 import { lineOfSightProfile, type LineOfSightOptions } from '../analysis/lineOfSight';
-import { geodesicDistance } from '../analysis/geodesy';
 import { boundsAround } from '../analysis/region';
-import { gridRange, resampleRowsToMercator } from '../analysis/grid';
+import { resampleRowsToMercator } from '../analysis/grid';
 import { TileGrid } from '../tiles/TileGrid';
 import { WebMercator } from '../crs/WebMercator';
 import { WorkerPool } from '../workers/WorkerPool';
@@ -343,6 +342,7 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
       toWorld: (lngLat) => this.lngLatToWorld(lngLat),
       defaultBounds: () => this.defaultRegionBounds(),
       sunTime: () => this.sunTime,
+      freeRasterSlots: () => this.terrainRenderer.freeRasterSlots(),
     });
     // Overlays: draped lines and points, fills as coats, DOM labels
     defineTreeletElements();
@@ -356,24 +356,40 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
       renderer: this.sceneManager.renderer,
       labels: this.labels,
       toWorld: (lngLat) => this.lngLatToWorld(lngLat),
-      groundZ: (x, y) => this.groundZ(x, y),
+      groundHeight: (x, y) => {
+        const meters = this.terrainRenderer.sampleElevationAtWorld(x, y);
+        return meters === null ? null : this.elevationToScene(meters, y, 1);
+      },
+      exaggeration: () => this.exag,
       texelWorld: () => this.terrainRenderer.finestTexelWorld(),
-      terrainKey: () => `${this.terrainRenderer.elevationVersion}|${this.exag}`,
+      terrainVersion: () => this.terrainRenderer.elevationVersion,
+      changesSince: (version) => this.terrainRenderer.elevationChangesSince(version),
       zoom: () => this.sceneManager.cameraController.deriveZoom(),
       requestRender: () => this.sceneManager.requestRender(),
       isOccluded: (x, y, z) => this.isOccluded(x, y, z),
       fills: {
-        add: (name, raster, opacity) => {
+        add: (name, raster, owner) => {
           try {
-            return this.layerController.addRasterLayer({ analysis: 'image', layerName: name, layerDisplay: { opacity } }, raster).id;
+            const id = this.layerController.addRasterLayer({ analysis: 'image', layerName: name }, raster).id;
+            // Owned by the overlay: drawn with it (shown, zoom range, opacity)
+            this.layerRegistry.getAnalysisLayer(id)!.owner = owner;
+            this.displayController.applyMaterialState();
+            return id;
           } catch (err) {
             console.warn(`treelet: overlay "${name}" fills not shown:`, (err as Error).message);
             return null;
           }
         },
+        update: (id, raster) => {
+          if (!this.layerRegistry.getAnalysisLayer(id)) return false;
+          try {
+            this.terrainRenderer.bindRaster(id, raster); // same id, same slot and place in the stack
+          } catch (err) {
+            console.warn('treelet: overlay fills not updated:', (err as Error).message);
+          }
+          return true;
+        },
         remove: (id) => { this.layerController.removeAnalysisLayer(id); },
-        setVisible: (id, visible) => { if (this.displayController.setLayerVisible(id, visible)) this.emit('layerchange', {}); },
-        setOpacity: (id, opacity) => { if (this.displayController.setLayerOpacity(id, opacity)) this.emit('layerchange', {}); },
       },
     });
     this.tools = new ToolController({
@@ -867,13 +883,9 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
    * profile. Null when the ends have no elevation data.
    */
   lineOfSight(from: LngLat, to: LngLat, options: LineOfSightOptions = {}): LineOfSightResult | null {
-    const distance = geodesicDistance(from, to);
-    const n = Math.max(64, Math.min(8000, Math.ceil(distance / this.sampleSpacing((from.lat + to.lat) / 2)) + 1));
-    const profile = this.getElevationProfile(from, to, n);
+    // Sampled like a measured path: the loaded terrain's spacing, distances on the ellipsoid
+    const { distance, profile } = measurePath([from, to], (p) => this.getElevation(p), this.sampleSpacing((from.lat + to.lat) / 2), 8000);
     if (profile[0].elevation === null || profile[profile.length - 1].elevation === null) return null;
-    // Rescale the sampled distances to the ellipsoid's
-    const along = profile[profile.length - 1].distance;
-    if (along > 0) for (const s of profile) s.distance *= distance / along;
     const r = lineOfSightProfile(profile, options);
     const o = r.obstructionIndex >= 0 ? profile[r.obstructionIndex] : null;
     return {
@@ -1036,17 +1048,33 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
   addAnalysisLayer<P extends object = Record<string, unknown>>(options: AnalysisLayerOptions<P>): LayerHandle {
     return this.layerController.addAnalysisLayer(options);
   }
-  removeAnalysisLayer(handle: LayerHandle | string): this { this.layerController.removeAnalysisLayer(handle); return this; }
+  /**
+   * Remove an analysis or raster coat. Removing an overlay's fill coat turns
+   * that overlay's fills off (its lines, points and labels stay).
+   */
+  removeAnalysisLayer(handle: LayerHandle | string): this {
+    const id = typeof handle === 'string' ? handle : handle.id;
+    this.tweens.get(id)?.cancel(); // its animation ends with the layer
+    const owner = this.layerRegistry.getAnalysisLayer(id)?.owner;
+    if (owner) {
+      const overlay = this.layerRegistry.getOverlayLayer(owner);
+      if (overlay) overlay.fills = false;
+      this.overlays.fillRemoved(owner);
+    }
+    this.layerController.removeAnalysisLayer(handle);
+    return this;
+  }
   /** Merge parameters into an analysis layer (see the analysis' param schema). */
   setAnalysisParams(handle: LayerHandle | string, params: object): this {
-    if (this.displayController.setAnalysisParams(handle, params)) this.emit('layerchange', {});
+    if (this.displayController.setAnalysisParams(handle, params)) this.emit('layerupdate', { id: typeof handle === 'string' ? handle : handle.id });
     return this;
   }
   getAnalysisParams(handle: LayerHandle | string): Record<string, unknown> | null { return this.displayController.getAnalysisParams(handle); }
   /**
    * Animate numeric parameters of an analysis layer: each key gets a target
    * value, or a `[from, to]` pair. Resolves true when done, false when a
-   * later animation of the same layer replaced it (or the map was destroyed).
+   * later animation of the same layer replaced it, the layer was removed or
+   * the map was destroyed.
    */
   animateAnalysisParams(
     handle: LayerHandle | string,
@@ -1072,6 +1100,7 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
       duration: requireFinite(duration, 'duration'),
       onUpdate: (t) => {
         if (this.destroyed) return;
+        if (!this.layerRegistry.getAnalysisLayer(id)) { tween.cancel(); return; } // removed meanwhile
         const params: Record<string, number> = {};
         for (const [key, from, to] of spans) params[key] = from + (to - from) * t;
         this.setAnalysisParams(id, params);
@@ -1085,7 +1114,7 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
   }
   /** Color ramp of a value analysis: a built-in name or stops / classes. */
   setAnalysisRamp(handle: LayerHandle | string, ramp: Ramp): this {
-    if (this.displayController.setAnalysisRamp(handle, ramp)) this.emit('layerchange', {});
+    if (this.displayController.setAnalysisRamp(handle, ramp)) this.emit('layerupdate', { id: typeof handle === 'string' ? handle : handle.id });
     return this;
   }
   getAnalysisRamp(handle: LayerHandle | string): Ramp | undefined { return this.displayController.getAnalysisRamp(handle); }
@@ -1106,11 +1135,14 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
     const { width, height, bounds } = options;
     const color = !(options.data instanceof Float32Array);
     let data = options.data;
-    if (!color && options.nodata !== undefined) {
-      const nodata = options.nodata;
-      data = (data as Float32Array).map((v) => (v === nodata ? NaN : v));
-    }
+    let nodata = color ? undefined : options.nodata;
     if (options.crs === 'EPSG:4326') {
+      // Resampling interpolates between rows, so nodata must be NaN first
+      if (nodata !== undefined) {
+        const nd = Math.fround(nodata); // the data holds float32 values
+        data = (data as Float32Array).map((v) => (v === nd ? NaN : v));
+        nodata = undefined;
+      }
       data = resampleRowsToMercator(data, width, height, bounds.south, bounds.north, color ? 4 : 1);
     } else if (options.crs !== undefined && options.crs !== 'EPSG:3857') {
       throw new Error(`treelet: unsupported raster crs "${options.crs}"`);
@@ -1118,9 +1150,10 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
     const nw = this.lngLatToWorld({ lng: bounds.west, lat: bounds.north });
     const se = this.lngLatToWorld({ lng: bounds.east, lat: bounds.south });
     let params: Record<string, unknown> = {};
-    if (!color) {
-      const r = options.range ?? gridRange(data) ?? [0, 1];
-      params = { range: r[1] > r[0] ? [r[0], r[1]] : [r[0], r[0] + 1] };
+    if (!color && options.range) {
+      const lo = Math.min(options.range[0], options.range[1]);
+      const hi = Math.max(options.range[0], options.range[1]);
+      params = { range: hi > lo ? [lo, hi] : [lo, lo + 1] };
     }
     return this.layerController.addRasterLayer({
       analysis: color ? 'image' : 'raster',
@@ -1129,7 +1162,7 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
       unit: options.unit,
       params,
       layerDisplay: options.layerDisplay,
-    }, { width, height, data, bounds: { west: nw.x, north: nw.y, east: se.x, south: se.y } });
+    }, { width, height, data, nodata, bounds: { west: nw.x, north: nw.y, east: se.x, south: se.y } }, !color && !options.range);
   }
 
   /** Size, bounds and value range of a raster coat, or null. */
@@ -1151,6 +1184,25 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
   getRasterValue(handle: LayerHandle | string, lngLat: LngLat): number | null {
     const w = this.lngLatToWorld(lngLat);
     return this.terrainRenderer.sampleRaster(typeof handle === 'string' ? handle : handle.id, w.x, w.y);
+  }
+
+  /**
+   * The value an analysis layer maps to colors at a position, in its unit
+   * (slope in degrees, elevation in meters, a raster's value…), computed
+   * on the CPU like the shader does. Null for color kinds (hillshade,
+   * contours), outside a raster and where no terrain is loaded.
+   */
+  getAnalysisValue(handle: LayerHandle | string, lngLat: LngLat): number | null {
+    const layer = this.layerRegistry.getAnalysisLayer(handle);
+    if (!layer) return null;
+    const d = layer.descriptor;
+    if (d.raster) return layer.isValueKind ? this.getRasterValue(layer.id, lngLat) : null;
+    if (!d.cpu) return null;
+    const w = this.lngLatToWorld(lngLat);
+    const s = this.terrainRenderer.sampleSurfaceAtWorld(w.x, w.y);
+    if (!s) return null;
+    const v = d.cpu(s, layer.params);
+    return Number.isFinite(v) ? v : null;
   }
 
   /**
@@ -1220,6 +1272,8 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
   pickLocation(options: { prompt?: string } = {}): Promise<TerrainPick | null> {
     this.cancelPick();
     if (this.destroyed) return Promise.resolve(null);
+    // One click does one thing: a measuring tool stops while a location is picked
+    if (this.tools.mode !== null) this.tools.clear();
     const canvas = this.sceneManager.renderer.domElement;
     const container = this.container;
     const cursor = container.style.cursor;
@@ -1288,6 +1342,7 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
       overlay.visible = visible;
       (overlay.display as { visible: boolean }).visible = visible;
       this.overlays.setVisible(overlay.id, visible);
+      this.displayController.applyMaterialState(); // its fill coat follows
       this.emit('layerchange', {});
       return this;
     }
@@ -1299,17 +1354,25 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
     if (this.displayController.setLayerVisible(handle, visible)) this.emit('layerchange', {});
     return this;
   }
-  /** Opacity 0–1 of a coat or an overlay (lines, points, labels and its fill). */
+  /**
+   * Opacity 0–1 of a coat (an analysis layer or a drape; an inactive drape
+   * keeps it for when it is shown) or an overlay (lines, points, labels and
+   * its fill).
+   */
   setLayerOpacity(handle: LayerHandle | string, opacity: number): this {
+    const id = typeof handle === 'string' ? handle : handle.id;
     const overlay = this.layerRegistry.getOverlayLayer(handle);
     if (overlay) {
       if (!Number.isFinite(opacity)) return this;
-      (overlay.display as { opacity: number }).opacity = Math.max(0, Math.min(1, opacity));
-      this.overlays.setOpacity(overlay.id, overlay.display.opacity);
-      this.emit('layerchange', {});
+      const value = Math.max(0, Math.min(1, opacity));
+      if (overlay.display.opacity === value) return this;
+      (overlay.display as { opacity: number }).opacity = value;
+      this.overlays.setOpacity(overlay.id, value);
+      this.displayController.applyMaterialState(); // its fill follows
+      this.emit('layerupdate', { id });
       return this;
     }
-    if (this.displayController.setLayerOpacity(handle, opacity)) this.emit('layerchange', {});
+    if (this.displayController.setLayerOpacity(handle, opacity)) this.emit('layerupdate', { id });
     return this;
   }
   getLayerOpacity(handle: LayerHandle | string): number {
@@ -1326,8 +1389,9 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
     console.warn(`treelet: layer "${typeof handle === 'string' ? handle : handle.id}" not found`);
     return this;
   }
+  /** Blend mode of a coat (an analysis layer or a drape, active or not). */
   setLayerBlendMode(handle: LayerHandle | string, mode: BlendMode): this {
-    if (this.displayController.setLayerBlendMode(handle, mode)) this.emit('layerchange', {});
+    if (this.displayController.setLayerBlendMode(handle, mode)) this.emit('layerupdate', { id: typeof handle === 'string' ? handle : handle.id });
     return this;
   }
   getLayerBlendMode(handle: LayerHandle | string): BlendMode { return this.displayController.getLayerBlendMode(handle); }
@@ -1367,7 +1431,7 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
     if (!layer) return this;
     layer.style = style;
     this.overlays.setStyle(layer.id, style);
-    this.emit('layerchange', {});
+    this.emit('layerupdate', { id: layer.id });
     return this;
   }
   getOverlayLayers(): OverlayLayer[] { return this.layerRegistry.getAllOverlayLayers(); }
@@ -1424,9 +1488,18 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
     if (date !== null && !(date instanceof Date && Number.isFinite(date.getTime()))) {
       throw new Error('treelet: setSunTime expects a valid Date or null');
     }
+    const hadTime = this.sunTime !== null;
     this.sunTime = date ? new Date(date.getTime()) : null;
-    if (this.sunTime) this.applySunTime();
-    else this.emitSun();
+    if (this.sunTime) {
+      this.applySunTime();
+    } else {
+      // Back to the manual sun where it was before the sun time
+      if (hadTime) {
+        this.displayController.restoreManualSun();
+        this.sceneManager.requestRender();
+      }
+      this.emitSun();
+    }
     return this;
   }
   getSunTime(): Date | null { return this.sunTime ? new Date(this.sunTime.getTime()) : null; }
@@ -1482,10 +1555,11 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
 
   start(): this {
     if (this.isRunning || this.destroyed) return this;
-    this.isRunning = true;
 
+    // Running only once the state is applied, so a failure here can be retried
     this.displayController.applyMaterialState();
     this.displayController.updateSunDirection();
+    this.isRunning = true;
 
     this.sceneManager.startRenderLoop();
     this.sceneManager.cameraController.enable();

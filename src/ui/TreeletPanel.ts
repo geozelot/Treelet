@@ -33,6 +33,8 @@ import type { AnalysisLayer } from '../layers/AnalysisLayer';
 import type { StackLayer } from '../layers/LayerRegistry';
 import type { ParamSpec, RGB } from '../analysis/types';
 import { listAnalyses, getAnalysis } from '../analysis/registry';
+import { runRegionAnalysis } from './regionAnalysis';
+import type { RegionAnalysisKind } from '../core/AnalysisController';
 import { BUILTIN_RAMPS, isRampName, rampGradientCss, rampNamesFor } from '../analysis/ramps';
 
 /** Settings-row id of the coat stack (the Overlay column's active row). */
@@ -93,6 +95,56 @@ function sunText(azimuth: number, altitude: number): string {
   return altitude < 0 ? `${Math.round(azimuth)}° · below the horizon` : `${Math.round(azimuth)}° · ${Math.round(altitude)}° up`;
 }
 
+const MINUTES_PER_DAY = 24 * 60;
+
+/** One button of a toggle group; the delegated click handler reads its data attributes. */
+interface ToggleOption {
+  action: string;
+  layerId: string;
+  param?: string;
+  value: string;
+  label: string;
+  active: boolean;
+  focusKey: string;
+  /** More data attributes (e.g. min / max a switch applies). */
+  data?: Record<string, string | number>;
+}
+
+function toggleButtons(options: readonly ToggleOption[]): string {
+  return options.map((o) => {
+    const param = o.param === undefined ? '' : ` data-param="${escapeHtml(o.param)}"`;
+    const data = Object.entries(o.data ?? {}).map(([k, v]) => ` data-${k}="${escapeHtml(String(v))}"`).join('');
+    return `<button type="button" class="toggle-btn${o.active ? ' active' : ''}" data-action="${o.action}" data-layer-id="${escapeHtml(o.layerId)}"${param}`
+      + ` data-value="${escapeHtml(o.value)}"${data} data-focus-key="${escapeHtml(o.focusKey)}" aria-pressed="${o.active}">${escapeHtml(o.label)}</button>`;
+  }).join('');
+}
+
+/** A labelled row of toggle buttons. */
+function toggleRow(label: string, options: readonly ToggleOption[]): string {
+  return `
+    <div class="toggle-row">
+      <span class="toggle-label">${escapeHtml(label)}</span>
+      <span class="toggle-group">${toggleButtons(options)}</span>
+    </div>`;
+}
+
+/** Key of a control's value label (actions keep a parameter named like a panel control apart). */
+function valueKey(id: string, action: string, param: string): string {
+  return `${id}:${action}:${param}`;
+}
+
+/** Slider bounds widened (on whole steps) to include `values`, so a value set from code shows. */
+function widen(min: number, max: number, values: readonly number[], step: number): [number, number] {
+  let lo = min;
+  let hi = max;
+  for (const v of values) {
+    if (!Number.isFinite(v)) continue;
+    if (v < lo) lo = Number((Math.floor(v / step) * step).toPrecision(12));
+    if (v > hi) hi = Number((Math.ceil(v / step) * step).toPrecision(12));
+  }
+  return [lo, hi];
+}
+
 function formatNumber(v: number, step: number): string {
   const decimals = step >= 1 ? 0 : Math.min(3, Math.ceil(-Math.log10(step)));
   return v.toFixed(decimals);
@@ -134,6 +186,17 @@ export class TreeletPanel extends BaseElement {
   /** Whether delegated listeners have been bound. */
   private delegated = false;
 
+  /** Set while the panel itself changes the map, so its own 'layerupdate' / 'sunchange' don't re-render it. */
+  private ownChange = false;
+
+  /** A pointer is down in the panel (a slider may be dragged): updates wait until it is up. */
+  private pointerHeld = false;
+
+  /** Layers whose values changed elsewhere, shown on the next frame. */
+  private readonly pendingUpdates = new Set<string>();
+  private updateFrame = 0;
+  private sunPending = false;
+
   /** Persistent panel container - only its innerHTML is replaced on re-render,
    *  avoiding repeated CSS re-parse from full shadow DOM innerHTML replacement. */
   private panelEl: HTMLDivElement | null = null;
@@ -173,6 +236,69 @@ export class TreeletPanel extends BaseElement {
 
   refresh(): void {
     if (this.map) this.render();
+  }
+
+  /**
+   * A layer's values changed ('layerupdate'): show them in its open coat
+   * settings on the next frame. Changes the panel made itself are already
+   * shown (and re-rendering would destroy the slider being dragged).
+   */
+  layerUpdated(id: string): void {
+    if (this.ownChange || !this.map) return;
+    this.pendingUpdates.add(id);
+    this.scheduleUpdate();
+  }
+
+  /** The sun moved ('sunchange'): show it in the light settings unless the panel moved it. */
+  sunChanged(): void {
+    if (this.ownChange || !this.map) return;
+    this.sunPending = true;
+    this.scheduleUpdate();
+  }
+
+  private scheduleUpdate(): void {
+    if (this.updateFrame || this.pointerHeld) return; // after the pointer is released
+    this.updateFrame = requestAnimationFrame(() => {
+      this.updateFrame = 0;
+      this.flushUpdates();
+    });
+  }
+
+  private flushUpdates(): void {
+    if (!this.map || !this.panelEl) return;
+    if (this.coatOpen !== null && this.pendingUpdates.has(this.coatOpen)) this.renderCoat(this.coatOpen);
+    this.pendingUpdates.clear();
+    if (this.sunPending) {
+      this.sunPending = false;
+      const block = this.panelEl.querySelector<HTMLElement>('.light-settings');
+      if (block) this.replaceHtml(block, this.renderLightSettings());
+    }
+  }
+
+  /** Run a change of the map made by the panel (its events then don't re-render the panel). */
+  private own(change: () => void): void {
+    this.ownChange = true;
+    try {
+      change();
+    } finally {
+      this.ownChange = false;
+    }
+  }
+
+  /** Re-render one coat's open settings in place. */
+  private renderCoat(id: string): void {
+    const block = this.panelEl?.querySelector<HTMLElement>(`.coat-settings[data-layer-id="${CSS.escape(id)}"]`);
+    const layer = this.map?.getLayerStack().find((l) => l.id === id);
+    if (block && layer) this.replaceHtml(block, this.renderCoatSettings(layer));
+    else this.render();
+  }
+
+  /** Replace an element's content, keeping keyboard focus on the same control. */
+  private replaceHtml(el: HTMLElement, html: string): void {
+    const focused = this.shadow.activeElement as HTMLElement | null;
+    const key = focused && el.contains(focused) ? focused.dataset.focusKey : undefined;
+    el.innerHTML = html;
+    if (key) el.querySelector<HTMLElement>(`[data-focus-key="${CSS.escape(key)}"]`)?.focus();
   }
 
   /** Close open settings and dropdowns (called when the layer row closes). */
@@ -254,11 +380,13 @@ export class TreeletPanel extends BaseElement {
       } else if (layerType === 'analysis') {
         const kind = entry.dataset.kind!;
         if (getAnalysis(kind)?.raster) {
-          this.runRegionAnalysis(kind);
+          runRegionAnalysis(map, kind as RegionAnalysisKind);
         } else {
+          // The map re-renders on 'layerchange' before the handle is known: open the new coat, then render
           const handle = map.addAnalysisLayer({ analysis: kind });
           this.settingsOpen = STACK_ID;
           this.coatOpen = handle.id;
+          this.render();
         }
       } else if (layerType === 'drape') {
         map.activateDrapeLayer(layerId);
@@ -301,37 +429,43 @@ export class TreeletPanel extends BaseElement {
       const id = control.dataset.layerId!;
       const key = control.dataset.param ?? '';
       const value = control.dataset.value ?? '';
+      const coatChange = (change: () => void) => {
+        this.own(change);
+        this.renderCoat(id);
+      };
       switch (control.dataset.action) {
         case 'blend':
-          map.setLayerBlendMode(id, value as BlendMode);
+          coatChange(() => map.setLayerBlendMode(id, value as BlendMode));
           break;
         case 'ramp':
-          map.setAnalysisRamp(id, value as never);
+          coatChange(() => map.setAnalysisRamp(id, value as never));
           break;
         case 'color':
-          map.setAnalysisParams(id, { [key]: [
+          coatChange(() => map.setAnalysisParams(id, { [key]: [
             parseFloat(control.dataset.r!), parseFloat(control.dataset.g!), parseFloat(control.dataset.b!),
-          ] });
+          ] }));
           break;
         case 'select':
-          map.setAnalysisParams(id, { [key]: value });
+          coatChange(() => map.setAnalysisParams(id, { [key]: value }));
           break;
         case 'toggle':
-          map.setAnalysisParams(id, { [key]: value === 'true' });
+          coatChange(() => map.setAnalysisParams(id, { [key]: value === 'true' }));
           break;
         case 'auto':
-          if (value === 'true') {
-            map.setAnalysisParams(id, { [key]: 'auto' });
-          } else {
-            const domain = map.getLegend(id)?.domain ?? [parseFloat(control.dataset.min!), parseFloat(control.dataset.max!)];
-            map.setAnalysisParams(id, { [key]: [domain[0], domain[1]] });
-          }
+          coatChange(() => {
+            if (value === 'true') {
+              map.setAnalysisParams(id, { [key]: 'auto' });
+            } else {
+              const domain = map.getLegend(id)?.domain ?? [parseFloat(control.dataset.min!), parseFloat(control.dataset.max!)];
+              map.setAnalysisParams(id, { [key]: [domain[0], domain[1]] });
+            }
+          });
           break;
         case 'optional':
           // An optional span: off = null, on = the pair the button carries
-          map.setAnalysisParams(id, {
+          coatChange(() => map.setAnalysisParams(id, {
             [key]: value === 'true' ? [parseFloat(control.dataset.min!), parseFloat(control.dataset.max!)] : null,
-          });
+          }));
           break;
         case 'wireframe':
           map.setWireframe(value !== 'solid');
@@ -339,41 +473,22 @@ export class TreeletPanel extends BaseElement {
           this.render();
           break;
         case 'suntime':
-          if (value === 'date') {
-            // Start from now, to the quarter hour
-            const now = new Date();
-            now.setMinutes(Math.round(now.getMinutes() / 15) * 15, 0, 0);
-            map.setSunTime(now);
-          } else {
-            map.setSunTime(null);
-          }
+          this.own(() => {
+            if (value === 'date') {
+              // Start from now, to the quarter hour
+              const now = new Date();
+              now.setMinutes(Math.round(now.getMinutes() / 15) * 15, 0, 0);
+              map.setSunTime(now);
+            } else {
+              map.setSunTime(null);
+            }
+          });
           this.render();
           break;
       }
       return;
     }
   };
-
-  /**
-   * Compute a region analysis over the view (a viewshed asks for the
-   * observer first). The result replaces an earlier coat of the same kind;
-   * the legend shows the progress and offers to cancel.
-   */
-  private runRegionAnalysis(kind: string): void {
-    const map = this.map!;
-    const previous = map.getLayerStack().find((l) => isAnalysis(l) && l.descriptor.id === kind)?.id;
-    const report = (err: unknown) => {
-      if ((err as { name?: string })?.name !== 'AbortError') console.warn(`treelet: ${kind} failed:`, (err as Error)?.message ?? err);
-    };
-    if (kind === 'viewshed') {
-      map.pickLocation({ prompt: 'Click the terrain to place the observer' }).then((pick) => {
-        if (pick) return map.computeAnalysis('viewshed', { observer: pick.lngLat, replaceLayer: previous });
-        return undefined;
-      }).catch(report);
-    } else {
-      map.computeAnalysis(kind as never, { replaceLayer: previous }).catch(report);
-    }
-  }
 
   /** Mouse over a selector (header or list) opens it; anywhere else closes it. */
   private handlePointerOver = (ev: Event): void => {
@@ -395,6 +510,18 @@ export class TreeletPanel extends BaseElement {
   /** Record the input kind; a tap outside the open dropdown closes it. */
   private handlePointerDown = (ev: Event): void => {
     const e = ev as PointerEvent;
+    // Value updates from elsewhere wait while a pointer is down (a slider may be dragged)
+    if (!this.pointerHeld && typeof window !== 'undefined') {
+      this.pointerHeld = true;
+      const release = () => {
+        window.removeEventListener('pointerup', release, true);
+        window.removeEventListener('pointercancel', release, true);
+        this.pointerHeld = false;
+        if (this.pendingUpdates.size > 0 || this.sunPending) this.scheduleUpdate();
+      };
+      window.addEventListener('pointerup', release, true);
+      window.addEventListener('pointercancel', release, true);
+    }
     this.lastInput = e.pointerType === 'touch' || e.pointerType === 'pen' ? 'touch' : 'mouse';
     if (this.pinnedCol === null) return;
     const sel = (e.target as HTMLElement).closest('.has-choices') as HTMLElement | null;
@@ -446,71 +573,88 @@ export class TreeletPanel extends BaseElement {
     (this.panelEl?.querySelector(selector) as HTMLElement | null)?.focus();
   }
 
-  /** Sliders: `data-layer-id` + `data-param` say what they set. */
+  /**
+   * Sliders and the day input: `data-action` says what they set (an analysis
+   * parameter, a span end, the coat opacity, exaggeration or the sun),
+   * `data-layer-id` and `data-param` which one. The panel updates the value
+   * labels itself; its own changes don't re-render it.
+   */
   private handleInput = (e: Event): void => {
     if (!this.map) return;
     const map = this.map;
     const target = e.target as HTMLInputElement;
     if (target.tagName !== 'INPUT') return;
     e.stopPropagation();
+    const action = target.dataset.action ?? '';
     const val = parseFloat(target.value);
     const id = target.dataset.layerId ?? '';
     const param = target.dataset.param ?? '';
-    const label = this.panelEl?.querySelector<HTMLElement>(`[data-value-for="${CSS.escape(`${id}:${param}`)}"]`);
+    const label = this.panelEl?.querySelector<HTMLElement>(`[data-value-for="${CSS.escape(valueKey(id, action, param))}"]`);
+    const step = parseFloat(target.step) || 1;
+    const unit = target.dataset.unit ?? '';
 
-    if (param === 'sunday' || param === 'sunhour') {
-      const current = map.getSunTime() ?? new Date();
-      const next = new Date(current.getTime());
-      if (param === 'sunday') {
-        const [y, m, d] = target.value.split('-').map(Number);
-        if (!(y && m && d)) return;
-        next.setFullYear(y, m - 1, d);
-      } else {
-        const minutes = Math.round(val * 60);
-        next.setHours(Math.floor(minutes / 60), minutes % 60, 0, 0);
-        if (label) label.textContent = formatHour(val);
+    this.own(() => {
+      switch (action) {
+        case 'sunday':
+        case 'sunhour': {
+          const current = map.getSunTime() ?? new Date();
+          const next = new Date(current.getTime());
+          if (action === 'sunday') {
+            const [y, m, d] = target.value.split('-').map(Number);
+            if (!(y && m && d)) return;
+            next.setFullYear(y, m - 1, d);
+          } else {
+            // Within the day shown (the slider ends at 23:45)
+            const minutes = Math.max(0, Math.min(MINUTES_PER_DAY - 1, Math.round(val * 60)));
+            next.setHours(Math.floor(minutes / 60), minutes % 60, 0, 0);
+            if (label) label.textContent = formatHour(minutes / 60);
+          }
+          map.setSunTime(next);
+          const pos = this.panelEl?.querySelector<HTMLElement>('[data-value-for="sun:position"]');
+          if (pos) pos.textContent = sunText(map.getSunAzimuth(), map.getSunAltitude());
+          return;
+        }
+        case 'exaggeration':
+          if (label) label.textContent = `${val.toFixed(1)}x`;
+          map.setExaggeration(val);
+          return;
+        case 'azimuth':
+          if (label) label.textContent = `${Math.round(val)}°`;
+          map.setSunAzimuth(val);
+          return;
+        case 'altitude':
+          if (label) label.textContent = `${Math.round(val)}°`;
+          map.setSunAltitude(val);
+          return;
+        case 'opacity':
+          if (label) label.textContent = `${Math.round(val * 100)}%`;
+          map.setLayerOpacity(id, val);
+          return;
+        case 'span': {
+          // One end of a [low, high] pair: read both sliders
+          const other = this.panelEl?.querySelector<HTMLInputElement>(
+            `input[data-action="span"][data-layer-id="${CSS.escape(id)}"][data-param="${CSS.escape(param)}"][data-span="${target.dataset.span === '0' ? '1' : '0'}"]`,
+          );
+          const a = target.dataset.span === '0' ? val : parseFloat(other?.value ?? '0');
+          const b = target.dataset.span === '1' ? val : parseFloat(other?.value ?? '0');
+          if (target.dataset.wrap !== undefined) {
+            // A circular range runs clockwise from a to b (a > b passes through north)
+            if (label) label.textContent = `${formatNumber(a, step)}${unit} → ${formatNumber(b, step)}${unit}`;
+            map.setAnalysisParams(id, { [param]: [a, b] });
+          } else {
+            const lo = Math.min(a, b);
+            const hi = Math.max(a, b, lo + step);
+            if (label) label.textContent = `${formatNumber(lo, step)}–${formatNumber(hi, step)}${unit}`;
+            map.setAnalysisParams(id, { [param]: [lo, hi] });
+          }
+          return;
+        }
+        case 'param':
+          if (label) label.textContent = `${formatNumber(val, step)}${unit}`;
+          map.setAnalysisParams(id, { [param]: val });
+          return;
       }
-      map.setSunTime(next);
-      const pos = this.panelEl?.querySelector<HTMLElement>('[data-value-for="sun:position"]');
-      if (pos) pos.textContent = sunText(map.getSunAzimuth(), map.getSunAltitude());
-      return;
-    }
-    if (param === 'exaggeration') {
-      if (label) label.textContent = `${val.toFixed(1)}x`;
-      map.setExaggeration(val);
-    } else if (param === 'azimuth') {
-      if (label) label.textContent = `${Math.round(val)}°`;
-      map.setSunAzimuth(val);
-    } else if (param === 'altitude') {
-      if (label) label.textContent = `${Math.round(val)}°`;
-      map.setSunAltitude(val);
-    } else if (param === 'opacity') {
-      if (label) label.textContent = `${Math.round(val * 100)}%`;
-      map.setLayerOpacity(id, val);
-    } else if (target.dataset.span !== undefined) {
-      // One end of a [low, high] pair: read both sliders
-      const other = this.panelEl?.querySelector<HTMLInputElement>(
-        `input[data-layer-id="${CSS.escape(id)}"][data-param="${CSS.escape(param)}"][data-span="${target.dataset.span === '0' ? '1' : '0'}"]`,
-      );
-      const step = parseFloat(target.step) || 1;
-      const a = target.dataset.span === '0' ? val : parseFloat(other?.value ?? '0');
-      const b = target.dataset.span === '1' ? val : parseFloat(other?.value ?? '0');
-      const unit = target.dataset.unit ?? '';
-      if (target.dataset.wrap !== undefined) {
-        // A circular range runs clockwise from a to b (a > b passes through north)
-        if (label) label.textContent = `${formatNumber(a, step)}${unit} → ${formatNumber(b, step)}${unit}`;
-        map.setAnalysisParams(id, { [param]: [a, b] });
-      } else {
-        const lo = Math.min(a, b);
-        const hi = Math.max(a, b, lo + step);
-        if (label) label.textContent = `${formatNumber(lo, step)}–${formatNumber(hi, step)}${unit}`;
-        map.setAnalysisParams(id, { [param]: [lo, hi] });
-      }
-    } else if (param) {
-      const step = parseFloat(target.step) || 1;
-      if (label) label.textContent = `${formatNumber(val, step)}${target.dataset.unit ?? ''}`;
-      map.setAnalysisParams(id, { [param]: val });
-    }
+    });
   };
 
   // =========================================================================
@@ -611,8 +755,8 @@ export class TreeletPanel extends BaseElement {
           <span class="gear-icon" aria-hidden="true">${GEAR_SVG}</span>
         </button>
         <div class="${this.settingsClass(isOpen)}" data-layer-id="${escapeHtml(layer.id)}">
-          ${this.renderSlider(layer.id, 'exaggeration', 'Exaggeration', exag, 0.5, 5, 0.1, `${exag.toFixed(1)}x`)}
-          ${this.renderLightSettings()}
+          ${this.renderSlider(layer.id, 'exaggeration', 'exaggeration', 'Exaggeration', exag, 0.5, 5, 0.1, `${exag.toFixed(1)}x`)}
+          <div class="light-settings">${this.renderLightSettings()}</div>
           ${this.renderMeshSettings()}
         </div>
       </div>
@@ -673,14 +817,11 @@ export class TreeletPanel extends BaseElement {
     const opacity = layer.display.opacity;
     const blend = layer.display.blendMode;
     const parts: string[] = [
-      this.renderSlider(id, 'opacity', 'Opacity', opacity, 0, 1, 0.05, `${Math.round(opacity * 100)}%`),
+      this.renderSlider(id, 'opacity', 'opacity', 'Opacity', opacity, 0, 1, 0.05, `${Math.round(opacity * 100)}%`),
       `<div class="setting-label">Blend</div>
-      <div class="toggle-row wrap">
-        ${BLEND_MODES.map((m) =>
-          `<button type="button" class="toggle-btn${blend === m.id ? ' active' : ''}" data-action="blend" data-layer-id="${escapeHtml(id)}"
-            data-value="${m.id}" data-focus-key="blend-${escapeHtml(id)}-${m.id}" aria-pressed="${blend === m.id}">${m.label}</button>`,
-        ).join('')}
-      </div>`,
+      <div class="toggle-row wrap">${toggleButtons(BLEND_MODES.map((m) => ({
+        action: 'blend', layerId: id, value: m.id, label: m.label, active: blend === m.id, focusKey: `blend-${id}-${m.id}`,
+      })))}</div>`,
     ];
     if (isAnalysis(layer)) {
       for (const spec of layer.descriptor.params) parts.push(this.renderParam(layer, spec));
@@ -689,18 +830,22 @@ export class TreeletPanel extends BaseElement {
     return parts.join('');
   }
 
-  /** A labelled slider; `param` and the layer id ride on the input for the delegated handler. */
+  /**
+   * A labelled slider. `action` (what it sets), `param` and the layer id ride
+   * on the input for the delegated handler; the focus key keeps keyboard
+   * focus on it across re-renders.
+   */
   private renderSlider(
-    id: string, param: string, label: string, value: number, min: number, max: number, step: number, text: string, unit = '',
+    id: string, action: string, param: string, label: string, value: number, min: number, max: number, step: number, text: string, unit = '',
   ): string {
-    const key = escapeHtml(`${id}:${param}`);
+    const key = escapeHtml(valueKey(id, action, param));
     return `
       <div class="control-row">
         <span class="control-label">${escapeHtml(label)}</span>
         <span class="control-value" data-value-for="${key}">${escapeHtml(text)}</span>
       </div>
-      <input type="range" data-layer-id="${escapeHtml(id)}" data-param="${escapeHtml(param)}" data-unit="${escapeHtml(unit)}"
-        min="${min}" max="${max}" step="${step}" value="${value}" aria-label="${escapeHtml(label)}">`;
+      <input type="range" data-action="${action}" data-layer-id="${escapeHtml(id)}" data-param="${escapeHtml(param)}" data-unit="${escapeHtml(unit)}"
+        data-focus-key="${key}" min="${min}" max="${max}" step="${step}" value="${value}" aria-label="${escapeHtml(label)}">`;
   }
 
   /** One parameter control from the analysis' schema. */
@@ -714,12 +859,14 @@ export class TreeletPanel extends BaseElement {
         const v = typeof value === 'number' ? value : spec.min;
         let [min, max] = [spec.min, spec.max];
         if (spec.bounds === 'elevation') {
-          // The slider spans what is on screen (the value may lie outside it)
+          // The slider spans what is on screen
           const [lo, hi] = this.map!.getVisibleElevationRange();
-          min = Math.max(spec.min, Math.floor(Math.min(lo, v) / spec.step) * spec.step);
-          max = Math.min(spec.max, Math.ceil(Math.max(hi, v, min + spec.step) / spec.step) * spec.step);
+          min = Math.max(spec.min, Math.floor(lo / spec.step) * spec.step);
+          max = Math.min(spec.max, Math.ceil(Math.max(hi, min + spec.step) / spec.step) * spec.step);
         }
-        return this.renderSlider(id, spec.key, spec.label, v, min, max, spec.step, `${formatNumber(v, spec.step)}${unit}`, unit);
+        // A value set from code may lie outside the slider's range: widen it to show the value
+        [min, max] = widen(min, max, [v], spec.step);
+        return this.renderSlider(id, 'param', spec.key, spec.label, v, min, max, spec.step, `${formatNumber(v, spec.step)}${unit}`, unit);
       }
       case 'span': {
         const auto = value === 'auto';
@@ -728,36 +875,26 @@ export class TreeletPanel extends BaseElement {
         if (spec.optional) {
           // Default sector when switched on: through north for bearings, else the full range
           const on: [number, number] = spec.wrap ? [315, 45] : [spec.min, spec.max];
-          parts.push(`
-            <div class="toggle-row">
-              <span class="toggle-label">${escapeHtml(spec.label)}</span>
-              <span class="toggle-group">
-                <button type="button" class="toggle-btn${off ? ' active' : ''}" data-action="optional" data-layer-id="${eid}" data-param="${spec.key}"
-                  data-value="false" data-focus-key="off-${eid}-${spec.key}" aria-pressed="${off}">All</button>
-                <button type="button" class="toggle-btn${off ? '' : ' active'}" data-action="optional" data-layer-id="${eid}" data-param="${spec.key}"
-                  data-value="true" data-min="${on[0]}" data-max="${on[1]}" data-focus-key="on-${eid}-${spec.key}" aria-pressed="${!off}">${spec.wrap ? 'Sector' : 'Range'}</button>
-              </span>
-            </div>`);
+          parts.push(toggleRow(spec.label, [
+            { action: 'optional', layerId: id, param: spec.key, value: 'false', label: 'All', active: off, focusKey: `off-${id}-${spec.key}` },
+            { action: 'optional', layerId: id, param: spec.key, value: 'true', label: spec.wrap ? 'Sector' : 'Range', active: !off,
+              focusKey: `on-${id}-${spec.key}`, data: { min: on[0], max: on[1] } },
+          ]));
           if (off) return parts.join('');
         }
         if (spec.auto) {
-          parts.push(`
-            <div class="toggle-row">
-              <span class="toggle-label">${escapeHtml(spec.label)}</span>
-              <span class="toggle-group">
-                <button type="button" class="toggle-btn${auto ? ' active' : ''}" data-action="auto" data-layer-id="${eid}" data-param="${spec.key}"
-                  data-value="true" data-focus-key="auto-${eid}-${spec.key}" aria-pressed="${auto}">Auto</button>
-                <button type="button" class="toggle-btn${auto ? '' : ' active'}" data-action="auto" data-layer-id="${eid}" data-param="${spec.key}"
-                  data-value="false" data-min="${spec.min}" data-max="${spec.max}" data-focus-key="manual-${eid}-${spec.key}" aria-pressed="${!auto}">Manual</button>
-              </span>
-            </div>`);
+          parts.push(toggleRow(spec.label, [
+            { action: 'auto', layerId: id, param: spec.key, value: 'true', label: 'Auto', active: auto, focusKey: `auto-${id}-${spec.key}` },
+            { action: 'auto', layerId: id, param: spec.key, value: 'false', label: 'Manual', active: !auto,
+              focusKey: `manual-${id}-${spec.key}`, data: { min: spec.min, max: spec.max } },
+          ]));
         }
         if (auto) {
           const d = this.map!.getLegend(id)?.domain;
           if (d) parts.push(`<div class="control-row"><span class="control-label">Visible</span><span class="control-value">${formatNumber(d[0], spec.step)}–${formatNumber(d[1], spec.step)}${unit}</span></div>`);
         } else {
           const [lo, hi] = Array.isArray(value) ? value as [number, number] : [spec.min, spec.max];
-          const key = escapeHtml(`${id}:${spec.key}`);
+          const key = escapeHtml(valueKey(id, 'span', spec.key));
           const wrap = spec.wrap ? ' data-wrap=""' : '';
           let [smin, smax, step] = [spec.min, spec.max, spec.step];
           if (spec.bounds === 'data') {
@@ -768,6 +905,8 @@ export class TreeletPanel extends BaseElement {
             step = niceStep((b - a) / 200);
             smin = Number((Math.floor(a / step + 1e-9) * step).toPrecision(12));
             smax = Number((Math.ceil(b / step - 1e-9) * step).toPrecision(12));
+          } else if (!spec.wrap) {
+            [smin, smax] = widen(smin, smax, [lo, hi], step);
           }
           const text = spec.wrap
             ? `${formatNumber(lo, step)}${unit} → ${formatNumber(hi, step)}${unit}`
@@ -778,26 +917,18 @@ export class TreeletPanel extends BaseElement {
               <span class="control-label">${spec.auto || spec.optional ? (spec.wrap ? 'From → to' : 'Range') : escapeHtml(spec.label)}</span>
               <span class="control-value" data-value-for="${key}">${text}</span>
             </div>
-            <input type="range" data-layer-id="${eid}" data-param="${spec.key}" data-span="0" data-unit="${escapeHtml(unit)}"${wrap}
-              min="${smin}" max="${smax}" step="${step}" value="${lo}" aria-label="${escapeHtml(spec.label)} ${spec.wrap ? 'from' : 'low'}">
-            <input type="range" data-layer-id="${eid}" data-param="${spec.key}" data-span="1" data-unit="${escapeHtml(unit)}"${wrap}
-              min="${smin}" max="${smax}" step="${step}" value="${hi}" aria-label="${escapeHtml(spec.label)} ${spec.wrap ? 'to' : 'high'}">`);
+            <input type="range" data-action="span" data-layer-id="${eid}" data-param="${spec.key}" data-span="0" data-unit="${escapeHtml(unit)}"${wrap}
+              data-focus-key="${key}:0" min="${smin}" max="${smax}" step="${step}" value="${lo}" aria-label="${escapeHtml(spec.label)} ${spec.wrap ? 'from' : 'low'}">
+            <input type="range" data-action="span" data-layer-id="${eid}" data-param="${spec.key}" data-span="1" data-unit="${escapeHtml(unit)}"${wrap}
+              data-focus-key="${key}:1" min="${smin}" max="${smax}" step="${step}" value="${hi}" aria-label="${escapeHtml(spec.label)} ${spec.wrap ? 'to' : 'high'}">`);
         }
         return parts.join('');
       }
       case 'select':
-        return `
-          <div class="toggle-row">
-            <span class="toggle-label">${escapeHtml(spec.label)}</span>
-            <span class="toggle-group">
-              ${spec.options.map((o) => {
-                const active = String(value) === o.value;
-                return `<button type="button" class="toggle-btn${active ? ' active' : ''}" data-action="select" data-layer-id="${eid}"
-                  data-param="${spec.key}" data-value="${escapeHtml(o.value)}" data-focus-key="sel-${eid}-${spec.key}-${escapeHtml(o.value)}"
-                  aria-pressed="${active}">${escapeHtml(o.label)}</button>`;
-              }).join('')}
-            </span>
-          </div>`;
+        return toggleRow(spec.label, spec.options.map((o) => ({
+          action: 'select', layerId: id, param: spec.key, value: o.value, label: o.label,
+          active: String(value) === o.value, focusKey: `sel-${id}-${spec.key}-${o.value}`,
+        })));
       case 'color': {
         const current = Array.isArray(value) ? value as RGB : [0, 0, 0] as RGB;
         const presets = spec.presets ?? [];
@@ -814,16 +945,10 @@ export class TreeletPanel extends BaseElement {
       }
       case 'boolean': {
         const on = value === true;
-        return `
-          <div class="toggle-row">
-            <span class="toggle-label">${escapeHtml(spec.label)}</span>
-            <span class="toggle-group">
-              <button type="button" class="toggle-btn${on ? ' active' : ''}" data-action="toggle" data-layer-id="${eid}" data-param="${spec.key}"
-                data-value="true" data-focus-key="on-${eid}-${spec.key}" aria-pressed="${on}">On</button>
-              <button type="button" class="toggle-btn${on ? '' : ' active'}" data-action="toggle" data-layer-id="${eid}" data-param="${spec.key}"
-                data-value="false" data-focus-key="off-${eid}-${spec.key}" aria-pressed="${!on}">Off</button>
-            </span>
-          </div>`;
+        return toggleRow(spec.label, [
+          { action: 'toggle', layerId: id, param: spec.key, value: 'true', label: 'On', active: on, focusKey: `on-${id}-${spec.key}` },
+          { action: 'toggle', layerId: id, param: spec.key, value: 'false', label: 'Off', active: !on, focusKey: `off-${id}-${spec.key}` },
+        ]);
       }
     }
   }
@@ -907,21 +1032,15 @@ export class TreeletPanel extends BaseElement {
     const altitude = map.getSunAltitude();
     const time = map.getSunTime?.() ?? null;
     const mode = time ? 'date' : 'manual';
-    const toggle = `
-      <div class="toggle-row">
-        <span class="toggle-label">Sun</span>
-        <span class="toggle-group">
-          ${([['manual', 'Manual'], ['date', 'Date']] as const).map(([v, label]) =>
-            `<button type="button" class="toggle-btn${mode === v ? ' active' : ''}" data-action="suntime" data-layer-id="sun"
-              data-value="${v}" data-focus-key="sun-${v}" aria-pressed="${mode === v}">${label}</button>`).join('')}
-        </span>
-      </div>`;
+    const toggle = toggleRow('Sun', ([['manual', 'Manual'], ['date', 'Date']] as const).map(([v, label]) => ({
+      action: 'suntime', layerId: 'sun', value: v, label, active: mode === v, focusKey: `sun-${v}`,
+    })));
     if (!time) {
       return `
         <div class="setting-label">Light Direction</div>
         ${toggle}
-        ${this.renderSlider('sun', 'azimuth', 'Direction', azimuth, 0, 360, 1, `${Math.round(azimuth)}°`)}
-        ${this.renderSlider('sun', 'altitude', 'Altitude', altitude, 5, 90, 1, `${Math.round(altitude)}°`)}
+        ${this.renderSlider('sun', 'azimuth', 'azimuth', 'Direction', azimuth, 0, 360, 1, `${Math.round(azimuth)}°`)}
+        ${this.renderSlider('sun', 'altitude', 'altitude', 'Altitude', altitude, 5, 90, 1, `${Math.round(altitude)}°`)}
       `;
     }
     // Date mode: the sun stands where it does at that local time over the map center
@@ -933,9 +1052,9 @@ export class TreeletPanel extends BaseElement {
       ${toggle}
       <div class="control-row">
         <span class="control-label">Day</span>
-        <input type="date" class="date-input" data-layer-id="sun" data-param="sunday" value="${day}" aria-label="Day">
+        <input type="date" class="date-input" data-action="sunday" data-layer-id="sun" data-param="sunday" data-focus-key="sun:day" value="${day}" aria-label="Day">
       </div>
-      ${this.renderSlider('sun', 'sunhour', 'Time', hour, 0, 24, 0.25, formatHour(hour))}
+      ${this.renderSlider('sun', 'sunhour', 'sunhour', 'Time', hour, 0, 24 - 0.25, 0.25, formatHour(hour))}
       <div class="control-row">
         <span class="control-label">Sun</span>
         <span class="control-value" data-value-for="sun:position">${sunText(azimuth, altitude)}</span>
@@ -948,16 +1067,8 @@ export class TreeletPanel extends BaseElement {
     const white = this.map!.getWireframeWhite();
     const mode = !wire ? 'solid' : white ? 'white' : 'wire';
     const options: Array<[string, string]> = [['solid', 'Solid'], ['wire', 'Wireframe'], ['white', 'White']];
-    return `
-      <div class="toggle-row">
-        <span class="toggle-label">Mesh</span>
-        <span class="toggle-group">
-          ${options.map(([v, label]) =>
-            `<button type="button" class="toggle-btn${mode === v ? ' active' : ''}" data-action="wireframe" data-layer-id="mesh"
-              data-value="${v}" data-focus-key="mesh-${v}" aria-pressed="${mode === v}">${label}</button>`,
-          ).join('')}
-        </span>
-      </div>
-    `;
+    return toggleRow('Mesh', options.map(([v, label]) => ({
+      action: 'wireframe', layerId: 'mesh', value: v, label, active: mode === v, focusKey: `mesh-${v}`,
+    })));
   }
 }

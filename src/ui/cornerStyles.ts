@@ -1,9 +1,12 @@
 // ============================================================================
 // treelet.js - Shared styles of the small floating corner elements
-// (<treelet-legend>, <treelet-readout>): tokens, the card surface and the
-// glass variant. Positioning is the corner container's job (Treelet stacks
-// the elements that share a corner).
+// (<treelet-legend>, <treelet-readout>, <treelet-toolbar>, <treelet-profile>):
+// the shared theme tokens, the card surface, its buttons and the glass
+// variant. Positioning is the corner container's job (Treelet stacks the
+// elements that share a corner).
 // ============================================================================
+
+import { themeTokens, glassTokens, lightShadowRule } from './themeTokens';
 
 export const cornerCardStyles = /* css */ `
   :host {
@@ -13,27 +16,24 @@ export const cornerCardStyles = /* css */ `
     font-size: 11px;
     line-height: 1.35;
     pointer-events: none;
-    color-scheme: light dark;
-
-    --bg: light-dark(#fafafa, #181818);
-    --surface-bg: var(--bg);
-    --surface-filter: none;
-    --border: light-dark(rgba(0, 0, 0, 0.10), rgba(255, 255, 255, 0.08));
-    --shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
-    --text: light-dark(#333333, #e8e8e8);
-    --text-dim: light-dark(rgba(0, 0, 0, 0.55), rgba(255, 255, 255, 0.55));
-    --radius: 10px;
+    ${themeTokens}
     color: var(--text);
   }
 
-  @media (prefers-color-scheme: light) {
-    :host { --shadow: 0 4px 16px rgba(0, 0, 0, 0.10); }
-  }
+  ${lightShadowRule}
 
   :host([glass]) {
-    --surface-bg: light-dark(rgba(250, 250, 250, 0.72), rgba(24, 24, 24, 0.66));
-    --surface-filter: blur(14px) saturate(1.5);
+    ${glassTokens}
   }
+
+  /* Small text buttons in cards (toolbar actions, profile export) */
+  .card-btn {
+    font: inherit; font-size: 11px; line-height: 1.35;
+    border: 0; border-radius: 6px; padding: 3px 8px; cursor: pointer;
+    color: var(--text); background: var(--border);
+  }
+  .card-btn:hover { color: var(--text); filter: brightness(1.08); }
+  .card-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
   :host([hidden]) { display: none; }
 

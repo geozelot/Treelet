@@ -4,7 +4,8 @@
 // Dependency-free SVG for an elevation profile: the terrain as a filled
 // area, an optional sight line and obstruction, axes with round ticks, and
 // a hover marker. The same markup is shown in the panel (colors as CSS
-// variables) and exported as PNG (colors resolved).
+// variables, the samples decimated to the pixel columns) and exported as PNG
+// (colors resolved, every sample).
 // ============================================================================
 
 import type { LngLat } from '../core/types';
@@ -107,15 +108,65 @@ export function nearestIndex(points: readonly ProfilePoint[], distance: number):
   return lo;
 }
 
+/**
+ * The samples worth drawing at the chart's scale: per pixel column the
+ * lowest and the highest (in their order along the path), so peaks and pits
+ * survive; the first and the last sample; and a sample without data (once)
+ * wherever the line breaks. Profiles with at most about two samples per
+ * column are returned as they are.
+ */
+export function decimateProfile(points: readonly ProfilePoint[], scales: ChartScales): readonly ProfilePoint[] {
+  const n = points.length;
+  const columns = Math.max(1, Math.ceil(scales.x(scales.dMax) - scales.x(0)));
+  if (n <= 2 * columns + 2) return points;
+  const out: ProfilePoint[] = [points[0]];
+  let column = Number.NaN;
+  let lo = -1;
+  let hi = -1;
+  const flush = () => {
+    if (lo < 0) return;
+    out.push(points[Math.min(lo, hi)]);
+    if (hi !== lo) out.push(points[Math.max(lo, hi)]);
+    lo = hi = -1;
+  };
+  for (let i = 1; i < n - 1; i++) {
+    const p = points[i];
+    const c = Math.floor(scales.x(p.distance));
+    if (c !== column) {
+      flush();
+      column = c;
+    }
+    if (p.elevation === null) {
+      flush();
+      if (out[out.length - 1].elevation !== null) out.push(p);
+      continue;
+    }
+    if (lo < 0 || p.elevation < points[lo].elevation!) lo = i;
+    if (hi < 0 || p.elevation > points[hi].elevation!) hi = i;
+  }
+  flush();
+  out.push(points[n - 1]);
+  return out;
+}
+
 /** The chart's SVG markup. */
 export function chartSvg(
   points: readonly ProfilePoint[],
   width: number,
   height: number,
   palette: ChartPalette,
-  options: { obstructionIndex?: number; hoverIndex?: number; fontFamily?: string } = {},
+  options: {
+    obstructionIndex?: number;
+    hoverIndex?: number;
+    fontFamily?: string;
+    /** Draw the terrain and sight line from decimateProfile() (for the screen). */
+    decimate?: boolean;
+    /** Scales for these points and size, when already known. */
+    scales?: ChartScales;
+  } = {},
 ): string {
-  const s = chartScales(points, width, height);
+  const s = options.scales ?? chartScales(points, width, height);
+  const drawn = options.decimate ? decimateProfile(points, s) : points;
   const font = options.fontFamily ?? 'system-ui, -apple-system, sans-serif';
   const parts: string[] = [];
   parts.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" font-family="${escapeHtml(font)}" font-size="10">`);
@@ -147,7 +198,7 @@ export function chartSvg(
     }
     run = [];
   };
-  for (const p of points) {
+  for (const p of drawn) {
     if (p.elevation === null) { flush(); continue; }
     run.push(`${s.x(p.distance).toFixed(1)},${s.y(p.elevation).toFixed(1)}`);
   }
@@ -157,8 +208,8 @@ export function chartSvg(
 
   // Sight line
   if (points.some((p) => p.sight !== undefined)) {
-    const blocked = options.obstructionIndex !== undefined && options.obstructionIndex >= 0;
-    const d = points.filter((p) => p.sight !== undefined).map((p) => `${s.x(p.distance).toFixed(1)},${s.y(p.sight!).toFixed(1)}`).join('L');
+    const blocked = options.obstructionIndex !== undefined && options.obstructionIndex >= 0 && options.obstructionIndex < points.length;
+    const d = drawn.filter((p) => p.sight !== undefined).map((p) => `${s.x(p.distance).toFixed(1)},${s.y(p.sight!).toFixed(1)}`).join('L');
     parts.push(`<path d="M${d}" fill="none" stroke="${blocked ? palette.blocked : palette.sight}" stroke-width="1.4" stroke-dasharray="5 3"/>`);
     if (blocked) {
       const o = points[options.obstructionIndex!];

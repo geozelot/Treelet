@@ -17,7 +17,7 @@ vec4 analysis_elevation(Surface s, vec4 p0, vec4 p1) {
   return vec4(t, 0.0, 0.0, 1.0);
 }`,
   params: [
-    { key: 'range', label: 'Range', type: 'span', min: -500, max: 9000, step: 10, unit: 'm', auto: true },
+    { key: 'range', label: 'Range', type: 'span', min: -500, max: 9000, step: 10, unit: 'm', auto: true, limits: [-Infinity, Infinity] },
   ],
   defaults: { range: [0, 4000] },
   ramp: 'hypsometric',

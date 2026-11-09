@@ -12,6 +12,7 @@ import {
   buildMipChain,
   hashString,
   resampleElevation,
+  robustRange,
 } from '../../src/workers/raster';
 
 /** Source raster where value = column index (a horizontal ramp). */
@@ -108,5 +109,31 @@ describe('hashString', () => {
   it('is stable and distributes different URLs', () => {
     expect(hashString('a/1/2/3.png')).toBe(hashString('a/1/2/3.png'));
     expect(hashString('a/1/2/3.png')).not.toBe(hashString('a/1/2/4.png'));
+  });
+});
+
+describe('robust tile range', () => {
+  it('a few spikes in the source data do not set the range; real relief does', () => {
+    const S = 256;
+    const src = new Float32Array(S * S);
+    for (let j = 0; j < S; j++) for (let i = 0; i < S; i++) src[j * S + i] = 600 + i * 8; // 600 … 2640 m
+    // Bad source pixels (as found in the AWS Terrarium tiles)
+    src[93 * S + 99] = 5596;
+    src[94 * S + 99] = -6946;
+    src[15 * S + 111] = -1329;
+    const out = new Float32Array(S * S);
+    const r = resampleElevation(src, S, S, S, null, out);
+    // The raw range has the (resampled) spikes
+    expect(r.min).toBeLessThan(-1000);
+    expect(r.max).toBeGreaterThan(3000);
+    expect(r.low).toBeGreaterThan(590);
+    expect(r.low).toBeLessThan(620);
+    expect(r.high).toBeGreaterThan(2620);
+    expect(r.high).toBeLessThan(2650);
+  });
+
+  it('keeps the full range when there is nothing to trim', () => {
+    const data = Float32Array.from([1, 2, 3]);
+    expect(robustRange(data, 1, 3, 3)).toEqual([1, 3]);
   });
 });

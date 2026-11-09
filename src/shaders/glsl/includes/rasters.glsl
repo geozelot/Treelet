@@ -6,25 +6,12 @@
 // An analysis that draws a raster calls coatRaster(): the coat loop sets
 // gCoatRaster to the slot of the coat being evaluated.
 
-#define RASTER_NODATA_THRESHOLD -1.0e37
-
 int gCoatRaster = -1;
 
-// Branches select the sampler (sampler arrays need constant indices); the
+// rasterTexel(slot, p) and rasterColor(slot, uv) are generated per slot:
+// branches select the sampler (sampler arrays need constant indices); the
 // slot comes from a uniform, so control flow stays uniform.
-float rasterTexel(int slot, ivec2 p) {
-  if (slot == 0) return texelFetch(uRaster0, p, 0).r;
-  if (slot == 1) return texelFetch(uRaster1, p, 0).r;
-  if (slot == 2) return texelFetch(uRaster2, p, 0).r;
-  return texelFetch(uRaster3, p, 0).r;
-}
-
-vec4 rasterColor(int slot, vec2 uv) {
-  if (slot == 0) return textureLod(uRaster0, uv, 0.0);
-  if (slot == 1) return textureLod(uRaster1, uv, 0.0);
-  if (slot == 2) return textureLod(uRaster2, uv, 0.0);
-  return textureLod(uRaster3, uv, 0.0);
-}
+// @RASTER_ACCESSORS
 
 // Value rasters: (value, 0, 0, 1) where there is data, vec4(0) outside the
 // raster or on nodata. Color rasters: their RGBA.
@@ -34,7 +21,11 @@ vec4 sampleRaster(int slot) {
   vec4 info = uRasterInfo[slot];
   vec2 p = vec2((vWorldLocal.x - xf.x) * xf.z, (xf.y - vWorldLocal.y) * xf.w);
   if (p.x < 0.0 || p.y < 0.0 || p.x > info.x || p.y > info.y) return vec4(0.0);
-  if (info.z > 0.5) return rasterColor(slot, p / info.xy);
+  if (info.z > 0.5) {
+    // Premultiplied texels, filtered; back to straight alpha
+    vec4 c = rasterColor(slot, p / info.xy);
+    return c.a > 0.0 ? vec4(c.rgb / c.a, c.a) : vec4(0.0);
+  }
 
   // Bilinear between cell centers, ignoring nodata taps
   vec2 t = p - 0.5;

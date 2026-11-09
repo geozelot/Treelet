@@ -32,8 +32,8 @@ export class OverlayLayer implements Layer {
   /** The features drawn. */
   data: GeoJSON | null;
   style: OverlayStyleSpec | undefined;
-  /** Polygon fills are rasterized into a coat. */
-  readonly fills: boolean;
+  /** Polygon fills are rasterized into a coat (off once that coat is removed). */
+  fills: boolean;
 
   constructor(options: OverlayLayerOptions) {
     this.id = `overlay-${nextOverlayLayerId++}`;

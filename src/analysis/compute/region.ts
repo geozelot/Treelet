@@ -7,6 +7,7 @@
 // runs in the worker with the decode cache and in tests with mocks.
 // ============================================================================
 
+import { isAbortError } from '../../core/abort';
 import type { RegionWindow } from '../region';
 import { abortError } from './drive';
 
@@ -43,9 +44,6 @@ export interface LoadedTiles {
   failed: number;
 }
 
-function isAbort(err: unknown): boolean {
-  return typeof err === 'object' && err !== null && (err as { name?: string }).name === 'AbortError';
-}
 
 function wait(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -84,7 +82,7 @@ export async function loadRegionTiles(
           if (!tile) missing++;
           break;
         } catch (err) {
-          if (isAbort(err) || signal?.aborted) throw abortError();
+          if (isAbortError(err) || signal?.aborted) throw abortError();
           lastError = err;
           if (attempt >= retries) { failed++; break; }
           await wait(delay * 2 ** attempt, signal);

@@ -160,6 +160,9 @@ export class TreeletCompass extends BaseElement {
     this.bindEvents();
 
     map.on('layerchange', () => this.panel?.refresh());
+    // Value changes (a slider elsewhere, an animation) and the sun patch the panel in place
+    map.on('layerupdate', ({ id }) => this.panel?.layerUpdated(id));
+    map.on('sunchange', () => this.panel?.sunChanged());
   }
 
   /** Called on every camera change (non-debounced) for smooth visual sync. */

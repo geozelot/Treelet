@@ -6,7 +6,9 @@
 import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import { defineTreeletElements } from '../../src/ui/elements';
 import { registerBuiltinAnalyses } from '../../src/analysis/builtins';
-import { getAnalysis } from '../../src/analysis/registry';
+import { getAnalysis, registerAnalysis } from '../../src/analysis/registry';
+import type { TreeletAttribution } from '../../src/ui/TreeletAttribution';
+import type { TreeletToolbar } from '../../src/ui/TreeletToolbar';
 import type { TreeletCompass } from '../../src/ui/TreeletCompass';
 import type { TreeletPanel } from '../../src/ui/TreeletPanel';
 import type { TreeletLegend } from '../../src/ui/TreeletLegend';
@@ -90,6 +92,10 @@ function fakeMap(opts: { baseLayers?: number; stack?: unknown[]; legends?: unkno
     setSunAltitude: vi.fn(),
     setWireframe: vi.fn(),
     setWireframeWhite: vi.fn(),
+    getOverlayLayers: () => [] as unknown[],
+    getAnalysisValue: vi.fn(() => null),
+    getTool: () => ({ mode: null, drawing: false, result: null }),
+    isPicking: () => false,
   };
   return map;
 }
@@ -318,12 +324,13 @@ describe('legend', () => {
     expect([...root.querySelectorAll('.legend-class span:last-child')].map((s) => s.textContent)).toEqual(['≥ 30°', '< 30°']);
   });
 
-  it('re-renders on layerchange and rangechange', () => {
+  it('re-renders on layerchange and rangechange (once per frame)', async () => {
     const legends: unknown[] = [];
     const { map, el } = mountLegend(legends);
     expect(el.hidden).toBe(true);
     legends.push({ id: 'a', title: 'Elevation', type: 'continuous', domain: [0, 1], stops: [[0, [0, 0, 0]]] });
     map.emit('rangechange');
+    await new Promise((resolve) => requestAnimationFrame(() => resolve(undefined)));
     expect(el.hidden).toBe(false);
     expect(map.on).toHaveBeenCalledWith('layerchange', expect.any(Function));
   });
@@ -423,7 +430,7 @@ describe('coat settings from the schema (Phase 1 parameters)', () => {
     const inputs = open.querySelectorAll<HTMLInputElement>('input[data-param="aspectMask"]');
     expect(inputs).toHaveLength(2);
     expect(inputs[0].dataset.wrap).toBe('');
-    expect(open.querySelector('[data-value-for="analysis-6:aspectMask"]')!.textContent).toBe('315° → 45°');
+    expect(open.querySelector('[data-value-for="analysis-6:span:aspectMask"]')!.textContent).toBe('315° → 45°');
   });
 
   it('a from → to slider keeps its order when the input moves', () => {
@@ -567,7 +574,7 @@ describe('sun time in the light settings', () => {
     hour.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
     const set = map.setSunTime.mock.calls.at(-1)![0] as Date;
     expect([set.getFullYear(), set.getMonth(), set.getDate(), set.getHours(), set.getMinutes()]).toEqual([2024, 11, 21, 14, 30]);
-    expect(proot.querySelector('[data-value-for="sun:sunhour"]')!.textContent).toBe('14:30');
+    expect(proot.querySelector('[data-value-for="sun:sunhour:sunhour"]')!.textContent).toBe('14:30');
     const day = proot.querySelector<HTMLInputElement>('input[data-param="sunday"]')!;
     day.value = '2025-06-21';
     day.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
@@ -615,5 +622,145 @@ describe('legend jobs', () => {
     expect(err.querySelector('.job-pct')!.textContent).toBe('no elevation data at the viewshed observer');
     (err.querySelector('.job-cancel') as HTMLElement).click();
     expect(el.hidden).toBe(true);
+  });
+});
+
+describe('review fixes: panel updates, sliders and corner elements', () => {
+  const frame = () => new Promise((resolve) => requestAnimationFrame(() => resolve(undefined)));
+
+  function openCoat(map: ReturnType<typeof fakeMap>, id: string) {
+    const m = mount(map);
+    (m.proot.querySelector('.active-row[data-layer-id="__stack__"]') as HTMLElement).click();
+    (m.proot.querySelector(`.stack-row[data-layer-id="${id}"] .stack-name`) as HTMLElement).click();
+    return m;
+  }
+
+  it("a slider survives its own input (its 'layerupdate' doesn't re-render the panel)", () => {
+    const layer = fakeAnalysis('analysis-1', 'elevation');
+    const map = fakeMap({ stack: [layer] });
+    map.setLayerOpacity.mockImplementation((id: string) => map.emit('layerupdate', { id }));
+    const { proot } = openCoat(map, 'analysis-1');
+    const slider = proot.querySelector<HTMLInputElement>('input[data-action="opacity"]')!;
+    slider.value = '0.4';
+    slider.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    expect(map.setLayerOpacity).toHaveBeenCalledWith('analysis-1', 0.4);
+    expect(slider.isConnected).toBe(true);
+  });
+
+  it('a change from elsewhere (an animation) patches the open coat in place on the next frame', async () => {
+    const layer = fakeAnalysis('analysis-1', 'water', { params: { level: 500, depthFade: 100, shoreline: 2, color: [0, 0, 1] } });
+    const map = fakeMap({ stack: [layer] });
+    const { proot } = openCoat(map, 'analysis-1');
+    const row = proot.querySelector('.active-row[data-layer-id="__stack__"]');
+    (layer.params as { level: number }).level = 1500;
+    map.emit('layerupdate', { id: 'analysis-1' });
+    await frame();
+    const level = proot.querySelector<HTMLInputElement>('input[data-param="level"]')!;
+    expect(level.value).toBe('1500');
+    expect(proot.querySelector('.active-row[data-layer-id="__stack__"]')).toBe(row); // the rest stays
+  });
+
+  it('adding an analysis from the list opens it in the stack', () => {
+    const map = fakeMap({ stack: [] });
+    const stack = map.getLayerStack() as unknown[];
+    map.addAnalysisLayer.mockImplementation(() => {
+      stack.push(fakeAnalysis('analysis-9', 'slope'));
+      map.emit('layerchange'); // the map re-renders the panel before returning the handle
+      return { id: 'analysis-9', layerName: 'Slope' };
+    });
+    const { proot } = mount(map);
+    (proot.querySelector('.layer-entry[data-kind="slope"] .layer-btn') as HTMLElement).click();
+    const settings = proot.querySelector('.stack-settings')!;
+    expect(settings.classList.contains('hidden')).toBe(false);
+    expect(proot.querySelector('.coat-settings[data-layer-id="analysis-9"]')).not.toBeNull();
+  });
+
+  it("a custom analysis' parameter named like a panel control (azimuth) goes to the layer", () => {
+    registerAnalysis({
+      id: 'review_probe', label: 'Probe', glsl: 'vec4 analysis_review_probe(Surface s, vec4 p0, vec4 p1) { return vec4(p0.x); }',
+      params: [{ key: 'azimuth', label: 'Azimuth', type: 'range', min: 0, max: 360, step: 1 }],
+      defaults: { azimuth: 90 }, pack: (p: { azimuth: number }) => ({ p0: [p.azimuth, 0, 0, 0], p1: [0, 0, 0, 0] }),
+    });
+    const map = fakeMap({ stack: [fakeAnalysis('analysis-3', 'review_probe')] });
+    const { proot } = openCoat(map, 'analysis-3');
+    const input = proot.querySelector<HTMLInputElement>('.coat-settings input[data-param="azimuth"]')!;
+    input.value = '200';
+    input.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    expect(map.setAnalysisParams).toHaveBeenCalledWith('analysis-3', { azimuth: 200 });
+    expect(map.setSunAzimuth).not.toHaveBeenCalled();
+  });
+
+  it('the time slider stays within the day', () => {
+    const map = fakeMap();
+    map.sunTime = new Date(2024, 11, 21, 9, 0);
+    const { proot } = mount(map);
+    (proot.querySelector('.active-row[data-layer-type="base"]') as HTMLElement).click();
+    const hour = proot.querySelector<HTMLInputElement>('input[data-param="sunhour"]')!;
+    expect(hour.max).toBe('23.75');
+    hour.value = '24';
+    hour.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    const set = map.setSunTime.mock.calls.at(-1)![0] as Date;
+    expect(set.getDate()).toBe(21);
+  });
+
+  it('a value set from code outside the slider range widens the slider', () => {
+    const map = fakeMap({ stack: [fakeAnalysis('analysis-4', 'contours', { params: { interval: 5, thickness: 1.5, index: 0, color: [0, 0, 0] } })] });
+    const { proot } = openCoat(map, 'analysis-4');
+    const interval = proot.querySelector<HTMLInputElement>('input[data-param="interval"]')!;
+    expect(Number(interval.min)).toBeLessThanOrEqual(5);
+  });
+
+  it('the readout ignores pointers over the controls', async () => {
+    const container = document.createElement('div');
+    const canvas = document.createElement('canvas');
+    const control = document.createElement('div');
+    control.attachShadow({ mode: 'open' }).innerHTML = '<button>Zoom</button>';
+    container.append(canvas, control);
+    document.body.appendChild(container);
+    const map = fakeMap();
+    (map as { getContainer: () => HTMLElement }).getContainer = () => container;
+    const readout = document.createElement('treelet-readout') as TreeletReadout;
+    container.appendChild(readout);
+    readout.attach(map as unknown as Treelet);
+    const button = control.shadowRoot!.querySelector('button')!;
+    button.dispatchEvent(new PointerEvent('pointermove', { pointerType: 'mouse', bubbles: true, composed: true }));
+    await frame();
+    expect(map.pick).not.toHaveBeenCalled();
+    expect(readout.hidden).toBe(true);
+    canvas.dispatchEvent(new PointerEvent('pointermove', { pointerType: 'mouse', bubbles: true, composed: true }));
+    await frame();
+    expect(map.pick).toHaveBeenCalled();
+    expect(readout.hidden).toBe(false);
+  });
+
+  it('legend and toolbar keep listening after the map container moves', () => {
+    const map = fakeMap();
+    const a = document.createElement('div');
+    const b = document.createElement('div');
+    document.body.append(a, b);
+    const legend = document.createElement('treelet-legend') as TreeletLegend;
+    const toolbar = document.createElement('treelet-toolbar') as TreeletToolbar;
+    a.append(legend, toolbar);
+    legend.attach(map as unknown as Treelet);
+    toolbar.attach(map as unknown as Treelet);
+    const subscriptions = (event: string) => map.on.mock.calls.filter(([e]) => e === event).length;
+    const before = [subscriptions('layerchange'), subscriptions('toolchange')];
+    b.append(legend, toolbar); // disconnect + connect
+    expect(map.off).toHaveBeenCalledWith('layerchange', expect.any(Function));
+    expect([subscriptions('layerchange'), subscriptions('toolchange')]).toEqual([before[0] + 1, before[1] + 1]);
+  });
+
+  it('the attribution bar credits visible overlays', () => {
+    const map = fakeMap();
+    (map as { getOverlayLayers: () => unknown[] }).getOverlayLayers = () => [
+      { visible: true, attribution: '© OpenStreetMap contributors' },
+      { visible: false, attribution: 'hidden overlay' },
+    ];
+    const bar = document.createElement('treelet-attribution') as TreeletAttribution;
+    document.body.appendChild(bar);
+    bar.attach(map as unknown as Treelet, 'right');
+    const text = bar.shadowRoot!.textContent ?? '';
+    expect(text).toContain('OpenStreetMap contributors');
+    expect(text).not.toContain('hidden overlay');
   });
 });

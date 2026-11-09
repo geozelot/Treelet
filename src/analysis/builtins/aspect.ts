@@ -18,10 +18,14 @@ export const aspect: AnalysisDescriptor<AspectParams> = {
   unit: '°',
   glsl: /* glsl */ `
 vec4 analysis_aspect(Surface s, vec4 p0, vec4 p1) {
-  float angle = atan(s.n.x, s.n.y);
+  // length(n.xy) is sin(slope). Flat terrain has no aspect: the coat is
+  // transparent below 1° of slope (sin 1° = 0.0174524) and fades in to
+  // fully opaque at 5° (sin 5° = 0.0871557).
+  float sinSlope = length(s.n.xy);
+  float a = smoothstep(0.0174524, 0.0871557, sinSlope);
+  // atan(0, 0) is undefined: flat ground takes bearing 0 (drawn transparent)
+  float angle = sinSlope > 1e-6 ? atan(s.n.x, s.n.y) : 0.0;
   float t = fract(angle / 6.283185307179586 + 1.0);
-  // Flat terrain has no aspect: fade the coat out there.
-  float a = smoothstep(0.0, 0.15, 1.0 - clamp(s.n.z, 0.0, 1.0));
   return vec4(t, 0.0, 0.0, a);
 }`,
   params: [],

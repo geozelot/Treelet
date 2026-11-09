@@ -12,17 +12,29 @@ import type { TileBounds, LngLat, TreeletEventMap } from './types';
 import type { LayerHandle, AnalysisLayerDisplay } from '../layers/types';
 import type { LayerRegistry } from '../layers/LayerRegistry';
 import type { WorkerPool } from '../workers/WorkerPool';
-import type { RegionAnalysisResponse, RegionTask } from '../workers/protocol';
+import type { RegionAnalysisResponse, RegionOutputs, RegionTask } from '../workers/protocol';
 import type { RasterInput, WorldRect } from '../terrain/RasterSet';
 import type { LayerController } from './LayerController';
 import { planRegion, tileX, tileY, lngOfTileX, latOfTileY, boundsAround, type RegionPlan } from '../analysis/region';
 import { sunPathOfDay } from '../analysis/solar';
 import { gridPercentiles } from '../analysis/grid';
 import { getAnalysis } from '../analysis/registry';
+import { abortError, isAbortError } from './abort';
 
 /** Analyses that run on a region (the raster kinds the panel can compute). */
 export const REGION_ANALYSES = ['viewshed', 'sunhours', 'skyview', 'tpi'] as const;
 export type RegionAnalysisKind = typeof REGION_ANALYSES[number];
+
+/**
+ * What a region analysis needs besides the region: `'point'` (the viewshed's
+ * observer, `observer` in computeAnalysis) or nothing (`'region'`).
+ */
+export const REGION_ANALYSIS_INPUT: Readonly<Record<RegionAnalysisKind, 'point' | 'region'>> = {
+  viewshed: 'point',
+  sunhours: 'region',
+  skyview: 'region',
+  tpi: 'region',
+};
 
 export interface RegionOptions {
   /** Area to analyse in degrees. Default: the area in view around the screen center. */
@@ -40,7 +52,10 @@ export interface ResultLayerOptions {
   addLayer?: boolean;
   layerName?: string;
   layerDisplay?: AnalysisLayerDisplay;
-  /** A layer the result replaces (removed when the result is ready). */
+  /**
+   * A layer the result replaces: removed once the result is shown, and the
+   * result takes its place in the stack.
+   */
   replaceLayer?: LayerHandle | string;
 }
 
@@ -160,6 +175,8 @@ export interface AnalysisControllerDeps {
   defaultBounds: () => TileBounds | null;
   /** The map's sun time, if set. */
   sunTime: () => Date | null;
+  /** Raster slots not in use (a result coat needs one). */
+  freeRasterSlots: () => number;
 }
 
 interface JobState extends AnalysisJob {
@@ -167,8 +184,11 @@ interface JobState extends AnalysisJob {
   cancelled: boolean;
 }
 
-function isAbort(err: unknown): boolean {
-  return typeof err === 'object' && err !== null && (err as { name?: string }).name === 'AbortError';
+/** An output grid the worker must have returned for this kind. */
+function output(response: RegionAnalysisResponse, name: keyof RegionOutputs): Float32Array {
+  const grid = response.outputs[name];
+  if (!grid) throw new Error(`treelet: the analysis worker returned no "${name}" grid`);
+  return grid;
 }
 
 export class AnalysisController {
@@ -199,15 +219,17 @@ export class AnalysisController {
   // Analyses
   // =========================================================================
 
-  async getElevationGrid(options: RegionOptions = {}): Promise<ElevationGrid> {
-    const { response, info } = await this.run('elevation', 'Elevation grid', options, null, () => null, true);
-    return { ...info, data: response.grid!, min: response.min, max: response.max };
+  getElevationGrid(options: RegionOptions = {}): Promise<ElevationGrid> {
+    return this.run('elevation', 'Elevation grid', { ...options, addLayer: false }, null, () => null, (response, info) => {
+      if (!response.grid) throw new Error('treelet: the analysis worker returned no grid');
+      return { ...info, data: response.grid, min: response.min, max: response.max };
+    }, true);
   }
 
-  async computeViewshed(observer: LngLat, options: ViewshedOptions = {}): Promise<ViewshedResult> {
+  computeViewshed(observer: LngLat, options: ViewshedOptions = {}): Promise<ViewshedResult> {
     const radius = options.radius ?? 10000;
     const bounds = options.bounds ?? boundsAround(observer.lng, observer.lat, radius);
-    const { response, info } = await this.run('viewshed', 'Viewshed', { ...options, bounds }, observer, (p) => ({
+    return this.run('viewshed', 'Viewshed', { ...options, bounds }, observer, (p) => ({
       kind: 'viewshed',
       options: {
         tileX: tileX(observer.lng, p.zoom),
@@ -221,60 +243,64 @@ export class AnalysisController {
         refraction: options.refraction,
         clearance: options.clearance,
       },
-    }));
-    const visible = response.outputs.visible;
-    const layer = this.showResult('viewshed', options, info, visible, {});
-    return {
-      ...info,
-      layer,
-      visible,
-      clearance: response.outputs.clearance ?? null,
-      visibleArea: (response.stats.visibleCells ?? 0) * info.cellSize * info.cellSize,
-      observerElevation: response.stats.observerElevation,
-    };
+    }), (response, info) => {
+      const visible = output(response, 'visible');
+      const layer = this.showResult('viewshed', options, info, visible, {});
+      return {
+        ...info,
+        layer,
+        visible,
+        clearance: response.outputs.clearance ?? null,
+        visibleArea: (response.stats.visibleCells ?? 0) * info.cellSize * info.cellSize,
+        observerElevation: response.stats.observerElevation ?? NaN,
+      };
+    });
   }
 
-  async computeSunHours(options: SunHoursOptions = {}): Promise<SunHoursResult> {
+  computeSunHours(options: SunHoursOptions = {}): Promise<SunHoursResult> {
     const date = options.date ?? this.deps.sunTime() ?? new Date();
     const step = Math.max(1, options.stepMinutes ?? 15);
     const utcOffset = options.utcOffset ?? -date.getTimezoneOffset() / 60;
-    const { response, info } = await this.run('sunhours', 'Sun hours', options, null, (_p, center) => ({
+    return this.run('sunhours', 'Sun hours', options, null, (_p, center) => ({
       kind: 'sunhours',
       options: {
         samples: sunPathOfDay(date, center.lng, center.lat, step, utcOffset),
         stepMinutes: step,
       },
-    }));
-    const hours = response.outputs.hours;
-    const daylight = response.stats.daylight ?? 0;
-    const layer = this.showResult('sunhours', options, info, hours, {
-      range: [0, Math.max(1, Math.ceil(daylight))],
+    }), (response, info) => {
+      const hours = output(response, 'hours');
+      const daylight = response.stats.daylight ?? 0;
+      const layer = this.showResult('sunhours', options, info, hours, {
+        range: [0, Math.max(1, Math.ceil(daylight))],
+      });
+      return { ...info, layer, hours, firstSun: output(response, 'firstSun'), lastSun: output(response, 'lastSun'), daylight };
     });
-    return { ...info, layer, hours, firstSun: response.outputs.firstSun, lastSun: response.outputs.lastSun, daylight };
   }
 
-  async computeSkyView(options: SkyViewOptions = {}): Promise<GridResult> {
-    const { response, info } = await this.run('skyview', 'Sky view', options, null, () => ({
+  computeSkyView(options: SkyViewOptions = {}): Promise<GridResult> {
+    return this.run('skyview', 'Sky view', options, null, () => ({
       kind: 'skyview',
       options: { radius: options.radius, directions: options.directions },
-    }));
-    const data = response.outputs.skyview;
-    const p = gridPercentiles(data, 0.02, 1);
-    const lo = p ? Math.max(0, Math.floor(p[0] * 20) / 20) : 0.6;
-    const layer = this.showResult('skyview', options, info, data, { range: [Math.min(lo, 0.95), 1] });
-    return { ...info, layer, data };
+    }), (response, info) => {
+      const data = output(response, 'skyview');
+      const p = gridPercentiles(data, 0.02, 1);
+      const lo = p ? Math.max(0, Math.floor(p[0] * 20) / 20) : 0.6;
+      const layer = this.showResult('skyview', options, info, data, { range: [Math.min(lo, 0.95), 1] });
+      return { ...info, layer, data };
+    });
   }
 
-  async computeTpi(options: TpiOptions = {}): Promise<GridResult> {
-    const { response, info } = await this.run('tpi', 'Topographic position', options, null, () => ({
+  computeTpi(options: TpiOptions = {}): Promise<GridResult> {
+    return this.run('tpi', 'Topographic position', options, null, () => ({
       kind: 'tpi',
       options: { radius: options.radius ?? 500, innerRadius: options.innerRadius },
-    }));
-    const data = response.outputs.tpi;
-    const p = gridPercentiles(data, 0.02, 0.98);
-    const m = p ? Math.max(5, Math.ceil(Math.max(Math.abs(p[0]), Math.abs(p[1])) / 5) * 5) : 50;
-    const layer = this.showResult('tpi', options, info, data, { range: [-m, m] });
-    return { ...info, layer, data };
+    }), (response, info) => {
+      const data = output(response, 'tpi');
+      const p = gridPercentiles(data, 0.02, 0.98);
+      const m = p ? Math.max(5, Math.ceil(Math.max(Math.abs(p[0]), Math.abs(p[1])) / 5) * 5) : 50;
+      const layer = this.showResult('tpi', options, info, data, { range: [-m, m] });
+      return { ...info, layer, data };
+    });
   }
 
   // =========================================================================
@@ -283,21 +309,29 @@ export class AnalysisController {
 
   /**
    * Plan the region, run the task in the analysis worker and report
-   * progress. `task` builds the worker task once the zoom is known.
+   * progress. `task` builds the worker task once the zoom is known;
+   * `finish` turns the response into the result (and shows it) before the
+   * job ends, so 'done' means the result is there and a failure to show it
+   * ends the job with 'error'.
    */
-  private async run(
+  private async run<T>(
     kind: string,
     label: string,
-    options: RegionOptions,
+    options: RegionOptions & ResultLayerOptions,
     focus: LngLat | null,
     task: (plan: RegionPlan, center: LngLat) => RegionTask | null,
+    finish: (response: RegionAnalysisResponse, info: RegionInfo) => T,
     returnGrid = false,
-  ): Promise<{ response: RegionAnalysisResponse; info: RegionInfo }> {
+  ): Promise<T> {
     const base = this.deps.layerRegistry.getActiveBaseLayer();
     if (!base) throw new Error('treelet: region analyses need an active base layer');
-    if (options.signal?.aborted) throw this.abortError();
+    if (options.signal?.aborted) throw abortError('treelet: analysis cancelled');
     const bounds = options.bounds ?? this.deps.defaultBounds();
     if (!bounds) throw new Error('treelet: no area to analyse (the view shows no terrain); pass `bounds`');
+    if (options.addLayer !== false && this.deps.freeRasterSlots() === 0 && !this.isRasterLayer(options.replaceLayer)) {
+      // Fail before loading anything: the result would have nowhere to go
+      throw new Error('treelet: every raster slot is in use; remove a raster coat, pass `replaceLayer`, or `addLayer: false`');
+    }
 
     // The job is listed (and can be cancelled) from the moment it is asked for
     const requestId = this.nextRequest++;
@@ -309,7 +343,7 @@ export class AnalysisController {
 
     try {
       await base.source.ensureReady();
-      if (job.cancelled) throw this.abortError();
+      if (job.cancelled) throw abortError('treelet: analysis cancelled');
       const src = base.source;
       const plan = planRegion(bounds, {
         zoom: options.zoom,
@@ -345,7 +379,7 @@ export class AnalysisController {
         job.progress = fraction;
         this.deps.emit('analysisprogress', { id: job.id, kind, label, stage, progress: fraction });
       });
-      if (job.cancelled) throw this.abortError();
+      if (job.cancelled) throw abortError('treelet: analysis cancelled');
       const T = response.tileSize;
       const z = response.zoom;
       const info: RegionInfo = {
@@ -361,24 +395,33 @@ export class AnalysisController {
         cellSize: response.cellSize,
         missingTiles: response.missing + response.failed,
       };
+      const result = finish(response, info);
       this.jobs.delete(job.id);
       this.deps.emit('analysisend', { id: job.id, kind, label, status: 'done' });
-      return { response, info };
+      return result;
     } catch (err) {
       this.jobs.delete(job.id);
-      const cancelled = job.cancelled || isAbort(err);
+      const cancelled = job.cancelled || isAbortError(err);
       this.deps.emit('analysisend', {
         id: job.id, kind, label,
         status: cancelled ? 'cancelled' : 'error',
         error: cancelled ? undefined : (err as Error)?.message ?? String(err),
       });
-      throw cancelled ? this.abortError() : err;
+      throw cancelled ? abortError('treelet: analysis cancelled') : err;
     } finally {
       options.signal?.removeEventListener('abort', onAbort);
     }
   }
 
-  /** Show a result grid as a coat of `kind` (unless `addLayer` is false). */
+  private isRasterLayer(handle: LayerHandle | string | undefined): boolean {
+    return handle !== undefined && this.deps.layerRegistry.getAnalysisLayer(handle)?.descriptor.raster === true;
+  }
+
+  /**
+   * Show a result grid as a coat of `kind` (unless `addLayer` is false). A
+   * replaced layer goes only once the result is shown (first, when the
+   * result needs its raster slot), and the result takes its place.
+   */
   private showResult(
     kind: string,
     options: ResultLayerOptions,
@@ -387,22 +430,24 @@ export class AnalysisController {
     params: Record<string, unknown>,
   ): LayerHandle | null {
     if (options.addLayer === false) return null;
-    if (options.replaceLayer) this.deps.layerController.removeAnalysisLayer(options.replaceLayer);
+    const lc = this.deps.layerController;
+    const registry = this.deps.layerRegistry;
     const nw = this.deps.toWorld({ lng: info.bounds.west, lat: info.bounds.north });
     const se = this.deps.toWorld({ lng: info.bounds.east, lat: info.bounds.south });
     const bounds: WorldRect = { west: nw.x, north: nw.y, east: se.x, south: se.y };
     const raster: RasterInput = { width: info.width, height: info.height, data, bounds };
-    return this.deps.layerController.addRasterLayer({
+    const replace = options.replaceLayer === undefined ? undefined : registry.getAnalysisLayer(options.replaceLayer);
+    const at = replace ? registry.getStack().indexOf(replace) : -1;
+    const freeFirst = replace !== undefined && replace.descriptor.raster === true && this.deps.freeRasterSlots() === 0;
+    if (replace && freeFirst) lc.removeAnalysisLayer(replace.id);
+    const handle = lc.addRasterLayer({
       analysis: kind,
       layerName: options.layerName ?? getAnalysis(kind)?.label,
       params,
       layerDisplay: options.layerDisplay,
     }, raster);
-  }
-
-  private abortError(): Error {
-    const err = new Error('treelet: analysis cancelled');
-    err.name = 'AbortError';
-    return err;
+    if (replace && !freeFirst) lc.removeAnalysisLayer(replace.id);
+    if (at >= 0) lc.moveLayer(handle, at);
+    return handle;
   }
 }

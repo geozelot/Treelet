@@ -12,7 +12,7 @@ in vec4 vShadowCoord;
 float gShadowLit = 1.0;
 
 float terrainShadow(Surface s) {
-  if (uSunDirection.z <= 0.0) return 0.0; // the sun is down
+  if (uSunDirection.z <= SHADOW_NIGHT_SUN_Z) return 0.0; // the sun is down (same threshold as the map)
   float fade = smoothstep(uShadowParams.z, uShadowParams.w, length(vCamVec));
   if (fade >= 1.0) return 1.0;
   float nl = dot(s.n, uSunDirection);

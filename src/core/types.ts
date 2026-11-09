@@ -168,8 +168,17 @@ export interface TreeletEventMap {
   /** A layer of any kind was added or removed. */
   layeradd: { id: string };
   layerremove: { id: string };
-  /** The coat stack, a layer's parameters or display, or the active base layer changed. */
+  /**
+   * The layers changed: added, removed, shown, hidden or reordered, the
+   * active base or drape layer, or an overlay's data.
+   */
   layerchange: Record<string, never>;
+  /**
+   * A layer's values changed: analysis parameters or ramp, opacity, blend
+   * mode, or an overlay's style. Fires often while a slider is dragged or
+   * an animation runs; the layers themselves are unchanged.
+   */
+  layerupdate: { id: string };
   /** The visible elevation range (used by 'auto' ramp domains) changed. */
   rangechange: { min: number; max: number };
   /** A region analysis (viewshed, sun hours…) started, progressed or ended. */

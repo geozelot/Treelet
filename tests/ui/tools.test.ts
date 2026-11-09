@@ -13,7 +13,7 @@ import type { Treelet } from '../../src/core/Treelet';
 import type { ToolResult } from '../../src/tools/ToolController';
 
 beforeAll(() => defineTreeletElements());
-afterEach(() => { document.body.innerHTML = ''; });
+afterEach(() => { document.body.innerHTML = ''; vi.unstubAllGlobals(); });
 
 const points: ProfilePoint[] = Array.from({ length: 11 }, (_, i) => ({
   distance: i * 500, elevation: i === 4 ? null : 600 + i * 120, lngLat: { lng: 11 + i * 0.01, lat: 47 },
@@ -90,7 +90,11 @@ describe('<treelet-profile>', () => {
     expect(root.querySelector('.stats')!.textContent).toContain('5.00 km');
     expect(root.querySelector('svg')).not.toBeNull();
     const chart = root.querySelector('.chart') as HTMLElement;
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => frames.push(cb));
     chart.dispatchEvent(new PointerEvent('pointermove', { clientX: 46 + 300, clientY: 40, bubbles: true }));
+    expect(onHover).not.toHaveBeenCalled(); // on the next frame
+    frames.splice(0).forEach((cb) => cb(0));
     expect(onHover).toHaveBeenCalledWith(expect.objectContaining({ lngLat: expect.any(Object) }));
     expect(root.querySelector('.tip')!.textContent).toMatch(/km · /);
     chart.dispatchEvent(new PointerEvent('pointerleave', { bubbles: true }));

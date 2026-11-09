@@ -9,7 +9,7 @@
 // DEM they were draped with) while terrain in front still hides them.
 // ============================================================================
 
-import { ShaderMaterial, Vector2, type IUniform } from 'three';
+import { KeepStencilOp, NotEqualStencilFunc, ReplaceStencilOp, ShaderMaterial, Vector2, type IUniform } from 'three';
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 
 /** Fraction of its distance a feature is pulled toward the camera (depth only). */
@@ -20,17 +20,42 @@ export function srgbToLinear(c: number): number {
   return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
 }
 
+/** Stencil values of translucent line objects (1–255, cycling). */
+let nextStencilRef = 0;
+
+/**
+ * Opacity of a line material. A translucent line is drawn without depth
+ * writes, so its densified segments and their round caps overlap many times
+ * per pixel; a stencil test (each line object its own reference value)
+ * covers every pixel of the object once, so it shows the requested opacity.
+ */
+export function setLineOpacity(material: LineMaterial, opacity: number): void {
+  const translucent = opacity < 1;
+  if (material.transparent !== translucent) {
+    material.transparent = translucent;
+    material.depthWrite = !translucent;
+    material.needsUpdate = true;
+  }
+  material.opacity = opacity;
+  material.stencilWrite = translucent;
+  if (translucent) {
+    if (material.stencilRef === 0) material.stencilRef = (nextStencilRef = (nextStencilRef % 255) + 1);
+    material.stencilFunc = NotEqualStencilFunc;
+    material.stencilZPass = ReplaceStencilOp;
+    material.stencilFail = KeepStencilOp;
+    material.stencilZFail = KeepStencilOp;
+  }
+}
+
 /** Wide lines in CSS pixels, with per-vertex colors and the depth bias. */
 export function createLineMaterial(width: number, opacity: number, resolution: Vector2): LineMaterial {
   const material = new LineMaterial({
     linewidth: width,
     vertexColors: true,
-    transparent: opacity < 1,
-    opacity,
     worldUnits: false,
     depthTest: true,
-    depthWrite: opacity >= 1,
   });
+  setLineOpacity(material, opacity);
   material.resolution.copy(resolution);
   const bias: IUniform = { value: OVERLAY_DEPTH_BIAS };
   material.onBeforeCompile = (shader) => {

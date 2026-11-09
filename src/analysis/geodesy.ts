@@ -17,12 +17,15 @@ export const WGS84_F = 1 / 298.257223563;
 /** Radius of the sphere with the WGS84 ellipsoid's surface area. */
 export const AUTHALIC_RADIUS = 6371007.181;
 
-/** Great-circle distance on the authalic sphere (fallback for near-antipodal points). */
-export function haversineDistance(a: LngLat, b: LngLat): number {
+/**
+ * Great-circle distance in meters on a sphere of `radius` (default: the
+ * authalic sphere; also the fallback for near-antipodal points).
+ */
+export function haversineDistance(a: LngLat, b: LngLat, radius = AUTHALIC_RADIUS): number {
   const dLat = (b.lat - a.lat) * RAD;
   const dLng = (b.lng - a.lng) * RAD;
   const s = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * RAD) * Math.cos(b.lat * RAD) * Math.sin(dLng / 2) ** 2;
-  return 2 * AUTHALIC_RADIUS * Math.asin(Math.min(1, Math.sqrt(s)));
+  return 2 * radius * Math.asin(Math.min(1, Math.sqrt(s)));
 }
 
 /** Shortest distance in meters on the WGS84 ellipsoid (Vincenty inverse). */

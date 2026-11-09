@@ -56,6 +56,9 @@ export interface SlotInfo {
   /** Minimum / maximum valid elevation in meters (0/0 for empty tiles). */
   min: number;
   max: number;
+  /** The range without isolated spikes in the source data (what the tile shows; 0/0 when empty). */
+  low: number;
+  high: number;
   /** Tile reported as nonexistent by the source (filled with zeros, not stitched). */
   empty: boolean;
   /** Width in texels of the edge-stitch band (≈ one source pixel). */
@@ -80,6 +83,9 @@ interface Strip {
   h: number;
 }
 
+/** Elevation changes the atlas remembers (changedSince); older ones read as "everything changed". */
+const CHANGE_LOG_SIZE = 4096;
+
 export class ElevationAtlas {
   readonly slotSize: number;
   readonly capacity: number;
@@ -98,6 +104,10 @@ export class ElevationAtlas {
   private generation = 0;
   /** Bumped whenever the stored elevations change (writes, evictions, clear). */
   private _version = 0;
+  /** Tiles whose elevations changed, with the version that changed them (oldest first, bounded). */
+  private readonly changeLog: Array<{ version: number; key: number }> = [];
+  /** Version of the last clear() (every tile changed). */
+  private clearedAt = 0;
   private lruHead = -1;
   private lruTail = -1;
 
@@ -154,6 +164,25 @@ export class ElevationAtlas {
   }
 
   /** Changes whenever the stored elevations change (sampled results may differ). */
+  /**
+   * Keys of the tiles whose elevations changed after `version` (written or
+   * evicted; a key may repeat), or null when that is no longer known (a
+   * clear, or more changes than the log keeps): treat everything as changed.
+   */
+  changedSince(version: number): number[] | null {
+    if (version < this.clearedAt) return null;
+    const log = this.changeLog;
+    if (log.length > 0 && log[0].version > version + 1) return null;
+    const out: number[] = [];
+    for (let i = log.length - 1; i >= 0 && log[i].version > version; i--) out.push(log[i].key);
+    return out;
+  }
+
+  private logChange(key: number): void {
+    this.changeLog.push({ version: this._version, key });
+    if (this.changeLog.length > CHANGE_LOG_SIZE) this.changeLog.splice(0, this.changeLog.length - CHANGE_LOG_SIZE / 2);
+  }
+
   get version(): number {
     return this._version;
   }
@@ -270,14 +299,18 @@ export class ElevationAtlas {
     z: number, x: number, y: number,
     tile: Float32Array, min: number, max: number,
     texelsPerPixel = 1,
+    low = min, high = max,
   ): SlotInfo | null {
     const S = this.slotSize;
     if (tile.length !== S * S) throw new Error(`treelet: elevation tile must have ${S * S} values, got ${tile.length}`);
     const slot = this.allocate(z, x, y);
     if (!slot) return null;
     this._version++;
+    this.logChange(slot.key);
     slot.min = min;
     slot.max = max;
+    slot.low = low;
+    slot.high = high;
     slot.empty = false;
     slot.band = Math.max(1, Math.min(MAX_STITCH_BAND, Math.ceil(texelsPerPixel - 1e-6), Math.floor(S / 4)));
     this.data.set(tile, slot.layer * S * S);
@@ -293,8 +326,11 @@ export class ElevationAtlas {
     const slot = this.allocate(z, x, y);
     if (!slot) return null;
     this._version++;
+    this.logChange(slot.key);
     slot.min = 0;
     slot.max = 0;
+    slot.low = 0;
+    slot.high = 0;
     slot.empty = true;
     slot.band = 1;
     this.data.fill(0, slot.layer * S * S, (slot.layer + 1) * S * S);
@@ -306,6 +342,8 @@ export class ElevationAtlas {
   /** Forget every tile. GPU data is not touched: no instance references it anymore. */
   clear(): void {
     this._version++;
+    this.clearedAt = this._version;
+    this.changeLog.length = 0;
     this.slotMap.clear();
     this.freeLayers.length = 0;
     for (let i = this.capacity - 1; i >= 0; i--) this.freeLayers.push(i);
@@ -380,6 +418,8 @@ export class ElevationAtlas {
       gen: ++this.generation,
       min: 0,
       max: 0,
+      low: 0,
+      high: 0,
       empty: false,
       band: 1,
       ref: { layer, ox: 0, oy: 0, scale: 1 },
@@ -401,6 +441,8 @@ export class ElevationAtlas {
         this.lruRemove(slot);
         this.onEvict?.(slot);
         this.slotMap.delete(key);
+        // Its area now reads from coarser tiles (logged with the write that follows)
+        this.changeLog.push({ version: this._version + 1, key });
         return slot.layer;
       }
       key = slot.lruNext;

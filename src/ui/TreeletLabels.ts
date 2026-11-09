@@ -51,29 +51,50 @@ export class TreeletLabels extends BaseElement {
   }
 
   /** Show exactly these labels (centered above their anchors). */
+  /**
+   * Show these labels (and hide the rest). A label keeps its element from
+   * one call to the next (matched by text and style), so a label dropping
+   * out doesn't restyle every later one; only positions change.
+   */
   show(labels: readonly PlacedLabel[]): void {
-    for (let i = 0; i < labels.length; i++) {
-      const l = labels[i];
-      let span = this.spans[i];
-      if (!span) {
-        span = document.createElement('span');
+    const used = new Set<HTMLSpanElement>();
+    const free = (key: string) => this.spans.find((s, i) => this.keys[i] === key && !used.has(s));
+    const unmatched: Array<[PlacedLabel, string]> = [];
+    for (const l of labels) {
+      const key = `${l.text}|${l.size}|${l.color}|${l.halo}`;
+      const span = free(key);
+      if (span) {
+        used.add(span);
+        this.place(span, l);
+      } else {
+        unmatched.push([l, key]);
+      }
+    }
+    for (const [l, key] of unmatched) {
+      let i = this.spans.findIndex((s) => !used.has(s));
+      if (i < 0) {
+        const span = document.createElement('span');
         this.shadow.appendChild(span);
         this.spans.push(span);
         this.keys.push('');
+        i = this.spans.length - 1;
       }
-      const key = `${l.text}|${l.size}|${l.color}|${l.halo}`;
-      if (this.keys[i] !== key) {
-        this.keys[i] = key;
-        span.textContent = l.text;
-        span.style.fontSize = `${l.size}px`;
-        span.style.color = l.color;
-        const h = l.halo;
-        span.style.textShadow = `0 0 2px ${h}, 0 0 2px ${h}, 0 0 3px ${h}`;
-      }
-      span.style.transform = `translate(${Math.round(l.x)}px, ${Math.round(l.y)}px) translate(-50%, -100%)`;
-      span.hidden = false;
+      const span = this.spans[i];
+      used.add(span);
+      this.keys[i] = key;
+      span.textContent = l.text;
+      span.style.fontSize = `${l.size}px`;
+      span.style.color = l.color;
+      const h = l.halo;
+      span.style.textShadow = `0 0 2px ${h}, 0 0 2px ${h}, 0 0 3px ${h}`;
+      this.place(span, l);
     }
-    for (let i = labels.length; i < this.spans.length; i++) this.spans[i].hidden = true;
+    for (const s of this.spans) if (!used.has(s)) s.hidden = true;
+  }
+
+  private place(span: HTMLSpanElement, l: PlacedLabel): void {
+    span.style.transform = `translate(${Math.round(l.x)}px, ${Math.round(l.y)}px) translate(-50%, -100%)`;
+    span.hidden = false;
   }
 
   /** Number of labels currently shown (tests, diagnostics). */

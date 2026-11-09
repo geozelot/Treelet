@@ -18,10 +18,17 @@ export interface NormalizedOverlay {
   polygons: Array<{ feature: number; rings: LngLat[][] }>;
 }
 
+/** A coordinate: a number, or a numeric string; anything else (null, '', true, []) is not one. */
+function coordinate(v: unknown): number {
+  if (typeof v === 'number') return v;
+  if (typeof v === 'string' && v.trim() !== '') return Number(v);
+  return NaN;
+}
+
 function toLngLat(p: Position, bad: { count: number }): LngLat | null {
   if (!Array.isArray(p) || p.length < 2) { bad.count++; return null; }
-  const lng = Number(p[0]);
-  const lat = Number(p[1]);
+  const lng = coordinate(p[0]);
+  const lat = coordinate(p[1]);
   if (!Number.isFinite(lng) || !Number.isFinite(lat) || lat < -90 || lat > 90) { bad.count++; return null; }
   return { lng, lat };
 }

@@ -55,6 +55,7 @@ function bearingOf(dx: number, dy: number): number {
   return (deg + 360) % 360;
 }
 
+/** Whether a bearing in [0, 360) lies within fov / 2 of `center`, which must be in [0, 360) too. */
 function inFov(bearing: number, center: number, fov: number): boolean {
   if (fov >= 360) return true;
   const d = Math.abs(((bearing - center + 540) % 360) - 180);
@@ -66,7 +67,8 @@ export function* viewshedSteps(grid: Grid, options: ViewshedOptions): Steps<View
   const eye = options.eyeHeight ?? 1.7;
   const target = options.targetHeight ?? 0;
   const fov = Math.max(0, Math.min(360, options.fov ?? 360));
-  const center = options.bearing ?? 0;
+  // Any bearing, e.g. 720 or −90, reduced to [0, 360) once (inFov relies on it)
+  const center = (((options.bearing ?? 0) % 360) + 360) % 360;
   const k = options.refraction ?? REFRACTION_K;
   const curve = options.curvature !== false ? (1 - k) / (2 * EARTH_RADIUS_M) : 0;
 
@@ -128,7 +130,12 @@ export function* viewshedSteps(grid: Grid, options: ViewshedOptions): Steps<View
     if (clearance) clearance[oj * W + oi] = 0;
   }
 
-  // Rays to every perimeter cell of the bounding square
+  // Rays to every perimeter cell of the bounding square. A sample stands for
+  // the cell it rounds to, which can lie up to half a cell diagonal (≈ 0.71
+  // cells) nearer than the sample: rays march one cell past the radius so
+  // that every cell whose center is within it gets a sample (only those
+  // cells, marked above, are written).
+  const reach = R + 1;
   const targets: Array<[number, number]> = [];
   for (let i = iMin; i <= iMax; i++) { targets.push([i, jMin]); if (jMax !== jMin) targets.push([i, jMax]); }
   for (let j = jMin + 1; j < jMax; j++) { targets.push([iMin, j]); if (iMax !== iMin) targets.push([iMax, j]); }
@@ -144,7 +151,7 @@ export function* viewshedSteps(grid: Grid, options: ViewshedOptions): Steps<View
     for (let s = 1; s <= n; s++) {
       const f = s / n;
       const dist = f * len;
-      if (dist > R) break;
+      if (dist > reach) break;
       const x = cx + dx * f;
       const y = cy + dy * f;
       const h = height(x, y);

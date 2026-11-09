@@ -4,9 +4,10 @@
 // ============================================================================
 
 import { describe, it, expect } from 'vitest';
-import { CoatStack, type CoatInput } from '../../src/terrain/CoatStack';
+import { CoatStack, rampRowDomain, type CoatInput } from '../../src/terrain/CoatStack';
 import { MAX_COATS } from '../../src/analysis/registry';
-import { RAMP_WIDTH, BUILTIN_RAMPS } from '../../src/analysis/ramps';
+import { RAMP_WIDTH, BUILTIN_RAMPS, classIndexOf } from '../../src/analysis/ramps';
+import type { ClassRamp } from '../../src/analysis/types';
 
 const coat = (over: Partial<CoatInput>): CoatInput => ({
   id: 'c', kind: 1, blendMode: 'normal', opacity: 1, ramp: null, domain: [0, 1],
@@ -57,5 +58,68 @@ describe('CoatStack', () => {
     expect(stack.needsAutoRange).toBe(false);
     expect(stack.setAutoRange(1, 2)).toBe(false);
     stack.dispose();
+  });
+
+  it('draws only coats in their zoom range and above opacity 0', () => {
+    const stack = new CoatStack();
+    stack.set([
+      coat({ id: 'a', kind: 1 }),
+      coat({ id: 'b', kind: 2, opacity: 0 }),
+      coat({ id: 'c', kind: 3, minZoom: 10, maxZoom: 14 }),
+    ]);
+    expect(stack.packed.map((c) => c.kind)).toEqual([1, 3]); // zoom unknown yet: all zooms
+    expect(stack.setZoom(8)).toBe(true);
+    expect(stack.packed.map((c) => c.kind)).toEqual([1]);
+    expect(stack.setZoom(9)).toBe(false); // same coats drawn
+    expect(stack.setZoom(12)).toBe(true);
+    expect(stack.packed.map((c) => c.kind)).toEqual([1, 3]);
+  });
+
+  it('needs a shadow map only while a drawn coat reads one', () => {
+    const stack = new CoatStack();
+    stack.set([coat({ id: 's', shadowMap: true, opacity: 0 })]);
+    expect(stack.needsShadows).toBe(false);
+    stack.set([coat({ id: 's', shadowMap: true, minZoom: 12 })]);
+    stack.setZoom(10);
+    expect(stack.needsShadows).toBe(false);
+    stack.setZoom(13);
+    expect(stack.needsShadows).toBe(true);
+  });
+
+  it('domains derived from the visible range follow it, not only a returned "auto" array', () => {
+    const stack = new CoatStack();
+    stack.set([coat({ id: 'd', ramp: BUILTIN_RAMPS.grayscale, domain: (v) => [v[0], v[0] + 500] })]);
+    expect(stack.needsAutoRange).toBe(true);
+    expect(stack.setAutoRange(1200, 3000)).toBe(true);
+    expect(stack.packed[0].p0).toEqual([1200, 1700, 0, 0]);
+  });
+
+  it('rewrites a ramp row only when its ramp or domain changed', () => {
+    const stack = new CoatStack();
+    const c = coat({ id: 'r', ramp: BUILTIN_RAMPS.viridis, domain: [0, 100] });
+    stack.set([c]);
+    const v = stack.texture.version;
+    stack.set([{ ...c, opacity: 0.5 }]);
+    expect(stack.texture.version).toBe(v);
+    stack.set([{ ...c, domain: [0, 200] }]);
+    expect(stack.texture.version).toBeGreaterThan(v);
+  });
+
+  it('class ramps keep values outside the domain in their own class', () => {
+    const ramp = BUILTIN_RAMPS.avalanche as ClassRamp; // breaks 30, 35, 40, 45; class 0 transparent
+    // A slope coat narrowed to 30–60°: ground below 30° must stay class 0
+    const d = rampRowDomain(ramp, [30, 60]);
+    expect(d[0]).toBeLessThan(30);
+    expect(d[1]).toBe(60);
+    const stack = new CoatStack();
+    stack.set([coat({ id: 'av', ramp, domain: [30, 60] })]);
+    const data = stack.texture.image.data as Uint8Array;
+    // Texel 0 (where every value below the domain clamps) is class 0: alpha 0
+    expect(data[3]).toBe(0);
+    expect(classIndexOf(ramp, d[0])).toBe(0);
+    // The packed domain is the widened one, so the shader's t matches the row
+    expect(stack.packed[0].p0.slice(0, 2)).toEqual(d);
+    // Domains that already contain every break are unchanged
+    expect(rampRowDomain(ramp, [0, 90])).toEqual([0, 90]);
   });
 });

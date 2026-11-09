@@ -14,6 +14,7 @@
 // notified through `onSettled` and decides when to pump again.
 // ============================================================================
 
+import { isAbortError } from '../core/abort';
 export type FetchOutcome = 'ok' | 'empty' | 'error' | 'cancelled' | 'stale';
 
 interface FailureEntry {
@@ -104,9 +105,6 @@ export interface FetchChannelOptions {
   now?: () => number;
 }
 
-function isAbortError(err: unknown): boolean {
-  return typeof err === 'object' && err !== null && (err as { name?: string }).name === 'AbortError';
-}
 
 /** One tile pipeline's in-flight set, concurrency accounting and backoff. */
 export class FetchChannel {

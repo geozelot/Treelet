@@ -32,6 +32,11 @@
 - Sun position from a date: `setSunTime(date)` places the sun (NOAA solar position) over the map center and keeps it there as the map moves; `getSunPosition(date?, lngLat?)`. The *Terrain* settings switch between a manual sun and a day and time.
 - The layer panel's *Analysis* list runs the region analyses over the view (the viewshed asks for a click on the observer); a new run replaces the previous result. `pickLocation()` waits for a click on the terrain.
 - `'visibility'` ramp preset (hidden / visible) for viewsheds.
+- Overlay layers draw GeoJSON on the terrain (the 0.3 stub is now real): `addOverlayLayer({ layerName, data, style })` with lines draped along the terrain (densified to the loaded tiles, draped again as finer tiles load, wide lines in CSS pixels), round point markers, polygon fills rasterized into a coat, and labels from a property (hidden behind terrain and where they would overlap). Styles are objects or functions of each feature. `setOverlayData`, `setOverlayStyle`, `setOverlayVisible`, `setOverlayOpacity`.
+- Measuring: `measureDistance(points)` (geodesic length on WGS84, length along the terrain, ascent, descent, lowest and highest point, profile), `measureArea(ring)` (geodesic and surface area, perimeter), `lineOfSight(from, to)` (curvature and refraction, first obstruction, sight line), `project(lngLat)`.
+- Tools on the map: `startTool('distance' | 'area' | 'profile' | 'sight')` with click / drag / double-click / Enter / Backspace / Escape and long press on touch; `'measure'` and `'toolchange'` events; `finishTool`, `clearTool`, `getTool`.
+- Profile panel (`<treelet-profile>`, `showProfile(path | lineOfSight)`): SVG chart, hover marks the point on the terrain, statistics, CSV and PNG export.
+- Toolbar (`<treelet-toolbar>`, `guiDisplay.tools`, off by default): distance, area, profile, line of sight and viewshed, with the live result and Profile / Finish / Clear.
 
 ## 0.3.0
 

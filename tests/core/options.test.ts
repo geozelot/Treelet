@@ -23,6 +23,8 @@ describe('resolveOptions', () => {
     expect(o.guiDisplay.legendPosition).toBe('bottom-left');
     expect(resolveOptions({ ...base, guiDisplay: { legendPosition: false } }).guiDisplay.legendPosition).toBe(false);
     expect(o.guiDisplay.readoutPosition).toBe('bottom-left');
+    expect(o.guiDisplay.tools).toBe(false);
+    expect(resolveOptions({ ...base, guiDisplay: { tools: 'bottom-right' } }).guiDisplay.tools).toBe('bottom-right');
     expect(resolveOptions({ ...base, guiDisplay: { readoutPosition: 'top-left' } }).guiDisplay.readoutPosition).toBe('top-left');
     expect(o.workerCount).toBeGreaterThanOrEqual(1);
     expect(o.workerCount).toBeLessThanOrEqual(4);

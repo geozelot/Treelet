@@ -65,6 +65,11 @@ export interface GuiDisplayOptions {
    */
   readoutPosition?: UICorner | false;
   /**
+   * The measuring toolbar (distance, area, profile, line of sight,
+   * viewshed): a corner, `true` for 'top-left', or `false` (default) for none.
+   */
+  tools?: UICorner | boolean;
+  /**
    * Frosted-glass compass and layer controls, including the menus that open
    * from them: translucent, with the map blurred behind. Costs some GPU time
    * while the map redraws, so it is off by default. Default false.
@@ -174,6 +179,10 @@ export interface TreeletEventMap {
   /** pickLocation() is waiting for a click on the terrain (prompt), or stopped waiting. */
   pickstart: { prompt: string };
   pickend: Record<string, never>;
+  /** A measuring tool started, finished drawing or stopped. */
+  toolchange: { mode: 'distance' | 'area' | 'profile' | 'sight' | null; drawing: boolean };
+  /** A tool's result changed (`final` once drawing ends; `result` null when it was cleared). */
+  measure: { mode: 'distance' | 'area' | 'profile' | 'sight' | null; final: boolean; result: import('../tools/ToolController').ToolResult | null };
   ready: Record<string, never>;
 }
 
@@ -212,6 +221,22 @@ export interface ProfileSample {
   distance: number;
   /** Elevation in meters, or null where no data is loaded. */
   elevation: number | null;
+}
+
+/** Result of `lineOfSight(from, to)`. */
+export interface LineOfSightResult {
+  visible: boolean;
+  /** Geodesic distance between the ends in meters. */
+  distance: number;
+  /** Smallest gap between the sight line and the terrain in meters (negative where blocked). */
+  clearance: number;
+  /** Observer eye and target elevations in meters. */
+  eyeElevation: number;
+  targetElevation: number;
+  /** The first point where terrain rises above the sight line, or null. */
+  obstruction: { lngLat: LngLat; distance: number; elevation: number } | null;
+  /** The terrain profile with the sight line's height (`sight`, meters) at each sample. */
+  profile: Array<ProfileSample & { sight: number }>;
 }
 
 /** Runtime statistics for monitoring and debugging. */

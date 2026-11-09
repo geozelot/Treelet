@@ -57,10 +57,16 @@ The library is designed to be easily extendable - via registry or plugin package
   - **Ramps** - built-in or custom color stops and classes (with alpha), with legends
   - **Custom analyses** - a GLSL snippet plus a parameter schema (`registerAnalysis`)
 
-- #### Inspection:
+- #### Overlays:
+  - **GeoJSON** - points, lines and polygons draped on the terrain, with labels; fills as a coat
+
+- #### Inspection and tools:
   - **Cursor readout** - elevation, slope and aspect under the pointer
   - **Terrain sampling** - `sampleTerrain(lngLat)`, `pick(x, y)`: elevation, slope, aspect, curvature, normal
-  - **Elevation profiles** - `getElevationProfile(from, to)`
+  - **Measuring** - distance and area on the map and along the terrain, ascent and descent
+  - **Elevation profiles** - a chart panel with hover, CSV and PNG export
+  - **Line of sight** - with Earth curvature and refraction
+  - **Toolbar** - measure, area, profile, line of sight and viewshed on the map (`guiDisplay.tools`)
 
 ###
 ###
@@ -199,6 +205,7 @@ The defaults fit a typical view in well under the tile budget at any screen size
 | `layerPosition` | `UICorner` | `'bottom-right'` | Layer panel corner |
 | `legendPosition` | `UICorner \| false` | `'bottom-left'` | Corner of the legend for the visible analyses, or `false` for none |
 | `readoutPosition` | `UICorner \| false` | `'bottom-left'` | Corner of the cursor readout (elevation, slope, aspect under the pointer), or `false` for none; stacks with the legend in a shared corner |
+| `tools` | `UICorner \| boolean` | `false` | The measuring toolbar: a corner, `true` for `'top-left'`, or `false` for none |
 | `glass` | `boolean` | `false` | Frosted-glass controls (translucent, map blurred behind); costs some GPU time while the map redraws |
 
 The controls open on mouse hover, on a tap (touch screens; a tap elsewhere closes them) and with the keyboard (Tab to a control, Escape to close). On a touch screen the first tap on the compass opens its panel and the next one resets the orientation. On narrow maps the compass panel drops its Map and Viewport sections and the layer panel shrinks to fit.
@@ -236,6 +243,12 @@ The main map class. Extends `EventEmitter`.
 | `getVisibleElevationRange()` | `[number, number]` | Min and max elevation of the tiles on screen |
 | `getElevationGrid(options?)` | `Promise<ElevationGrid>` | Elevations of a region as one grid (see [Region analyses](#region-analyses)) |
 | `pickLocation(options?)` | `Promise<TerrainPick \| null>` | Wait for a click on the terrain (crosshair cursor; `prompt` shown in the legend); `null` after Escape or `cancelPick()` |
+| `project(lngLat)` | `{ x, y } \| null` | Screen position (container pixels) of the terrain at a position |
+| `measureDistance(points)` | `PathMeasure` | `{ distance, surfaceDistance, gain, loss, minElevation, maxElevation, profile }` of a path |
+| `measureArea(ring)` | `AreaMeasure` | `{ area, surfaceArea, perimeter, minElevation, maxElevation }` of a polygon |
+| `lineOfSight(from, to, options?)` | `LineOfSightResult \| null` | `{ visible, obstruction, clearance, distance, profile }`; options `fromHeight` (1.7 m), `toHeight` (0), `curvature`, `refraction` |
+| `showProfile(path \| lineOfSight, options?)` | `this` | Open the profile panel for a path or a line-of-sight result |
+| `hideProfile()` | `this` | Close it |
 
 Slope, aspect and curvature come from the same 12-texel surface the shader shades, at the finest loaded tile's resolution.
 
@@ -243,6 +256,70 @@ Slope, aspect and curvature come from the same 12-texel surface the shader shade
 map.on('moveend', () => {
   const pick = map.pick(200, 150);
   if (pick) console.log(`${pick.elevation.toFixed(1)} m, ${pick.slope.toFixed(1)}°`, pick.lngLat);
+});
+```
+
+Distances are geodesic (WGS84 ellipsoid); `surfaceDistance` follows the terrain, sampled at the loaded tiles' resolution. Areas are computed on the authalic sphere (within about 0.5 % of the ellipsoid for regional polygons); `surfaceArea` adds the slopes. A line of sight drops distant terrain by the Earth's curvature less refraction, like the viewshed.
+
+#### Tools
+
+`startTool(mode)` starts a measuring tool on the map: `'distance'`, `'area'`, `'profile'` (a path whose profile opens when finished) or `'sight'` (observer, then target). Click (tap) to add points, drag a point to move it, double-click, Enter or a long press to finish, Backspace to remove the last point, Escape to stop. The geometry stays until `clearTool()` or the next tool.
+
+| Method | Returns | Description |
+|---|---|---|
+| `startTool(mode)` | `this` | Start a tool |
+| `finishTool()` | `this` | Finish drawing |
+| `clearTool()` | `this` | Stop and remove its geometry |
+| `getTool()` | `{ mode, drawing, points, result }` | The tool's state |
+
+```ts
+map.on('measure', ({ mode, final, result }) => {
+  if (final && result?.mode === 'distance') console.log(formatDistance(result.path.surfaceDistance));
+});
+map.startTool('distance');
+```
+
+With `guiDisplay.tools` the toolbar offers the tools, plus the viewshed from a clicked point, and shows the live result with *Profile*, *Finish* and *Clear*.
+
+#### Overlay Layers
+
+GeoJSON features drawn on the terrain: lines draped along it (densified to the loaded terrain and draped again as finer tiles load), points as round markers, polygon fills rasterized into a coat (so they lie exactly on the ground; they take one of the 4 raster slots), labels from a property. Terrain in front hides them.
+
+| Method | Returns | Description |
+|---|---|---|
+| `addOverlayLayer(options)` | `LayerHandle` | Add an overlay |
+| `setOverlayData(handle, data)` | `this` | Replace its features |
+| `setOverlayStyle(handle, style)` | `this` | Replace its style |
+| `setOverlayVisible(handle, visible)` | `this` | |
+| `setOverlayOpacity(handle, opacity)` | `this` | Lines, points, labels and the fill coat |
+| `removeOverlayLayer(handle)` | `this` | |
+| `getOverlayLayers()` | `OverlayLayer[]` | |
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `layerName` | `string` | *required* | Display name (also of the fill coat) |
+| `data` | `GeoJSON` | — | FeatureCollection, Feature or Geometry in lng/lat; z values are ignored |
+| `style` | `OverlayStyle \| (feature) => OverlayStyle` | — | One style, or one per feature |
+| `fills` | `boolean` | `true` | Draw polygon fills as a coat |
+| `minZoom`, `maxZoom` | `number` | `0`, `20` | Zoom range the overlay shows in |
+| `layerDisplay` | `{ visible?, opacity? }` | | |
+
+| Style | Default | Description |
+|---|---|---|
+| `color` | `'#ff6a00'` | Default for lines, points and fills (CSS color or `[r, g, b]`) |
+| `opacity` | `1` | Lines and points |
+| `lineWidth`, `lineColor` | `2.5`, `color` | Width in CSS pixels |
+| `fillColor`, `fillOpacity` | `color`, `0.3` | `fillColor: null` for no fill |
+| `pointRadius`, `pointColor` | `5`, `color` | Radius in CSS pixels |
+| `pointStroke`, `pointStrokeWidth` | white, `1.5` | Marker outline |
+| `label` | — | A property name, or `(properties) => text` |
+| `labelColor`, `labelHalo`, `labelSize` | dark, white, `12` | |
+
+```ts
+map.addOverlayLayer({
+  layerName: 'Huts',
+  data: huts, // a GeoJSON FeatureCollection of points
+  style: (f) => ({ color: f.properties?.open ? '#2f9e44' : '#868e96', label: 'name' }),
 });
 ```
 
@@ -528,6 +605,8 @@ map.on('tileerror', ({ coord, layer, error }) => { /* request failed; retried wi
 | `'analysisend'` | `{ id, kind, label, status, error? }` | `status`: `'done' \| 'cancelled' \| 'error'` |
 | `'sunchange'` | `{ azimuth, altitude, time }` | The sun moved |
 | `'pickstart'` / `'pickend'` | `{ prompt }` / `{}` | `pickLocation()` waits for a click / stopped waiting |
+| `'toolchange'` | `{ mode, drawing }` | A tool started, finished drawing or stopped |
+| `'measure'` | `{ mode, final, result }` | A tool's result changed (`final` when drawing ended; `result` null when cleared) |
 
 ---
 
@@ -695,6 +774,10 @@ interface ElevationGrid extends RegionInfo { data: Float32Array; min: number; ma
 interface AnalysisJob { id: string; kind: string; label: string; stage: 'loading' | 'computing'; progress: number }
 interface SunPosition { azimuth: number; altitude: number; declination: number; equationOfTime: number }
 interface TerrainPick extends TerrainSample { lngLat: LngLat }
+interface PathMeasure { distance: number; surfaceDistance: number; gain: number; loss: number; minElevation: number | null; maxElevation: number | null; vertexDistances: number[]; profile: ProfileSample[] }
+interface AreaMeasure { area: number; surfaceArea: number; perimeter: number; minElevation: number | null; maxElevation: number | null }
+interface LineOfSightResult { visible: boolean; distance: number; clearance: number; eyeElevation: number; targetElevation: number; obstruction: { lngLat: LngLat; distance: number; elevation: number } | null; profile: (ProfileSample & { sight: number })[] }
+type ToolMode = 'distance' | 'area' | 'profile' | 'sight';
 interface ProfileSample { lngLat: LngLat; distance: number; elevation: number | null }
 interface TreeletStats {
   tiles: number; drawCalls: number; frameTime: number; atlasUsed: number; atlasCapacity: number;
@@ -721,7 +804,8 @@ For advanced use, Treelet re-exports its internal building blocks:
 | `EventEmitter` | Base event system |
 | `RawRGBDecoder`, `MapboxDecoder`, `TerrariumDecoder` | Built-in decoder instances |
 | `registerDecoder()`, `resolveDecoder()` | Decoder registration and lookup |
-| `TreeletPanel`, `TreeletCompass`, `TreeletAttribution`, `TreeletLegend`, `TreeletReadout` | UI components |
+| `TreeletPanel`, `TreeletCompass`, `TreeletAttribution`, `TreeletLegend`, `TreeletReadout`, `TreeletToolbar`, `TreeletProfile`, `TreeletLabels` | UI components |
+| `geodesicDistance`, `polygonArea`, `lineOfSightProfile`, `formatDistance`, `formatArea` | Geodesy, line of sight and formatting helpers |
 | `defineTreeletElements()` | Register the UI custom elements (done automatically by `Treelet`) |
 
 ---

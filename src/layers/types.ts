@@ -8,6 +8,7 @@ import type { TileBounds } from '../core/types';
 import type { TileSource } from '../sources/TileSource';
 import type { ElevationDecoder } from '../decoders/ElevationDecoder';
 import type { CoatBlendMode, Ramp } from '../analysis/types';
+import type { GeoJSON, OverlayStyleSpec } from '../overlays/types';
 
 // === Decoder Name ===
 
@@ -131,10 +132,16 @@ export interface ResolvedAnalysisLayerDisplay {
   blendMode: CoatBlendMode;
 }
 
-// === Overlay Layer (stub) ===
+// === Overlay Layer ===
 
 export interface OverlayLayerOptions {
   layerName: string;
+  /** Features to draw: a GeoJSON FeatureCollection, Feature or Geometry (lng/lat). */
+  data?: GeoJSON;
+  /** How to draw them: one style, or a function of each feature. */
+  style?: OverlayStyleSpec;
+  /** Rasterize polygon fills into a coat (default true; outlines are always lines). */
+  fills?: boolean;
   minZoom?: number;
   maxZoom?: number;
   layerDisplay?: OverlayLayerDisplay;

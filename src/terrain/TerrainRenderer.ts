@@ -1033,6 +1033,11 @@ export class TerrainRenderer {
     return true;
   }
 
+  /** World size of a texel of the finest terrain level in view (draping and sampling step). */
+  finestTexelWorld(): number {
+    return this.tileGrid.worldScale / 2 ** this.lastMaxLevel / Math.max(this.atlas.slotSize - 1, 1);
+  }
+
   /** Shader slot of layer `id`'s raster, or -1. */
   rasterSlot(id: string): number {
     return this.rasters.slotOf(id);

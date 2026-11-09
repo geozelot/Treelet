@@ -25,6 +25,7 @@ const map = (window as any).__treelet = Treelet.map('map', {
     glass: true,
     compassPosition: 'top-right',
     layerPosition: 'bottom-right',
+    tools: 'top-left',
   },
 });
 
@@ -89,8 +90,28 @@ const basemapOrtho = map.addDrapeLayer({
 // preset adds its own analyses on top of the imagery it picks. Open the
 // Overlay stack in the layer panel to change them.
 // =========================================================================
-type Preset = 'relief' | 'avalanche' | 'flood' | 'viewshed' | 'sun';
+type Preset = 'relief' | 'avalanche' | 'flood' | 'viewshed' | 'sun' | 'peaks';
 let presetLayers: ReturnType<typeof map.addAnalysisLayer>[] = [];
+let presetOverlay: ReturnType<typeof map.addOverlayLayer> | null = null;
+
+/** Demo data: a few summits around Innsbruck (approximate positions) and a route up the Nordkette. */
+const PEAKS = {
+  type: 'FeatureCollection' as const,
+  features: [
+    { name: 'Hafelekarspitze', ele: 2334, at: [11.3858, 47.3125] },
+    { name: 'Patscherkofel', ele: 2246, at: [11.4613, 47.2087] },
+    { name: 'Nockspitze', ele: 2404, at: [11.3207, 47.1870] },
+    { name: 'Glungezer', ele: 2677, at: [11.5277, 47.2273] },
+    { name: 'Serles', ele: 2717, at: [11.3870, 47.1290] },
+  ].map((p) => ({ type: 'Feature' as const, properties: { name: p.name, ele: p.ele }, geometry: { type: 'Point' as const, coordinates: p.at } })),
+};
+const ROUTE = {
+  type: 'Feature' as const,
+  properties: { name: 'Nordkette route' },
+  geometry: { type: 'LineString' as const, coordinates: [
+    [11.3933, 47.2690], [11.3905, 47.2805], [11.3862, 47.2905], [11.3812, 47.2985], [11.3838, 47.3065], [11.3858, 47.3125],
+  ] },
+};
 
 /** Hafelekar (2256 m) on the Nordkette, straight above Innsbruck. */
 const SUMMIT = { lng: 11.3853, lat: 47.3122 };
@@ -100,6 +121,8 @@ function applyPreset(name: Preset): void {
   map.cancelPick();
   for (const h of presetLayers) map.removeAnalysisLayer(h);
   presetLayers = [];
+  if (presetOverlay) map.removeOverlayLayer(presetOverlay);
+  presetOverlay = null;
   if (name !== 'sun' && map.getSunTime()) {
     // Back to the default sun from the north-west
     map.setSunTime(null);
@@ -134,6 +157,15 @@ function applyPreset(name: Preset): void {
     map.activateDrapeLayer(basemapOrtho);
     map.setView({ lng: SUMMIT.lng, lat: SUMMIT.lat - 0.04 }, 10.8);
     keep(map.computeViewshed(SUMMIT, { radius: 12000, eyeHeight: 2, layerDisplay: { opacity: 0.8 } }));
+  } else if (name === 'peaks') {
+    // A GeoJSON overlay: summits with labels and a route draped over the satellite imagery
+    map.activateDrapeLayer(satellite);
+    map.setView({ lng: 11.41, lat: 47.24 }, 10.8);
+    presetOverlay = map.addOverlayLayer({
+      layerName: 'Peaks',
+      data: { type: 'FeatureCollection', features: [...PEAKS.features, ROUTE] },
+      style: { color: '#ff6a00', lineWidth: 3, pointRadius: 5, label: (p) => (p.ele ? `${p.name} ${p.ele} m` : null) },
+    });
   } else {
     // Winter solstice: hours of direct sun in the Inn valley, sun placed at 10:30
     map.deactivateDrapeLayer();
@@ -168,3 +200,4 @@ console.log('Inspect: map.sampleTerrain({ lng, lat }), map.pick(x, y), map.getEl
 console.log('Coats: map.addAnalysisLayer({ analysis: "slope", ramp: "avalanche" }), map.getLayerStack(), map.getLegends()');
 console.log('Water: const w = map.addAnalysisLayer({ analysis: "water" }); map.animateAnalysisParams(w, { level: 2000 }, 3000)');
 console.log('Regions: map.computeViewshed({ lng, lat }), map.computeSunHours({ date }), map.computeSkyView(), map.computeTpi(), map.getElevationGrid()');
+console.log('Tools: map.startTool("distance" | "area" | "profile" | "sight"), map.lineOfSight(a, b), map.showProfile([a, b]), map.addOverlayLayer({ layerName, data: geojson })');

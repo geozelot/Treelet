@@ -27,6 +27,7 @@ import type {
   TreeletOptions,
   ResolvedTreeletOptions,
   TreeletEventMap,
+  LineOfSightResult,
   LngLat,
   BlendMode,
   TerrainPick,
@@ -70,6 +71,17 @@ import {
   type RegionAnalysisKind,
 } from './AnalysisController';
 import { sunPosition, type SunPosition } from '../analysis/solar';
+import { OverlayRenderer } from '../overlays/OverlayRenderer';
+import type { GeoJSON, OverlayStyleSpec } from '../overlays/types';
+import type { OverlayLayer } from '../layers/OverlayLayer';
+import type { TreeletLabels } from '../ui/TreeletLabels';
+import type { TreeletProfile, ProfileData } from '../ui/TreeletProfile';
+import type { TreeletToolbar } from '../ui/TreeletToolbar';
+import { ToolController, type ToolMode, type ToolResult } from '../tools/ToolController';
+import { formatDistance, formatElevation } from '../tools/format';
+import { measurePath, measureSurfaceArea, geodesicAreaOf, type PathMeasure, type AreaMeasure } from '../tools/measure';
+import { lineOfSightProfile, type LineOfSightOptions } from '../analysis/lineOfSight';
+import { geodesicDistance } from '../analysis/geodesy';
 import { boundsAround } from '../analysis/region';
 import { gridRange, resampleRowsToMercator } from '../analysis/grid';
 import { TileGrid } from '../tiles/TileGrid';
@@ -164,6 +176,7 @@ export function resolveOptions(user: TreeletOptions): ResolvedTreeletOptions {
       layerPosition: gui.layerPosition ?? DEFAULT_OPTIONS.guiDisplay.layerPosition,
       legendPosition: gui.legendPosition ?? DEFAULT_OPTIONS.guiDisplay.legendPosition,
       readoutPosition: gui.readoutPosition ?? DEFAULT_OPTIONS.guiDisplay.readoutPosition,
+      tools: gui.tools ?? DEFAULT_OPTIONS.guiDisplay.tools,
       glass: gui.glass ?? DEFAULT_OPTIONS.guiDisplay.glass,
     },
     mapDisplay: {
@@ -252,6 +265,13 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
   private sunTime: Date | null = null;
   /** The pending pickLocation(), if any. */
   private picking: { finish: (pick: TerrainPick | null) => void } | null = null;
+  /** Draws overlay layers (and the tools' geometry) on the terrain. */
+  private readonly overlays: OverlayRenderer;
+  private readonly labels: TreeletLabels | null = null;
+  /** Measuring tools, the profile panel and the toolbar. */
+  private readonly tools: ToolController;
+  private profile: TreeletProfile | null = null;
+  private toolbar: TreeletToolbar | null = null;
   private readonly scratch = new Vector3();
   private readonly scratchDir = new Vector3();
 
@@ -329,6 +349,55 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
       defaultBounds: () => this.defaultRegionBounds(),
       sunTime: () => this.sunTime,
     });
+    // Overlays: draped lines and points, fills as coats, DOM labels
+    defineTreeletElements();
+    if (typeof document !== 'undefined') {
+      this.labels = document.createElement('treelet-labels') as TreeletLabels;
+      this.container.appendChild(this.labels);
+    }
+    this.overlays = new OverlayRenderer({
+      scene: this.sceneManager.scene,
+      camera: this.sceneManager.camera,
+      renderer: this.sceneManager.renderer,
+      labels: this.labels,
+      toWorld: (lngLat) => this.lngLatToWorld(lngLat),
+      groundZ: (x, y) => this.groundZ(x, y),
+      texelWorld: () => this.terrainRenderer.finestTexelWorld(),
+      terrainKey: () => `${this.terrainRenderer.elevationVersion}|${this.exag}`,
+      zoom: () => this.sceneManager.cameraController.deriveZoom(),
+      requestRender: () => this.sceneManager.requestRender(),
+      isOccluded: (x, y, z) => this.isOccluded(x, y, z),
+      fills: {
+        add: (name, raster, opacity) => {
+          try {
+            return this.layerController.addRasterLayer({ analysis: 'image', layerName: name, layerDisplay: { opacity } }, raster).id;
+          } catch (err) {
+            console.warn(`treelet: overlay "${name}" fills not shown:`, (err as Error).message);
+            return null;
+          }
+        },
+        remove: (id) => { this.layerController.removeAnalysisLayer(id); },
+        setVisible: (id, visible) => { if (this.displayController.setLayerVisible(id, visible)) this.emit('layerchange', {}); },
+        setOpacity: (id, opacity) => { if (this.displayController.setLayerOpacity(id, opacity)) this.emit('layerchange', {}); },
+      },
+    });
+    this.tools = new ToolController({
+      canvas: this.sceneManager.renderer.domElement,
+      container: this.container,
+      pick: (x, y) => this.pick(x, y),
+      project: (lngLat) => this.project(lngLat),
+      setOverlay: (id, data, style) => this.setInternalOverlay(id, data, style),
+      setControlsEnabled: (enabled) => { this.sceneManager.cameraController.controls.enabled = enabled; },
+      measureDistance: (points) => this.measureDistance(points),
+      measureArea: (ring, cells) => this.measureArea(ring, { cells }),
+      lineOfSight: (from, to) => this.lineOfSight(from, to),
+      report: (result, final) => {
+        this.emit('measure', { mode: this.tools.mode, final, result });
+        if (final && result?.mode === 'profile') this.showProfile(result.points);
+        if (final && result?.mode === 'sight' && result.sight) this.showProfile(result.sight);
+      },
+      changed: () => this.emit('toolchange', { mode: this.tools.mode, drawing: this.tools.active }),
+    });
     // A bare map shows shaded relief; imagery and analyses stack over it.
     this.layerController.addAnalysisLayer({ analysis: 'hillshade' });
     this.displayController.updateSunDirection();
@@ -393,6 +462,12 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
         this.legend = document.createElement('treelet-legend') as TreeletLegend;
         this.cornerSlot(gd.legendPosition).appendChild(this.legend);
         this.legend.attach(this, { glass: gd.glass });
+      }
+      if (gd.enabled && gd.tools !== false) {
+        this.toolbar = document.createElement('treelet-toolbar') as TreeletToolbar;
+        const slot = this.cornerSlot(gd.tools === true ? 'top-left' : gd.tools);
+        slot.prepend(this.toolbar);
+        this.toolbar.attach(this, { glass: gd.glass });
       }
     }
   }
@@ -518,6 +593,9 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
     this.teleported = false;
     this.compass?.updateTileCount(this.terrainRenderer.getInstanceCount());
 
+    // ==== Overlays (draped again as finer terrain loads) ====
+    const overlaysChanged = this.overlays.update(cameraMoved || adjusted);
+
     // ==== Events ====
     if (cameraMoved || adjusted) this.emit('move', { center: this.getCenter() });
     if (!(Math.abs(zoom - this.lastZoom) < 1e-3)) {
@@ -525,7 +603,20 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
       this.emit('zoom', { zoom });
     }
 
-    return needsRender || adjusted || horizon !== range || this.terrainHeight !== terrainHeight;
+    return needsRender || overlaysChanged || adjusted || horizon !== range || this.terrainHeight !== terrainHeight;
+  }
+
+  /** Whether terrain lies between the camera and a world point (scene units). */
+  private isOccluded(x: number, y: number, z: number): boolean {
+    const cam = this.sceneManager.camera;
+    const origin = this.scratch.setFromMatrixPosition(cam.matrixWorld);
+    const dir = this.scratchDir.set(x - origin.x, y - origin.y, z - origin.z);
+    const dist = dir.length();
+    if (!(dist > 0)) return false;
+    dir.divideScalar(dist);
+    // The march may step past its end: only a hit in front of the point counts
+    const t = marchToTerrain(this.groundZ, origin, dir, cam.near, dist * 0.985, 1.03, dist / 300, 240);
+    return t !== null && t < dist * 0.985;
   }
 
   /** Debounced end of a camera interaction. */
@@ -711,6 +802,180 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
     const surface = this.terrainRenderer.sampleSurfaceAtWorld(px, py);
     if (surface === null) return null;
     return { lngLat: this.worldToLngLat(px, py), ...Treelet.toTerrainSample(surface) };
+  }
+
+  /** Screen position (container-relative CSS pixels) of the terrain at a position, or null when it is off screen or behind the camera. */
+  project(lngLat: LngLat): { x: number; y: number } | null {
+    if (this.destroyed) return null;
+    const w = this.lngLatToWorld(lngLat);
+    const z = this.groundZ(w.x, w.y) ?? 0;
+    const cam = this.sceneManager.camera;
+    cam.updateMatrixWorld();
+    const v = this.scratch.set(w.x, w.y, z).project(cam);
+    if (v.z > 1 || v.z < -1) return null;
+    const width = this.container.clientWidth;
+    const height = this.container.clientHeight;
+    return { x: (v.x * 0.5 + 0.5) * width, y: (-v.y * 0.5 + 0.5) * height };
+  }
+
+  /** Ground meters between samples at the finest loaded terrain resolution, at a latitude. */
+  private sampleSpacing(lat: number): number {
+    const texel = this.terrainRenderer.finestTexelWorld();
+    const metersPerUnit = 1 / this.metersToScene; // at the equator
+    return Math.max(1, texel * metersPerUnit * Math.cos((lat * Math.PI) / 180));
+  }
+
+  /**
+   * Measure a path: geodesic length, length along the terrain, ascent and
+   * descent, lowest and highest point, and its elevation profile, sampled at
+   * the loaded terrain's resolution.
+   */
+  measureDistance(points: readonly LngLat[]): PathMeasure {
+    const lat = points.length ? points.reduce((a, p) => a + p.lat, 0) / points.length : 0;
+    return measurePath(points, (p) => this.getElevation(p), this.sampleSpacing(lat));
+  }
+
+  /** Measure a polygon (a ring of positions): geodesic area and perimeter, and the area of the terrain surface inside. */
+  measureArea(ring: readonly LngLat[], options: { cells?: number } = {}): AreaMeasure {
+    const { area, perimeter } = geodesicAreaOf(ring);
+    const worldRing = ring.map((p) => { const w = this.lngLatToWorld(p); return [w.x, w.y] as [number, number]; });
+    const W = this.options.mapDisplay.worldScale;
+    const surface = measureSurfaceArea([worldRing], {
+      cells: options.cells,
+      metersPerUnit: (y) => 1 / (this.metersToScene * WebMercator.scaleFactorAtWorldY(y, W)),
+      surfaceAt: (x, y) => {
+        const s = this.terrainRenderer.sampleSurfaceAtWorld(x, y);
+        return s ? { h: s.h, nz: s.n[2] } : null;
+      },
+    });
+    // The grid's area converges on the geodesic one; scale the surface to match it
+    const scale = surface.planarArea > 0 ? area / surface.planarArea : 1;
+    return {
+      area,
+      perimeter,
+      surfaceArea: surface.surfaceArea * scale,
+      minElevation: surface.minElevation,
+      maxElevation: surface.maxElevation,
+    };
+  }
+
+  /**
+   * Whether `to` can be seen from `from` over the loaded terrain (Earth
+   * curvature and refraction included), with the first obstruction and the
+   * profile. Null when the ends have no elevation data.
+   */
+  lineOfSight(from: LngLat, to: LngLat, options: LineOfSightOptions = {}): LineOfSightResult | null {
+    const distance = geodesicDistance(from, to);
+    const n = Math.max(64, Math.min(8000, Math.ceil(distance / this.sampleSpacing((from.lat + to.lat) / 2)) + 1));
+    const profile = this.getElevationProfile(from, to, n);
+    if (profile[0].elevation === null || profile[profile.length - 1].elevation === null) return null;
+    // Rescale the sampled distances to the ellipsoid's
+    const along = profile[profile.length - 1].distance;
+    if (along > 0) for (const s of profile) s.distance *= distance / along;
+    const r = lineOfSightProfile(profile, options);
+    const o = r.obstructionIndex >= 0 ? profile[r.obstructionIndex] : null;
+    return {
+      visible: r.visible,
+      distance,
+      clearance: r.clearance,
+      eyeElevation: r.eyeElevation,
+      targetElevation: r.targetElevation,
+      obstruction: o ? { lngLat: o.lngLat, distance: o.distance, elevation: o.elevation! } : null,
+      profile: profile.map((s, i) => ({ ...s, sight: r.sight[i] })),
+    };
+  }
+
+  // =========================================================================
+  // Tools and profile
+  // =========================================================================
+
+  /**
+   * Start a measuring tool on the map: 'distance', 'area', 'profile' (a path
+   * whose profile opens when finished) or 'sight' (observer, then target).
+   * Results arrive as 'measure' events.
+   */
+  startTool(mode: ToolMode): this {
+    if (!['distance', 'area', 'profile', 'sight'].includes(mode)) throw new Error(`treelet: unknown tool "${mode as string}"`);
+    this.cancelPick();
+    this.tools.start(mode);
+    return this;
+  }
+  /** Finish drawing (the result stays shown until clearTool()). */
+  finishTool(): this { this.tools.finish(); return this; }
+  /** Stop the tool and remove its geometry. */
+  clearTool(): this { this.tools.clear(); return this; }
+  /** The tool's state: mode, whether it is still drawing, its points and result. */
+  getTool(): { mode: ToolMode | null; drawing: boolean; points: LngLat[]; result: ToolResult | null } {
+    return { mode: this.tools.mode, drawing: this.tools.active, points: [...this.tools.points], result: this.tools.result };
+  }
+
+  /**
+   * Show an elevation profile at the bottom of the map: of a path (two or
+   * more positions) or of a line-of-sight result (with the sight line).
+   * Hovering the chart marks the point on the terrain.
+   */
+  showProfile(input: readonly LngLat[] | LineOfSightResult, options: { title?: string } = {}): this {
+    let data: ProfileData;
+    if (Array.isArray(input)) {
+      if (input.length < 2) throw new Error('treelet: a profile needs at least two positions');
+      const m = this.measureDistance(input);
+      const range = m.minElevation !== null ? `${formatElevation(m.minElevation)} – ${formatElevation(m.maxElevation)}` : '–';
+      data = {
+        title: options.title ?? 'Elevation profile',
+        points: m.profile,
+        stats: [
+          ['Length', formatDistance(m.distance)],
+          ['Terrain', formatDistance(m.surfaceDistance)],
+          ['Ascent', formatElevation(m.gain)],
+          ['Descent', formatElevation(m.loss)],
+          ['Range', range],
+        ],
+      };
+    } else {
+      const r = input as LineOfSightResult;
+      data = {
+        title: options.title ?? 'Line of sight',
+        points: r.profile,
+        obstructionIndex: r.obstruction ? r.profile.findIndex((p) => p.distance >= r.obstruction!.distance) : -1,
+        stats: [
+          ['Distance', formatDistance(r.distance)],
+          ['Result', r.visible ? 'Visible' : `Blocked at ${formatDistance(r.obstruction!.distance)}`],
+          ['Clearance', formatElevation(r.clearance)],
+          ['Eye', formatElevation(r.eyeElevation)],
+          ['Target', formatElevation(r.targetElevation)],
+        ],
+      };
+    }
+    if (!this.profile) {
+      defineTreeletElements();
+      this.profile = document.createElement('treelet-profile') as TreeletProfile;
+      this.container.appendChild(this.profile);
+      this.profile.attach({
+        glass: this.options.guiDisplay.glass,
+        onHover: (p) => this.setInternalOverlay('__profile_marker__',
+          p ? { type: 'Point', coordinates: [p.lngLat.lng, p.lngLat.lat] } : null,
+          { color: '#1c7ed6', pointRadius: 6, pointStrokeWidth: 2 }),
+        onClose: () => this.setInternalOverlay('__profile_marker__', null, {}),
+      });
+    }
+    this.profile.show(data);
+    return this;
+  }
+
+  /** Close the profile panel. */
+  hideProfile(): this {
+    this.profile?.hide();
+    this.setInternalOverlay('__profile_marker__', null, {});
+    return this;
+  }
+
+  /** Geometry drawn by the tools (not listed as overlay layers). */
+  private setInternalOverlay(id: string, data: GeoJSON | null, style: OverlayStyleSpec): void {
+    if (!data) {
+      this.overlays.remove(id);
+      return;
+    }
+    this.overlays.set(id, { name: id, data, style, fills: false, order: 100 });
   }
 
   /** The elevation range (min, max in meters) of the tiles drawn in the last frame. */
@@ -1032,8 +1297,77 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
   // Overlay Layer API (→ LayerController)
   // =========================================================================
 
-  addOverlayLayer(options: OverlayLayerOptions): LayerHandle { return this.layerController.addOverlayLayer(options); }
-  removeOverlayLayer(handle: LayerHandle | string): this { this.layerController.removeOverlayLayer(handle); return this; }
+  /**
+   * Draw GeoJSON features on the terrain: lines and points draped over it,
+   * polygon fills as a coat, labels from a property.
+   */
+  addOverlayLayer(options: OverlayLayerOptions): LayerHandle {
+    const handle = this.layerController.addOverlayLayer(options);
+    const layer = this.layerRegistry.getOverlayLayer(handle)!;
+    this.overlays.set(layer.id, this.overlayInput(layer));
+    return handle;
+  }
+  removeOverlayLayer(handle: LayerHandle | string): this {
+    const id = typeof handle === 'string' ? handle : handle.id;
+    this.overlays.remove(id);
+    this.layerController.removeOverlayLayer(id);
+    return this;
+  }
+  /** Replace an overlay's features. */
+  setOverlayData(handle: LayerHandle | string, data: GeoJSON | null): this {
+    const layer = this.overlayLayer(handle);
+    if (!layer) return this;
+    layer.data = data;
+    this.overlays.set(layer.id, this.overlayInput(layer));
+    this.emit('layerchange', {});
+    return this;
+  }
+  /** Replace an overlay's style (an object, or a function of each feature). */
+  setOverlayStyle(handle: LayerHandle | string, style: OverlayStyleSpec | undefined): this {
+    const layer = this.overlayLayer(handle);
+    if (!layer) return this;
+    layer.style = style;
+    this.overlays.setStyle(layer.id, style);
+    this.emit('layerchange', {});
+    return this;
+  }
+  setOverlayVisible(handle: LayerHandle | string, visible: boolean): this {
+    const layer = this.overlayLayer(handle);
+    if (!layer || layer.visible === visible) return this;
+    layer.visible = visible;
+    (layer.display as { visible: boolean }).visible = visible;
+    this.overlays.setVisible(layer.id, visible);
+    this.emit('layerchange', {});
+    return this;
+  }
+  setOverlayOpacity(handle: LayerHandle | string, opacity: number): this {
+    const layer = this.overlayLayer(handle);
+    if (!layer || !Number.isFinite(opacity)) return this;
+    (layer.display as { opacity: number }).opacity = Math.max(0, Math.min(1, opacity));
+    this.overlays.setOpacity(layer.id, layer.display.opacity);
+    this.emit('layerchange', {});
+    return this;
+  }
+  getOverlayLayers(): OverlayLayer[] { return this.layerRegistry.getAllOverlayLayers(); }
+
+  private overlayLayer(handle: LayerHandle | string): OverlayLayer | null {
+    const layer = this.layerRegistry.getOverlayLayer(handle);
+    if (!layer) console.warn(`treelet: overlay layer "${typeof handle === 'string' ? handle : handle.id}" not found`);
+    return layer ?? null;
+  }
+
+  private overlayInput(layer: OverlayLayer) {
+    return {
+      name: layer.layerName,
+      data: layer.data,
+      style: layer.style,
+      visible: layer.visible,
+      opacity: layer.display.opacity,
+      minZoom: layer.minZoom,
+      maxZoom: layer.maxZoom,
+      fills: layer.fills,
+    };
+  }
 
   // =========================================================================
   // Display API (→ DisplayController)
@@ -1158,6 +1492,8 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
     this.destroyed = true;
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
+    this.tools.dispose();
+    this.overlays.dispose();
     this.terrainRenderer.dispose();
     this.workerPool.dispose();
     this.sceneManager.dispose();
@@ -1167,6 +1503,9 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
     this.tweens.clear();
     this.cancelPick();
     this.analysisController.cancelAll();
+    if (this.labels) this.labels.remove();
+    if (this.profile) { this.profile.remove(); this.profile = null; }
+    if (this.toolbar) { this.toolbar.remove(); this.toolbar = null; }
     if (this.compass) { this.compass.remove(); this.compass = null; }
     if (this.attribution) { this.attribution.remove(); this.attribution = null; }
     if (this.legend) { this.legend.remove(); this.legend = null; }

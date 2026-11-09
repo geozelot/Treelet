@@ -45,3 +45,5 @@ export { sampleSurfaceGrid, type GridReader } from './surface';
 export * from './builtins';
 export { sunPosition, sunPathOfDay, type SunPosition } from './solar';
 export { planRegion, type RegionPlan, type RegionWindow } from './region';
+export { geodesicDistance, pathLength, ringArea, polygonArea } from './geodesy';
+export { lineOfSightProfile, type LineOfSightOptions, type SightSample } from './lineOfSight';

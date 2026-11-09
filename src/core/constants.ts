@@ -132,6 +132,7 @@ export const DEFAULT_OPTIONS: ResolvedTreeletOptions = {
     layerPosition: 'bottom-right',
     legendPosition: 'bottom-left',
     readoutPosition: 'bottom-left',
+    tools: false,
     glass: false,
   },
   mapDisplay: {

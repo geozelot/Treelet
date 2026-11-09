@@ -20,8 +20,23 @@ export type {
   TerrainPick,
   TerrainSample,
   ProfileSample,
+  LineOfSightResult,
   TreeletStats,
 } from './core/types';
+
+// Overlays (GeoJSON on the terrain) and measuring tools
+export type {
+  GeoJSON,
+  Feature,
+  FeatureCollection,
+  Geometry,
+  OverlayStyle,
+  OverlayStyleSpec,
+  ColorValue,
+} from './overlays/types';
+export type { PathMeasure, AreaMeasure } from './tools/measure';
+export type { ToolMode, ToolResult } from './tools/ToolController';
+export { formatDistance, formatArea, formatElevation } from './tools/format';
 
 // Region analyses (viewshed, sun hours, sky view, TPI, elevation grids)
 export type {
@@ -96,4 +111,7 @@ export { TreeletCompass } from './ui/TreeletCompass';
 export { TreeletAttribution } from './ui/TreeletAttribution';
 export { TreeletLegend } from './ui/TreeletLegend';
 export { TreeletReadout } from './ui/TreeletReadout';
+export { TreeletLabels } from './ui/TreeletLabels';
+export { TreeletProfile } from './ui/TreeletProfile';
+export { TreeletToolbar } from './ui/TreeletToolbar';
 export { defineTreeletElements } from './ui/elements';

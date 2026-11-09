@@ -43,16 +43,18 @@ The library is designed to be easily extendable - via registry or plugin package
   - **Imagery** - one drape layer at a time, with opacity and blend mode
   - **Analyses** - any number, stacked over the imagery with opacity and blend mode:
     - **Elevation** - topographic coloring (fixed or auto range)
-    - **Slope** - slope angle in degrees
-    - **Aspect** - downslope bearing (cyclic ramp)
+    - **Slope** - slope angle in degrees, optionally only for an aspect sector (avalanche classes preset)
+    - **Aspect** - downslope bearing (cyclic ramp or eight sectors)
+    - **Curvature** - profile, plan or total curvature on a diverging ramp
     - **Contours** - lines computed from the DEM per pixel, with index lines
+    - **Water level** - flooding below a level, animatable
     - **Hillshade** - terrain light from the map's sun
-  - **Ramps** - built-in or custom color stops and classes, with legends
+  - **Ramps** - built-in or custom color stops and classes (with alpha), with legends
   - **Custom analyses** - a GLSL snippet plus a parameter schema (`registerAnalysis`)
 
 - #### Inspection:
-  - **Elevation readout** - `getElevation(lngLat)`
-  - **Terrain picking** - `pick(x, y)`
+  - **Cursor readout** - elevation, slope and aspect under the pointer
+  - **Terrain sampling** - `sampleTerrain(lngLat)`, `pick(x, y)`: elevation, slope, aspect, curvature, normal
   - **Elevation profiles** - `getElevationProfile(from, to)`
 
 ###
@@ -191,6 +193,7 @@ The defaults fit a typical view in well under the tile budget at any screen size
 | `compassPosition` | `UICorner` | `'top-right'` | Compass widget corner |
 | `layerPosition` | `UICorner` | `'bottom-right'` | Layer panel corner |
 | `legendPosition` | `UICorner \| false` | `'bottom-left'` | Corner of the legend for the visible analyses, or `false` for none |
+| `readoutPosition` | `UICorner \| false` | `'bottom-left'` | Corner of the cursor readout (elevation, slope, aspect under the pointer), or `false` for none; stacks with the legend in a shared corner |
 | `glass` | `boolean` | `false` | Frosted-glass controls (translucent, map blurred behind); costs some GPU time while the map redraws |
 
 The controls open on mouse hover, on a tap (touch screens; a tap elsewhere closes them) and with the keyboard (Tab to a control, Escape to close). On a touch screen the first tap on the compass opens its panel and the next one resets the orientation. On narrow maps the compass panel drops its Map and Viewport sections and the layer panel shrinks to fit.
@@ -222,13 +225,17 @@ The main map class. Extends `EventEmitter`.
 | Method | Returns | Description |
 |---|---|---|
 | `getElevation(lngLat)` | `number \| null` | Elevation in meters from the finest loaded tile |
-| `pick(x, y)` | `TerrainPick \| null` | Terrain hit `{ lngLat, elevation }` under container-relative pixel `(x, y)` |
+| `sampleTerrain(lngLat)` | `TerrainSample \| null` | `{ elevation, slope, aspect, curvature, normal }` at a position (true scale; aspect is `null` on flat ground) |
+| `pick(x, y)` | `TerrainPick \| null` | The same plus `lngLat` for the terrain under container-relative pixel `(x, y)` |
 | `getElevationProfile(from, to, samples?)` | `ProfileSample[]` | `{ lngLat, distance, elevation }` samples along a line (distance in meters) |
+| `getVisibleElevationRange()` | `[number, number]` | Min and max elevation of the tiles on screen |
+
+Slope, aspect and curvature come from the same 12-texel surface the shader shades, at the finest loaded tile's resolution.
 
 ```ts
 map.on('moveend', () => {
   const pick = map.pick(200, 150);
-  if (pick) console.log(`${pick.elevation.toFixed(1)} m`, pick.lngLat);
+  if (pick) console.log(`${pick.elevation.toFixed(1)} m, ${pick.slope.toFixed(1)}°`, pick.lngLat);
 });
 ```
 
@@ -281,7 +288,7 @@ Drape layers render raster imagery onto the terrain. One drape is active at a ti
 
 #### Analysis Layers
 
-An analysis layer is a coat computed from the terrain: elevation, slope, aspect, contours or hillshade (or a kind you register). Any number can be stacked over the imagery, each with opacity and a blend mode. Kinds that map a value (elevation, slope, aspect) use a color **ramp** and have a legend; contours and hillshade produce a color directly.
+An analysis layer is a coat computed from the terrain: elevation, slope, aspect, curvature, contours, water or hillshade (or a kind you register). Any number can be stacked over the imagery, each with opacity and a blend mode. Kinds that map a value (elevation, slope, aspect, curvature) use a color **ramp** and have a legend; contours, water and hillshade produce a color directly.
 
 | Method | Returns | Description |
 |---|---|---|
@@ -289,6 +296,7 @@ An analysis layer is a coat computed from the terrain: elevation, slope, aspect,
 | `removeAnalysisLayer(handle)` | `this` | Remove the coat |
 | `setAnalysisParams(handle, params)` | `this` | Merge parameters (see the kind's parameters below) |
 | `getAnalysisParams(handle)` | `object \| null` | Current parameters |
+| `animateAnalysisParams(handle, targets, duration?)` | `Promise<boolean>` | Tween numeric parameters to `value` or from `[from, to]` over `duration` ms (default 1000); resolves `false` when replaced |
 | `setAnalysisRamp(handle, ramp)` | `this` | Ramp of a value kind: a built-in name or stops / classes |
 | `getAnalysisRamp(handle)` | `Ramp \| undefined` | Current ramp |
 | `getLegend(handle)` | `LegendSpec \| null` | Legend of a value coat (title, unit, domain, stops or classes) |
@@ -299,7 +307,7 @@ An analysis layer is a coat computed from the terrain: elevation, slope, aspect,
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `analysis` | `string` | *required* | Kind: `'elevation' \| 'slope' \| 'aspect' \| 'contours' \| 'hillshade'` or a registered id |
+| `analysis` | `string` | *required* | Kind: `'elevation' \| 'slope' \| 'aspect' \| 'curvature' \| 'contours' \| 'water' \| 'hillshade'` or a registered id |
 | `layerName` | `string` | the kind's label | Display name |
 | `params` | `object` | kind defaults | Parameters (below) |
 | `ramp` | `Ramp` | kind default | Color ramp (value kinds) |
@@ -310,27 +318,34 @@ An analysis layer is a coat computed from the terrain: elevation, slope, aspect,
 | Kind | Parameters | Ramp | Default display |
 |---|---|---|---|
 | `'elevation'` | `range: [min, max] \| 'auto'` (m; `'auto'` fits the visible data) | `'hypsometric'` | normal, opacity 1 |
-| `'slope'` | `range: [min, max]` (degrees) | `'viridis'` | normal, opacity 1 |
+| `'slope'` | `range: [min, max]` (degrees), `aspectMask: [from, to] \| null` (draw only slopes facing this sector, clockwise; `[315, 45]` is north) | `'viridis'` | normal, opacity 1 |
 | `'aspect'` | — (0° = north; flat ground fades out) | `'cyclic'` | normal, opacity 1 |
+| `'curvature'` | `mode: 'total' \| 'profile' \| 'plan'`, `range: [min, max]` (1/km; convex positive) | `'diverging'` | normal, opacity 1 |
 | `'contours'` | `interval` (m), `thickness` (px), `index` (every Nth line bolder, 0 = off), `color: [r, g, b]` | — | normal, opacity 0.75 |
+| `'water'` | `level` (m), `color: [r, g, b]`, `depthFade` (m over which the water darkens), `shoreline` (m of fade at the shore) | — | normal, opacity 0.85 |
 | `'hillshade'` | `ambient` (light on slopes facing away from the sun, 0–1) | — | multiply, opacity 0.6 |
 
-A new map starts with a hillshade coat. Slope and aspect are true-scale (unaffected by exaggeration).
+A new map starts with a hillshade coat. Slope, aspect and curvature are true-scale (unaffected by exaggeration); curvature is computed at the rendered tile's resolution, so its values grow as finer tiles load. A new water coat starts a third of the way up the visible elevation range unless `level` is given.
 
 ```ts
+// Avalanche terrain over imagery: nothing below 30°, then yellow, orange, red, violet
 const slope = map.addAnalysisLayer({
   analysis: 'slope',
-  ramp: { type: 'classes', breaks: [30, 35, 40, 45],
-          colors: [[0.9, 0.9, 0.9], [1, 1, 0], [1, 0.6, 0], [1, 0, 0], [0.5, 0, 0.5]] },
+  ramp: 'avalanche',
+  params: { aspectMask: [315, 45] }, // north-facing slopes only
   layerDisplay: { opacity: 0.7 },
 });
-map.setAnalysisParams(slope, { range: [0, 60] });
-map.getLegend(slope); // { type: 'classes', classes: [{ color, label: '< 30°' }, …] }
+map.getLegend(slope); // { type: 'classes', classes: [{ color, label: '30–35°' }, …] }
+
+// Rising water
+const water = map.addAnalysisLayer({ analysis: 'water' });
+const [lo, hi] = map.getVisibleElevationRange();
+await map.animateAnalysisParams(water, { level: [lo, (lo + hi) / 2] }, 4000);
 ```
 
 ##### Custom analyses
 
-`registerAnalysis(descriptor)` adds a kind. The descriptor's `glsl` defines `vec4 analysis_<id>(Surface s, vec4 p0, vec4 p1)`; `s.h` is the elevation in meters, `s.n` the true-scale unit normal (x east, y north, z up), `s.fw` the screen-space derivative of `s.h`, and `uSunDirection` the sun. A value kind (with a `ramp`) returns the normalized value in `.x` and the alpha in `.w`; a color kind returns `rgb` and alpha. `params` is the schema the panel renders (`range`, `span`, `select`, `color`, `boolean`), `pack(params, domain)` fills `p0`/`p1`, `domain(params, auto)` gives the ramp's value range. See `src/analysis/builtins/` for examples.
+`registerAnalysis(descriptor)` adds a kind. The descriptor's `glsl` defines `vec4 analysis_<id>(Surface s, vec4 p0, vec4 p1)`; `s.h` is the elevation in meters, `s.n` the true-scale unit normal (x east, y north, z up), `s.g` the gradient (dh/dx east, dh/dy north, m/m), `s.c` the second derivatives (hxx, hyy, hxy in 1/m), `s.fw` the screen-space derivative of `s.h`, and `uSunDirection` the sun. A value kind (with a `ramp`) returns the normalized value in `.x` and the alpha in `.w`; a color kind returns `rgb` and alpha. `params` is the schema the panel renders (`range`, `span`, `select`, `color`, `boolean`; a `span` may be `optional` and `wrap` for compass sectors, a `range` may take its slider `bounds` from the visible elevation), `pack(params, domain)` fills `p0`/`p1`, `domain(params, auto)` gives the ramp's value range, `initialParams(visible)` derives defaults from the visible elevation range, and `cpu(sample, params)` computes the same value for readouts. See `src/analysis/builtins/` for examples.
 
 #### Coat Stack
 
@@ -371,9 +386,11 @@ At most 6 coats are drawn (the lowest visible ones). The layer panel's *Overlay*
 | `'inferno'` | Black, purple, orange, white (high contrast) |
 | `'grayscale'` | Black to white |
 | `'cyclic'` | Hue wheel for circular data (aspect default) |
-| `'diverging'` | Blue, white, red |
+| `'diverging'` | Blue, white, red (curvature default) |
+| `'avalanche'` | Slope classes: nothing below 30°, then 30–35° yellow, 35–40° orange, 40–45° red, ≥ 45° violet |
+| `'aspect8'` | Eight compass sectors (N, NE, … NW) |
 
-A ramp can also be given as data: `{ type: 'continuous', stops: [[t, [r, g, b]], …] }` with `t` in 0–1 over the value range, or `{ type: 'classes', breaks: [...], colors: [...], labels? }` with breaks in the analysis' units (one more color than breaks). Legends, the panel preview and the shader all read the same spec.
+A ramp can also be given as data: `{ type: 'continuous', stops: [[t, [r, g, b]], …] }` with `t` in 0–1 over the value range, or `{ type: 'classes', breaks: [...], colors: [...], labels? }` with breaks in the analysis' units (one more color than breaks). Colors may be `[r, g, b, a]`; a class with alpha 0 draws nothing and is left out of the legend. Legends, the panel preview and the shader all read the same spec.
 
 #### Camera
 
@@ -567,17 +584,20 @@ interface WorldPoint { x: number; y: number }
 interface TileCoord { z: number; x: number; y: number }
 interface TileBounds { west: number; south: number; east: number; north: number }
 
-type ColorRamp = 'hypsometric' | 'viridis' | 'inferno' | 'grayscale' | 'cyclic' | 'diverging';
-type Ramp = ColorRamp | { type: 'continuous'; stops: [number, RGB][] } | { type: 'classes'; breaks: number[]; colors: RGB[]; labels?: string[] };
+type RGB = [number, number, number];
+type RGBA = [number, number, number, number];
+type ColorRamp = 'hypsometric' | 'viridis' | 'inferno' | 'grayscale' | 'cyclic' | 'diverging' | 'avalanche' | 'aspect8';
+type Ramp = ColorRamp | { type: 'continuous'; stops: [number, RGB | RGBA][] } | { type: 'classes'; breaks: number[]; colors: (RGB | RGBA)[]; labels?: string[] };
 type BlendMode = 'normal' | 'multiply' | 'screen' | 'softlight';
-interface LegendSpec { id: string; title: string; unit?: string; type: 'continuous' | 'classes'; domain: [number, number]; stops?: [number, RGB][]; classes?: { color: RGB; label: string }[] }
+interface LegendSpec { id: string; title: string; unit?: string; type: 'continuous' | 'classes'; domain: [number, number]; stops?: [number, RGBA][]; classes?: { color: RGBA; label: string }[] }
 type DecoderName = 'terrain-rgb' | 'mapbox' | 'terrarium';
 type UICorner = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right';
 
-interface TerrainPick { lngLat: LngLat; elevation: number }
+interface TerrainSample { elevation: number; slope: number; aspect: number | null; curvature: number; normal: [number, number, number] }
+interface TerrainPick extends TerrainSample { lngLat: LngLat }
 interface ProfileSample { lngLat: LngLat; distance: number; elevation: number | null }
 interface TreeletStats {
-  tiles: number; drawCalls: number; atlasUsed: number; atlasCapacity: number;
+  tiles: number; drawCalls: number; frameTime: number; atlasUsed: number; atlasCapacity: number;
   drapeTiles: number; pendingElevation: number; pendingDrape: number; failedTiles: number;
 }
 ```
@@ -601,7 +621,7 @@ For advanced use, Treelet re-exports its internal building blocks:
 | `EventEmitter` | Base event system |
 | `RawRGBDecoder`, `MapboxDecoder`, `TerrariumDecoder` | Built-in decoder instances |
 | `registerDecoder()`, `resolveDecoder()` | Decoder registration and lookup |
-| `TreeletPanel`, `TreeletCompass`, `TreeletAttribution` | UI components |
+| `TreeletPanel`, `TreeletCompass`, `TreeletAttribution`, `TreeletLegend`, `TreeletReadout` | UI components |
 | `defineTreeletElements()` | Register the UI custom elements (done automatically by `Treelet`) |
 
 ---

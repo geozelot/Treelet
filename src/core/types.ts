@@ -55,9 +55,15 @@ export interface GuiDisplayOptions {
   layerPosition?: UICorner;
   /**
    * Corner of the legend for the visible analyses, or `false` for none.
-   * Default: the bottom corner the layer panel doesn't use.
+   * Default 'bottom-left'.
    */
   legendPosition?: UICorner | false;
+  /**
+   * Corner of the cursor readout (elevation, slope and aspect under the
+   * pointer; after a tap on touch screens), or `false` for none. Shares its
+   * corner with the legend when both use the same one. Default 'bottom-left'.
+   */
+  readoutPosition?: UICorner | false;
   /**
    * Frosted-glass compass and layer controls, including the menus that open
    * from them: translucent, with the map blurred behind. Costs some GPU time
@@ -171,11 +177,23 @@ export interface VisibleExtent {
 
 // === Inspection ===
 
-/** Result of a terrain pick at a screen position. */
-export interface TerrainPick {
-  lngLat: LngLat;
-  /** Elevation in meters (unexaggerated). */
+/** The terrain surface at a point, from the finest loaded tile (true scale, unexaggerated). */
+export interface TerrainSample {
+  /** Elevation in meters. */
   elevation: number;
+  /** Slope angle in degrees. */
+  slope: number;
+  /** Downslope bearing in degrees clockwise from north, or null on flat ground. */
+  aspect: number | null;
+  /** Total curvature in 1/km (positive convex, negative concave) at the loaded tile's resolution. */
+  curvature: number;
+  /** Unit normal (x east, y north, z up). */
+  normal: [number, number, number];
+}
+
+/** Result of a terrain pick at a screen position. */
+export interface TerrainPick extends TerrainSample {
+  lngLat: LngLat;
 }
 
 /** One sample of an elevation profile. */
@@ -192,6 +210,8 @@ export interface TreeletStats {
   /** Tile instances drawn in the last frame. */
   tiles: number;
   drawCalls: number;
+  /** Smoothed CPU time per rendered frame in milliseconds (update + draw calls). */
+  frameTime: number;
   /** Elevation slots in use / total. */
   atlasUsed: number;
   atlasCapacity: number;

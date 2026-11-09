@@ -10,6 +10,7 @@ import { getAnalysis } from '../../src/analysis/registry';
 import type { TreeletCompass } from '../../src/ui/TreeletCompass';
 import type { TreeletPanel } from '../../src/ui/TreeletPanel';
 import type { TreeletLegend } from '../../src/ui/TreeletLegend';
+import { type TreeletReadout, compassPoint, formatReadout } from '../../src/ui/TreeletReadout';
 import type { Treelet } from '../../src/core/Treelet';
 
 /** A stack member as the panel reads it. */
@@ -53,6 +54,11 @@ function fakeMap(opts: { baseLayers?: number; stack?: unknown[]; legends?: unkno
     getActiveDrapeId: () => null,
     getLegend: () => ({ domain: [0, 4000] }),
     getLegends: () => opts.legends ?? [],
+    getVisibleElevationRange: () => [800, 2600] as [number, number],
+    getContainer: () => document.body,
+    pick: vi.fn((x: number, y: number) => (x < 0 || y < 0 ? null : {
+      lngLat: { lng: 11, lat: 47 }, elevation: 1234.6, slope: 31.26, aspect: 212.4, curvature: 0, normal: [0, 0, 1],
+    })),
     getExaggeration: () => 1,
     getSunAzimuth: () => 315,
     getSunAltitude: () => 45,
@@ -122,7 +128,7 @@ describe('layer panel', () => {
     const labels = [...proot.querySelectorAll('.dropdown-group-label')].map((l) => l.textContent);
     expect(labels).toEqual(['Analysis', 'Layers']);
     const kinds = [...proot.querySelectorAll('.layer-entry[data-layer-type="analysis"]')].map((e) => (e as HTMLElement).dataset.kind);
-    expect(kinds).toEqual(['elevation', 'slope', 'aspect', 'contours', 'hillshade']);
+    expect(kinds).toEqual(['elevation', 'slope', 'aspect', 'contours', 'hillshade', 'curvature', 'water']);
     expect(proot.querySelector('[data-layer-type="drape"] .layer-btn')!.textContent).toBe('OpenStreetMap');
   });
 
@@ -284,7 +290,7 @@ describe('legend', () => {
     const map = fakeMap({ legends });
     const el = document.createElement('treelet-legend') as TreeletLegend;
     document.body.appendChild(el);
-    el.attach(map as unknown as Treelet, 'bottom-left', { glass: true });
+    el.attach(map as unknown as Treelet, { glass: true });
     return { map, el, root: el.shadowRoot! };
   }
 
@@ -294,7 +300,6 @@ describe('legend', () => {
       { id: 'b', title: 'Slope', type: 'classes', domain: [0, 60], classes: [{ color: [1, 0, 0], label: '< 30°' }, { color: [0, 0, 1], label: '≥ 30°' }] },
     ]);
     expect(el.hidden).toBe(false);
-    expect(el.getAttribute('data-v')).toBe('bottom');
     expect(el.hasAttribute('glass')).toBe(true);
     const titles = [...root.querySelectorAll('.legend-title')].map((t) => t.textContent);
     expect(titles).toEqual(['Elevation (m)', 'Slope']);
@@ -384,5 +389,97 @@ describe('compass and layer rows', () => {
     expect(plain.hasAttribute('glass')).toBe(false);
     const glass = mount(fakeMap(), { compassPosition: 'top-right', layerPosition: 'top-right', glass: true } as never).compass;
     expect(glass.hasAttribute('glass')).toBe(true);
+  });
+});
+
+describe('coat settings from the schema (Phase 1 parameters)', () => {
+  function openCoat(stack: unknown[], id: string) {
+    const { map, proot } = mount(fakeMap({ stack }));
+    (proot.querySelector('.active-row[data-layer-id="__stack__"]') as HTMLElement).click();
+    (proot.querySelector(`.stack-row[data-layer-id="${id}"] .stack-name`) as HTMLElement).click();
+    return { map, proot };
+  }
+
+  it('an optional wrapping span renders All / Sector and from → to sliders', () => {
+    const { map, proot } = openCoat([fakeAnalysis('analysis-5', 'slope')], 'analysis-5');
+    const all = proot.querySelector('[data-action="optional"][data-value="false"]') as HTMLElement;
+    const sector = proot.querySelector('[data-action="optional"][data-value="true"]') as HTMLElement;
+    expect(all.classList.contains('active')).toBe(true);
+    expect(proot.querySelector('input[data-param="aspectMask"]')).toBeNull();
+    sector.click();
+    expect(map.setAnalysisParams).toHaveBeenCalledWith('analysis-5', { aspectMask: [315, 45] });
+
+    const { proot: open } = openCoat([fakeAnalysis('analysis-6', 'slope', { params: { range: [0, 60], aspectMask: [315, 45] } })], 'analysis-6');
+    const inputs = open.querySelectorAll<HTMLInputElement>('input[data-param="aspectMask"]');
+    expect(inputs).toHaveLength(2);
+    expect(inputs[0].dataset.wrap).toBe('');
+    expect(open.querySelector('[data-value-for="analysis-6:aspectMask"]')!.textContent).toBe('315° → 45°');
+  });
+
+  it('a from → to slider keeps its order when the input moves', () => {
+    const { map, proot } = openCoat([fakeAnalysis('analysis-7', 'slope', { params: { range: [0, 60], aspectMask: [315, 45] } })], 'analysis-7');
+    const to = proot.querySelectorAll<HTMLInputElement>('input[data-param="aspectMask"]')[1];
+    to.value = '90';
+    to.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    expect(map.setAnalysisParams).toHaveBeenLastCalledWith('analysis-7', { aspectMask: [315, 90] });
+  });
+
+  it("the water level slider spans the visible elevation range", () => {
+    const { proot } = openCoat([fakeAnalysis('analysis-8', 'water', { params: { level: 1300, color: [0.14, 0.44, 0.7], depthFade: 100, shoreline: 2 } })], 'analysis-8');
+    const level = proot.querySelector<HTMLInputElement>('input[data-param="level"]')!;
+    expect([level.min, level.max, level.value]).toEqual(['800', '2600', '1300']);
+  });
+
+  it('lists class presets only for their analysis', () => {
+    const { proot } = openCoat([fakeAnalysis('analysis-9', 'slope')], 'analysis-9');
+    const names = [...proot.querySelectorAll('.ramp-btn[data-value]')].map((b) => b.getAttribute('data-value'));
+    expect(names).toContain('avalanche');
+    expect(names).not.toContain('aspect8');
+    const { proot: elev } = openCoat([fakeAnalysis('analysis-10', 'elevation')], 'analysis-10');
+    const elevNames = [...elev.querySelectorAll('.ramp-btn[data-value]')].map((b) => b.getAttribute('data-value'));
+    expect(elevNames).not.toContain('avalanche');
+  });
+});
+
+describe('readout', () => {
+  function mountReadout() {
+    const map = fakeMap();
+    const el = document.createElement('treelet-readout') as TreeletReadout;
+    document.body.appendChild(el);
+    el.attach(map as unknown as Treelet, { glass: true });
+    return { map, el, root: el.shadowRoot! };
+  }
+
+  it('formats elevation, slope and aspect with a compass point', () => {
+    expect(compassPoint(0)).toBe('N');
+    expect(compassPoint(212)).toBe('SW');
+    expect(compassPoint(359)).toBe('N');
+    const rows = formatReadout({ lngLat: { lng: 0, lat: 0 }, elevation: 1234.6, slope: 31.26, aspect: 212.4, curvature: 0, normal: [0, 0, 1] });
+    expect(rows.map((r) => r[1])).toEqual(['1\u2009235 m', '31.3°', '212° SW']);
+    expect(formatReadout({ lngLat: { lng: 0, lat: 0 }, elevation: 5, slope: 0, aspect: null, curvature: 0, normal: [0, 0, 1] })[2][1]).toBe('flat');
+  });
+
+  it('is hidden until shown, renders the pick and hides again without one', () => {
+    const { el, root } = mountReadout();
+    expect(el.hidden).toBe(true);
+    expect(el.hasAttribute('glass')).toBe(true);
+    el.showAt(10, 10);
+    expect(el.hidden).toBe(false);
+    expect([...root.querySelectorAll('.readout-value')].map((v) => v.textContent)).toEqual(['1\u2009235 m', '31.3°', '212° SW']);
+    el.showAt(-1, -1);
+    expect(el.hidden).toBe(true);
+  });
+
+  it('a tap samples the terrain and pins the readout; a drag does not', () => {
+    const { map, el } = mountReadout();
+    const down = (x: number, y: number) => document.body.dispatchEvent(new PointerEvent('pointerdown', { pointerType: 'touch', pointerId: 1, clientX: x, clientY: y, bubbles: true }));
+    const up = (x: number, y: number) => document.body.dispatchEvent(new PointerEvent('pointerup', { pointerType: 'touch', pointerId: 1, clientX: x, clientY: y, bubbles: true }));
+    down(20, 20); up(60, 20); // a drag
+    expect(map.pick).not.toHaveBeenCalled();
+    down(20, 20); up(22, 21); // a tap
+    expect(map.pick).toHaveBeenCalledTimes(1);
+    expect(el.hidden).toBe(false);
+    document.body.dispatchEvent(new PointerEvent('pointerleave', { pointerType: 'mouse', bubbles: true }));
+    expect(el.hidden).toBe(false); // pinned by the tap
   });
 });

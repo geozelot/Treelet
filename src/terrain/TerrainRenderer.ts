@@ -61,6 +61,8 @@ import {
 } from '../shaders/TerrainMaterial';
 import { CoatStack, type CoatInput } from './CoatStack';
 import { analysisShaderSource, onAnalysisRegistered } from '../analysis/registry';
+import type { SurfaceSample } from '../analysis/types';
+import { WebMercator } from '../crs/WebMercator';
 
 /** Floats per instance: world(2) size(1) elev(4) parent(4) drape(4) morph(2). */
 export const INSTANCE_STRIDE = 17;
@@ -426,7 +428,7 @@ export class TerrainRenderer {
     this.buildInstances(tiles, base);
     if (this.uploadInstances()) {
       this.renderDirty = true;
-      if (this.autoRange) this.updateAutoRange(tiles);
+      this.updateAutoRange(tiles);
     }
 
     // ==== Fetch scheduling ====
@@ -1007,7 +1009,7 @@ export class TerrainRenderer {
     this.markRender(); // ramp rows may have changed without a uniform change
   }
 
-  /** The visible elevation range, as used by 'auto' ramp domains. */
+  /** The visible elevation range (min, max of the drawn tiles), as used by 'auto' ramp domains. */
   get autoElevationRange(): [number, number] {
     return this.coatStack.autoDomain;
   }
@@ -1049,6 +1051,7 @@ export class TerrainRenderer {
     return {
       tiles: this.geometry.instanceCount,
       drawCalls: this.geometry.instanceCount > 0 ? 1 : 0,
+      frameTime: 0,
       atlasUsed: this.atlas.size,
       atlasCapacity: this.atlas.capacity,
       drapeTiles: this.drapeAtlas?.size ?? 0,
@@ -1076,6 +1079,33 @@ export class TerrainRenderer {
       if (!this.atlas.has(key)) continue;
       const h = this.atlas.sample(key, u * n - tx, v * n - ty);
       if (h !== null) return h;
+    }
+    return null;
+  }
+
+  /**
+   * Surface (elevation, true-scale normal, gradient, second derivatives) at
+   * a world-plane point from the finest loaded tile, or null where no data
+   * is loaded. Same stencil as the fragment shader.
+   */
+  sampleSurfaceAtWorld(worldX: number, worldY: number): SurfaceSample | null {
+    if (this.disposed) return null;
+    const W = this.tileGrid.worldScale;
+    const u = (worldX + W / 2) / W;
+    const v = (W / 2 - worldY) / W;
+    if (!(u >= 0 && u < 1 && v >= 0 && v < 1)) return null;
+    // Ground meters per world unit at this latitude
+    const metersPerWorld = 1 / (this.opts.metersToScene * WebMercator.scaleFactorAtWorldY(worldY, W));
+    const texels = Math.max(this.atlas.slotSize - 1, 1);
+    for (let z = this.lastMaxLevel; z >= 0; z--) {
+      const n = 2 ** z;
+      const tx = Math.floor(u * n);
+      const ty = Math.floor(v * n);
+      const key = packTileKey(z, tx, ty);
+      if (!this.atlas.has(key)) continue;
+      const texelMeters = (W / n / texels) * metersPerWorld;
+      const sample = this.atlas.sampleSurface(key, u * n - tx, v * n - ty, texelMeters);
+      if (sample !== null) return sample;
     }
     return null;
   }

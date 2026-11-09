@@ -4,6 +4,7 @@
 
 export type {
   RGB,
+  RGBA,
   CoatBlendMode,
   ColorRamp,
   ContinuousRamp,
@@ -32,9 +33,13 @@ export {
 export {
   BUILTIN_RAMPS,
   BUILTIN_RAMP_NAMES,
+  RAMP_PRESET_FOR,
+  rampNamesFor,
   resolveRamp,
   rampColorAt,
   rampGradientCss,
+  cssColor,
   legendFor,
 } from './ramps';
+export { sampleSurfaceGrid, type GridReader } from './surface';
 export * from './builtins';

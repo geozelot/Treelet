@@ -8,10 +8,32 @@
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 100%; height: 100%; overflow: hidden; font-family: system-ui, sans-serif; }
     #map { width: 100%; height: 100%; position: relative; }
+
+    /* Demo presets: a few stacks that show what the coats can do */
+    #presets {
+      position: absolute; top: 12px; left: 12px; z-index: 1000;
+      display: flex; gap: 4px; padding: 4px;
+      background: light-dark(rgba(250, 250, 250, 0.85), rgba(24, 24, 24, 0.8));
+      border: 1px solid light-dark(rgba(0, 0, 0, 0.1), rgba(255, 255, 255, 0.08));
+      border-radius: 10px; color-scheme: light dark;
+      -webkit-backdrop-filter: blur(14px) saturate(1.5); backdrop-filter: blur(14px) saturate(1.5);
+    }
+    #presets button {
+      font: 12px system-ui, sans-serif; padding: 5px 10px; border-radius: 7px; border: 0; cursor: pointer;
+      background: transparent; color: light-dark(#333, #e8e8e8);
+    }
+    #presets button:hover { background: light-dark(rgba(0, 0, 0, 0.06), rgba(255, 255, 255, 0.08)); }
+    #presets button[aria-pressed="true"] { background: #3a8f4a; color: #fff; }
   </style>
 </head>
 <body>
-  <div id="map"></div>
+  <div id="map">
+    <div id="presets" role="group" aria-label="Presets">
+      <button type="button" data-preset="relief" aria-pressed="true">Relief</button>
+      <button type="button" data-preset="avalanche" aria-pressed="false">Avalanche</button>
+      <button type="button" data-preset="flood" aria-pressed="false">Flood</button>
+    </div>
+  </div>
   <script type="module" src="./main.ts"></script>
 </body>
 </html>

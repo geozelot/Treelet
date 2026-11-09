@@ -2,14 +2,17 @@
 //
 // Fetches the 12 texels around the fragment (a 4x4 block without corners),
 // computes central-difference gradients at the 4 inner texels and
-// interpolates both elevation and gradient bilinearly. This gives smooth,
-// continuous shading under magnification instead of per-texel facets, and
-// an elevation that matches the DEM (not the coarser vertex mesh) for
-// color ramps and isolines.
+// interpolates elevation, gradient and the gradient's change (second
+// derivatives) bilinearly. This gives smooth, continuous shading under
+// magnification instead of per-texel facets, and an elevation that matches
+// the DEM (not the coarser vertex mesh) for color ramps and isolines.
+// The CPU sampler (src/analysis/surface.ts) mirrors this exactly.
 
 struct Surface {
   float h;      // elevation in meters
   vec3 n;       // unit normal (true scale, unexaggerated)
+  vec2 g;       // gradient dh/dx (east), dh/dy (north) in m/m, true scale
+  vec3 c;       // second derivatives (hxx, hyy, hxy) in 1/m
   float fw;     // screen-space derivative of h (set by the caller)
   bool valid;
 };
@@ -33,6 +36,8 @@ Surface sampleSurface(vec4 ref, vec2 tileUV, float tileWorldSize, float mercScal
   s.valid = false;
   s.h = 0.0;
   s.n = vec3(0.0, 0.0, 1.0);
+  s.g = vec2(0.0);
+  s.c = vec3(0.0);
   s.fw = 0.0;
 
   int imax = int(uSlotSize) - 1;
@@ -72,13 +77,20 @@ Surface sampleSurface(vec4 ref, vec2 tileUV, float tileWorldSize, float mercScal
   vec2 g11 = surfGradient(p + ivec2(1, 1), imax, h01, h21, h10, h12);
   vec2 g = mix(mix(g00, g10, f.x), mix(g01, g11, f.x), f.y);
 
+  // Second derivatives (per texel²) from the change of the inner gradients.
+  float hxx = mix(g10.x - g00.x, g11.x - g01.x, f.y);
+  float hyy = mix(g01.y - g00.y, g11.y - g10.y, f.x);
+  float hxy = 0.5 * (mix(g10.y - g00.y, g11.y - g01.y, f.y) + mix(g01.x - g00.x, g11.x - g10.x, f.x));
+
   s.h = mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y);
 
-  // World distance between texels of the referenced slot.
+  // Ground distance between texels of the referenced slot, in meters.
   float texelWorld = (tileWorldSize / max(ref.w, 1e-9)) / max(uSlotSize - 1.0, 1.0);
-  float zs = uElevationScale * mercScale / texelWorld;
+  float tm = max(texelWorld / (uElevationScale * mercScale), 1e-9);
   // Texel y runs south; world y runs north.
-  s.n = normalize(vec3(-g.x * zs, g.y * zs, 1.0));
+  s.g = vec2(g.x, -g.y) / tm;
+  s.c = vec3(hxx, hyy, -hxy) / (tm * tm);
+  s.n = normalize(vec3(-s.g, 1.0));
   s.valid = true;
   return s;
 }
@@ -89,6 +101,8 @@ Surface terrainSurface() {
     Surface p = sampleSurface(vParent, vTileUV, vTileScale, vMercScale);
     if (p.valid && s.valid) {
       s.h = mix(s.h, p.h, vMorph);
+      s.g = mix(s.g, p.g, vMorph);
+      s.c = mix(s.c, p.c, vMorph);
       s.n = normalize(mix(s.n, p.n, vMorph));
     } else if (p.valid) {
       s = p;

@@ -101,7 +101,8 @@ function clampNum(v: number, lo: number, hi: number): number {
 /**
  * Merge user parameters over the descriptor's defaults, dropping values
  * that don't fit the schema (with a warning), clamping numbers to their
- * slider range. Keys without a schema entry pass through unchanged.
+ * slider range. Keys without a schema entry pass through unchanged. A null
+ * value is accepted only for optional spans.
  */
 export function resolveParams<P extends object>(
   descriptor: AnalysisDescriptor<P>, params: Partial<P> | undefined, base?: P,
@@ -115,6 +116,9 @@ export function resolveParams<P extends object>(
     const reject = () => console.warn(`treelet: ignoring invalid value for ${descriptor.id}.${key}:`, value);
     if (!spec) {
       out[key] = value;
+    } else if (value === null) {
+      if (spec.type === 'span' && spec.optional) out[key] = null;
+      else reject();
     } else if (spec.type === 'range') {
       if (typeof value === 'number' && Number.isFinite(value)) out[key] = clampNum(value, spec.min, spec.max);
       else reject();
@@ -123,9 +127,13 @@ export function resolveParams<P extends object>(
       else if (Array.isArray(value) && value.length === 2 && value.every((v) => typeof v === 'number' && Number.isFinite(v))) {
         const a = clampNum(value[0], spec.min, spec.max);
         const b = clampNum(value[1], spec.min, spec.max);
-        const lo = Math.min(a, b);
-        const hi = Math.max(a, b);
-        out[key] = hi > lo ? [lo, hi] : [lo, lo + spec.step];
+        if (spec.wrap) {
+          out[key] = [a, b]; // clockwise from a to b; a > b passes through min/max
+        } else {
+          const lo = Math.min(a, b);
+          const hi = Math.max(a, b);
+          out[key] = hi > lo ? [lo, hi] : [lo, lo + spec.step];
+        }
       } else reject();
     } else if (spec.type === 'select') {
       // Option values are strings; a numeric default keeps numbers ('5' → 5).

@@ -22,6 +22,8 @@ describe('resolveOptions', () => {
     expect(resolveOptions({ ...base, guiDisplay: { glass: true } }).guiDisplay.glass).toBe(true);
     expect(o.guiDisplay.legendPosition).toBe('bottom-left');
     expect(resolveOptions({ ...base, guiDisplay: { legendPosition: false } }).guiDisplay.legendPosition).toBe(false);
+    expect(o.guiDisplay.readoutPosition).toBe('bottom-left');
+    expect(resolveOptions({ ...base, guiDisplay: { readoutPosition: 'top-left' } }).guiDisplay.readoutPosition).toBe('top-left');
     expect(o.workerCount).toBeGreaterThanOrEqual(1);
     expect(o.workerCount).toBeLessThanOrEqual(4);
   });

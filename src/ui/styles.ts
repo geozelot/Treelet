@@ -423,6 +423,9 @@ export const panelStyles = /* css */ `
     height: 6px;
     border-radius: 3px;
     flex-shrink: 0;
+    /* Transparent classes show the checker */
+    background-color: var(--border);
+    background-blend-mode: normal;
   }
 
   /* -- Color swatch picker (for contour line color) -- */

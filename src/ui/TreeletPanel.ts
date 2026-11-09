@@ -33,7 +33,7 @@ import type { AnalysisLayer } from '../layers/AnalysisLayer';
 import type { StackLayer } from '../layers/LayerRegistry';
 import type { ParamSpec, RGB } from '../analysis/types';
 import { listAnalyses } from '../analysis/registry';
-import { BUILTIN_RAMPS, BUILTIN_RAMP_NAMES, isRampName, rampGradientCss } from '../analysis/ramps';
+import { BUILTIN_RAMPS, isRampName, rampGradientCss, rampNamesFor } from '../analysis/ramps';
 
 /** Settings-row id of the coat stack (the Overlay column's active row). */
 const STACK_ID = '__stack__';
@@ -304,6 +304,12 @@ export class TreeletPanel extends BaseElement {
             map.setAnalysisParams(id, { [key]: [domain[0], domain[1]] });
           }
           break;
+        case 'optional':
+          // An optional span: off = null, on = the pair the button carries
+          map.setAnalysisParams(id, {
+            [key]: value === 'true' ? [parseFloat(control.dataset.min!), parseFloat(control.dataset.max!)] : null,
+          });
+          break;
         case 'wireframe':
           map.setWireframe(value !== 'solid');
           map.setWireframeWhite(value === 'white');
@@ -417,10 +423,17 @@ export class TreeletPanel extends BaseElement {
       const step = parseFloat(target.step) || 1;
       const a = target.dataset.span === '0' ? val : parseFloat(other?.value ?? '0');
       const b = target.dataset.span === '1' ? val : parseFloat(other?.value ?? '0');
-      const lo = Math.min(a, b);
-      const hi = Math.max(a, b, lo + step);
-      if (label) label.textContent = `${formatNumber(lo, step)}–${formatNumber(hi, step)}${target.dataset.unit ?? ''}`;
-      map.setAnalysisParams(id, { [param]: [lo, hi] });
+      const unit = target.dataset.unit ?? '';
+      if (target.dataset.wrap !== undefined) {
+        // A circular range runs clockwise from a to b (a > b passes through north)
+        if (label) label.textContent = `${formatNumber(a, step)}${unit} → ${formatNumber(b, step)}${unit}`;
+        map.setAnalysisParams(id, { [param]: [a, b] });
+      } else {
+        const lo = Math.min(a, b);
+        const hi = Math.max(a, b, lo + step);
+        if (label) label.textContent = `${formatNumber(lo, step)}–${formatNumber(hi, step)}${unit}`;
+        map.setAnalysisParams(id, { [param]: [lo, hi] });
+      }
     } else if (param) {
       const step = parseFloat(target.step) || 1;
       if (label) label.textContent = `${formatNumber(val, step)}${target.dataset.unit ?? ''}`;
@@ -627,11 +640,34 @@ export class TreeletPanel extends BaseElement {
     switch (spec.type) {
       case 'range': {
         const v = typeof value === 'number' ? value : spec.min;
-        return this.renderSlider(id, spec.key, spec.label, v, spec.min, spec.max, spec.step, `${formatNumber(v, spec.step)}${unit}`, unit);
+        let [min, max] = [spec.min, spec.max];
+        if (spec.bounds === 'elevation') {
+          // The slider spans what is on screen (the value may lie outside it)
+          const [lo, hi] = this.map!.getVisibleElevationRange();
+          min = Math.max(spec.min, Math.floor(Math.min(lo, v) / spec.step) * spec.step);
+          max = Math.min(spec.max, Math.ceil(Math.max(hi, v, min + spec.step) / spec.step) * spec.step);
+        }
+        return this.renderSlider(id, spec.key, spec.label, v, min, max, spec.step, `${formatNumber(v, spec.step)}${unit}`, unit);
       }
       case 'span': {
         const auto = value === 'auto';
+        const off = value === null;
         const parts: string[] = [];
+        if (spec.optional) {
+          // Default sector when switched on: through north for bearings, else the full range
+          const on: [number, number] = spec.wrap ? [315, 45] : [spec.min, spec.max];
+          parts.push(`
+            <div class="toggle-row">
+              <span class="toggle-label">${escapeHtml(spec.label)}</span>
+              <span class="toggle-group">
+                <button type="button" class="toggle-btn${off ? ' active' : ''}" data-action="optional" data-layer-id="${eid}" data-param="${spec.key}"
+                  data-value="false" data-focus-key="off-${eid}-${spec.key}" aria-pressed="${off}">All</button>
+                <button type="button" class="toggle-btn${off ? '' : ' active'}" data-action="optional" data-layer-id="${eid}" data-param="${spec.key}"
+                  data-value="true" data-min="${on[0]}" data-max="${on[1]}" data-focus-key="on-${eid}-${spec.key}" aria-pressed="${!off}">${spec.wrap ? 'Sector' : 'Range'}</button>
+              </span>
+            </div>`);
+          if (off) return parts.join('');
+        }
         if (spec.auto) {
           parts.push(`
             <div class="toggle-row">
@@ -650,15 +686,19 @@ export class TreeletPanel extends BaseElement {
         } else {
           const [lo, hi] = Array.isArray(value) ? value as [number, number] : [spec.min, spec.max];
           const key = escapeHtml(`${id}:${spec.key}`);
+          const wrap = spec.wrap ? ' data-wrap=""' : '';
+          const text = spec.wrap
+            ? `${formatNumber(lo, spec.step)}${unit} → ${formatNumber(hi, spec.step)}${unit}`
+            : `${formatNumber(lo, spec.step)}–${formatNumber(hi, spec.step)}${unit}`;
           parts.push(`
             <div class="control-row">
-              <span class="control-label">${spec.auto ? 'Range' : escapeHtml(spec.label)}</span>
-              <span class="control-value" data-value-for="${key}">${formatNumber(lo, spec.step)}–${formatNumber(hi, spec.step)}${unit}</span>
+              <span class="control-label">${spec.auto || spec.optional ? (spec.wrap ? 'From → to' : 'Range') : escapeHtml(spec.label)}</span>
+              <span class="control-value" data-value-for="${key}">${text}</span>
             </div>
-            <input type="range" data-layer-id="${eid}" data-param="${spec.key}" data-span="0" data-unit="${escapeHtml(unit)}"
-              min="${spec.min}" max="${spec.max}" step="${spec.step}" value="${lo}" aria-label="${escapeHtml(spec.label)} low">
-            <input type="range" data-layer-id="${eid}" data-param="${spec.key}" data-span="1" data-unit="${escapeHtml(unit)}"
-              min="${spec.min}" max="${spec.max}" step="${spec.step}" value="${hi}" aria-label="${escapeHtml(spec.label)} high">`);
+            <input type="range" data-layer-id="${eid}" data-param="${spec.key}" data-span="0" data-unit="${escapeHtml(unit)}"${wrap}
+              min="${spec.min}" max="${spec.max}" step="${spec.step}" value="${lo}" aria-label="${escapeHtml(spec.label)} ${spec.wrap ? 'from' : 'low'}">
+            <input type="range" data-layer-id="${eid}" data-param="${spec.key}" data-span="1" data-unit="${escapeHtml(unit)}"${wrap}
+              min="${spec.min}" max="${spec.max}" step="${spec.step}" value="${hi}" aria-label="${escapeHtml(spec.label)} ${spec.wrap ? 'to' : 'high'}">`);
         }
         return parts.join('');
       }
@@ -755,19 +795,22 @@ export class TreeletPanel extends BaseElement {
     const eid = escapeHtml(layer.id);
     const current = layer.ramp ?? layer.descriptor.ramp;
     const custom = current !== undefined && !isRampName(current);
+    // Class presets place their breaks on the layer's value range
+    const domain = this.map!.getLegend(layer.id)?.domain ?? [0, 1];
     return `
       <div class="setting-label">Color Ramp</div>
       <div class="ramp-list">
-        ${BUILTIN_RAMP_NAMES.map((name) => {
+        ${rampNamesFor(layer.descriptor.id).map((name) => {
           const active = current === name;
+          const spec = BUILTIN_RAMPS[name];
           return `<button type="button" class="ramp-btn${active ? ' active' : ''}" data-action="ramp" data-layer-id="${eid}" data-value="${name}"
             data-focus-key="ramp-${eid}-${name}" aria-pressed="${active}">
             <span>${capitalize(name)}</span>
-            <span class="ramp-indicator" style="background:${rampGradientCss(BUILTIN_RAMPS[name], [0, 1])}"></span>
+            <span class="ramp-indicator" style="background:${rampGradientCss(spec, spec.type === 'classes' ? domain : [0, 1])}"></span>
           </button>`;
         }).join('')}
         ${custom ? `<div class="ramp-btn active" aria-current="true"><span>Custom</span>
-          <span class="ramp-indicator" style="background:${rampGradientCss(current, this.map!.getLegend(layer.id)?.domain ?? [0, 1])}"></span></div>` : ''}
+          <span class="ramp-indicator" style="background:${rampGradientCss(current, domain)}"></span></div>` : ''}
       </div>
     `;
   }

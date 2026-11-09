@@ -15,11 +15,13 @@ import {
   writeRampRow,
   rampGradientCss,
   legendFor,
+  cssColor,
+  rampNamesFor,
   RAMP_WIDTH,
 } from '../../src/analysis/ramps';
 import type { ClassRamp, ContinuousRamp } from '../../src/analysis/types';
 
-const close = (a: number[], b: number[], eps = 0.01) => a.every((v, i) => Math.abs(v - b[i]) < eps);
+const close = (a: number[], b: number[], eps = 0.01) => b.every((v, i) => Math.abs(v - a[i]) < eps);
 
 describe('built-in ramps', () => {
   it('match the former GLSL ramps at their stops', () => {
@@ -31,8 +33,8 @@ describe('built-in ramps', () => {
 
   it('interpolate linearly between stops and clamp outside [0, 1]', () => {
     expect(close(continuousColorAt(BUILTIN_RAMPS.viridis, 0.125), [0.2745, 0.072, 0.3935])).toBe(true);
-    expect(continuousColorAt(BUILTIN_RAMPS.grayscale, -1)).toEqual([0, 0, 0]);
-    expect(continuousColorAt(BUILTIN_RAMPS.grayscale, 2)).toEqual([1, 1, 1]);
+    expect(continuousColorAt(BUILTIN_RAMPS.grayscale, -1)).toEqual([0, 0, 0, 1]);
+    expect(continuousColorAt(BUILTIN_RAMPS.grayscale, 2)).toEqual([1, 1, 1, 1]);
   });
 
   it('cyclic has no seam: t = 0 and t = 1 give the same color', () => {
@@ -70,9 +72,9 @@ describe('class ramps', () => {
 
   it('rampColorAt places the breaks on the domain', () => {
     // t = 0.5 over [0, 60] is 30°: the second class
-    expect(rampColorAt(avalanche, 0.5, [0, 60])).toEqual([1, 1, 0]);
-    expect(rampColorAt(avalanche, 0.49, [0, 60])).toEqual([0.9, 0.9, 0.9]);
-    expect(rampColorAt(avalanche, 1, [0, 60])).toEqual([0.5, 0, 0.5]);
+    expect(rampColorAt(avalanche, 0.5, [0, 60])).toEqual([1, 1, 0, 1]);
+    expect(rampColorAt(avalanche, 0.49, [0, 60])).toEqual([0.9, 0.9, 0.9, 1]);
+    expect(rampColorAt(avalanche, 1, [0, 60])).toEqual([0.5, 0, 0.5, 1]);
   });
 
   it('legendFor labels classes with their bounds and the unit, or custom labels', () => {
@@ -88,7 +90,7 @@ describe('class ramps', () => {
     const legend = legendFor('x', 'Elevation', BUILTIN_RAMPS.grayscale, [100, 3000], 'm');
     expect(legend.type).toBe('continuous');
     expect(legend.domain).toEqual([100, 3000]);
-    expect(legend.stops).toEqual([[0, [0, 0, 0]], [1, [1, 1, 1]]]);
+    expect(legend.stops).toEqual([[0, [0, 0, 0, 1]], [1, [1, 1, 1, 1]]]);
     expect(legend.unit).toBe('m');
   });
 });
@@ -125,5 +127,44 @@ describe('rampGradientCss', () => {
     const css = rampGradientCss(avalanche, [0, 60]);
     expect(css.startsWith('linear-gradient(to right, #e6e6e6 0.0% 50.0%, #ffff00 50.0% 58.3%')).toBe(true);
     expect(css.endsWith('#800080 75.0% 100.0%)')).toBe(true);
+  });
+});
+
+describe('alpha and presets', () => {
+  it('ramp colors may carry alpha: rows, sampling and CSS follow it', () => {
+    const spec: ClassRamp = { type: 'classes', breaks: [30], colors: [[0, 0, 0, 0], [1, 0, 0]] };
+    expect(rampColorAt(spec, 0.2, [0, 60])).toEqual([0, 0, 0, 0]);
+    expect(rampColorAt(spec, 0.8, [0, 60])).toEqual([1, 0, 0, 1]);
+    const out = new Uint8Array(RAMP_WIDTH * 4);
+    writeRampRow(out, 0, RAMP_WIDTH, spec, [0, 60]);
+    expect(out[3]).toBe(0);
+    expect(out[(RAMP_WIDTH - 1) * 4 + 3]).toBe(255);
+    expect(cssColor([1, 0, 0, 0.5])).toBe('rgba(255, 0, 0, 0.5)');
+    expect(cssColor([1, 0, 0])).toBe('#ff0000');
+    const fade: ContinuousRamp = { type: 'continuous', stops: [[0, [0, 0, 0, 0]], [1, [0, 0, 0, 1]]] };
+    expect(continuousColorAt(fade, 0.25)[3]).toBeCloseTo(0.25, 9);
+  });
+
+  it('the avalanche preset draws nothing below 30° and its legend lists the four classes', () => {
+    const ramp = resolveRamp('avalanche') as ClassRamp;
+    expect(ramp.breaks).toEqual([30, 35, 40, 45]);
+    expect(rampColorAt(ramp, 20 / 60, [0, 60])[3]).toBe(0);
+    expect(rampColorAt(ramp, 50 / 60, [0, 60])[3]).toBe(1);
+    const legend = legendFor('s', 'Slope', ramp, [0, 60], '°');
+    expect(legend.classes!.map((c) => c.label)).toEqual(['30–35°', '35–40°', '40–45°', '≥ 45°']);
+  });
+
+  it('the aspect8 preset wraps north around 0°/360° and lists it once', () => {
+    const ramp = resolveRamp('aspect8') as ClassRamp;
+    expect(rampColorAt(ramp, 5 / 360, [0, 360])).toEqual(rampColorAt(ramp, 355 / 360, [0, 360]));
+    const legend = legendFor('a', 'Aspect', ramp, [0, 360], '°');
+    expect(legend.classes!.map((c) => c.label)).toEqual(['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']);
+  });
+
+  it('rampNamesFor offers class presets only to their analysis', () => {
+    expect(rampNamesFor('slope')).toContain('avalanche');
+    expect(rampNamesFor('slope')).not.toContain('aspect8');
+    expect(rampNamesFor('aspect')).toContain('aspect8');
+    expect(rampNamesFor('elevation')).toEqual(['hypsometric', 'viridis', 'inferno', 'grayscale', 'cyclic', 'diverging']);
   });
 });

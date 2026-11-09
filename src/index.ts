@@ -18,6 +18,7 @@ export type {
   UICorner,
   TreeletEventMap,
   TerrainPick,
+  TerrainSample,
   ProfileSample,
   TreeletStats,
 } from './core/types';
@@ -76,4 +77,5 @@ export { TreeletPanel } from './ui/TreeletPanel';
 export { TreeletCompass } from './ui/TreeletCompass';
 export { TreeletAttribution } from './ui/TreeletAttribution';
 export { TreeletLegend } from './ui/TreeletLegend';
+export { TreeletReadout } from './ui/TreeletReadout';
 export { defineTreeletElements } from './ui/elements';

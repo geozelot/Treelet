@@ -22,6 +22,7 @@ import type {
 } from '../layers/types';
 import type { TreeletEventMap } from './types';
 import type { DisplayController } from './DisplayController';
+import { getAnalysis } from '../analysis/registry';
 
 /** Callback type for emitting events back to the Treelet EventEmitter. */
 type EmitFn = <K extends keyof TreeletEventMap>(event: K, data: TreeletEventMap[K]) => void;
@@ -32,6 +33,7 @@ export class LayerController {
   private readonly displayController: DisplayController;
   private readonly emitEvent: EmitFn;
   private readonly scheduleTiles: () => void;
+  private readonly visibleRange: () => [number, number];
 
   constructor(
     layerRegistry: LayerRegistry,
@@ -39,12 +41,14 @@ export class LayerController {
     displayController: DisplayController,
     emitEvent: EmitFn,
     scheduleTiles: () => void,
+    visibleRange: () => [number, number] = () => [0, 4000],
   ) {
     this.layerRegistry = layerRegistry;
     this.terrainRenderer = terrainRenderer;
     this.displayController = displayController;
     this.emitEvent = emitEvent;
     this.scheduleTiles = scheduleTiles;
+    this.visibleRange = visibleRange;
   }
 
   // =========================================================================
@@ -155,7 +159,11 @@ export class LayerController {
   // =========================================================================
 
   addAnalysisLayer<P extends object>(options: AnalysisLayerOptions<P>): LayerHandle {
-    const handle = this.layerRegistry.addAnalysisLayer(options);
+    // Kinds with view-dependent defaults (a water level) start inside the view
+    const initial = getAnalysis(options.analysis)?.initialParams?.(this.visibleRange()) as Partial<P> | undefined;
+    const handle = this.layerRegistry.addAnalysisLayer(
+      initial ? { ...options, params: { ...initial, ...options.params } as Partial<P> } : options,
+    );
     this.displayController.applyMaterialState();
     this.emitEvent('layeradd', { id: handle.id });
     this.emitEvent('layerchange', {});

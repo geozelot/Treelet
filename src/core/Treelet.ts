@@ -30,8 +30,10 @@ import type {
   LngLat,
   BlendMode,
   TerrainPick,
+  TerrainSample,
   ProfileSample,
   TreeletStats,
+  UICorner,
 } from './types';
 import { SceneManager } from '../scene/SceneManager';
 import { CameraTerrain, marchToTerrain, type GroundSampler } from '../scene/CameraTerrain';
@@ -47,8 +49,9 @@ import type {
   OverlayLayerOptions,
   LayerHandle,
 } from '../layers/types';
-import type { LegendSpec, Ramp } from '../analysis/types';
-import { registerBuiltinAnalyses } from '../analysis/builtins';
+import type { LegendSpec, Ramp, SurfaceSample } from '../analysis/types';
+import { registerBuiltinAnalyses, slopeDegrees, aspectDegrees, curvatureOf } from '../analysis/builtins';
+import { startTween, type TweenHandle } from './tween';
 import { TileGrid } from '../tiles/TileGrid';
 import { WebMercator } from '../crs/WebMercator';
 import { WorkerPool } from '../workers/WorkerPool';
@@ -60,6 +63,7 @@ import { defineTreeletElements } from '../ui/elements';
 import type { TreeletCompass } from '../ui/TreeletCompass';
 import type { TreeletAttribution } from '../ui/TreeletAttribution';
 import type { TreeletLegend } from '../ui/TreeletLegend';
+import type { TreeletReadout } from '../ui/TreeletReadout';
 
 /** Minimum camera clearance above the terrain, in meters. */
 const CAMERA_MIN_CLEARANCE_M = 2;
@@ -139,6 +143,7 @@ export function resolveOptions(user: TreeletOptions): ResolvedTreeletOptions {
       compassPosition: gui.compassPosition ?? DEFAULT_OPTIONS.guiDisplay.compassPosition,
       layerPosition: gui.layerPosition ?? DEFAULT_OPTIONS.guiDisplay.layerPosition,
       legendPosition: gui.legendPosition ?? DEFAULT_OPTIONS.guiDisplay.legendPosition,
+      readoutPosition: gui.readoutPosition ?? DEFAULT_OPTIONS.guiDisplay.readoutPosition,
       glass: gui.glass ?? DEFAULT_OPTIONS.guiDisplay.glass,
     },
     mapDisplay: {
@@ -217,6 +222,11 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
   private compass: TreeletCompass | null = null;
   private attribution: TreeletAttribution | null = null;
   private legend: TreeletLegend | null = null;
+  private readout: TreeletReadout | null = null;
+  /** Containers stacking the legend and readout that share a corner. */
+  private readonly corners = new Map<UICorner, HTMLDivElement>();
+  /** Running parameter animations by layer id. */
+  private readonly tweens = new Map<string, TweenHandle>();
   private readonly scratch = new Vector3();
   private readonly scratchDir = new Vector3();
 
@@ -283,6 +293,7 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
       this.displayController,
       (event, data) => this.emit(event, data),
       () => this.sceneManager.requestRender(),
+      () => this.terrainRenderer.autoElevationRange,
     );
     // A bare map shows shaded relief; imagery and analyses stack over it.
     this.layerController.addAnalysisLayer({ analysis: 'hillshade' });
@@ -337,13 +348,44 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
       this.container.appendChild(this.attribution);
       this.attribution.attach(this, attrSide);
 
-      // Legends of the visible analyses, above the attribution by default
+      // Cursor readout and legends, above the attribution by default; the
+      // two stack when they share a corner
+      if (gd.enabled && gd.readoutPosition !== false) {
+        this.readout = document.createElement('treelet-readout') as TreeletReadout;
+        this.cornerSlot(gd.readoutPosition).appendChild(this.readout);
+        this.readout.attach(this, { glass: gd.glass });
+      }
       if (gd.enabled && gd.legendPosition !== false) {
         this.legend = document.createElement('treelet-legend') as TreeletLegend;
-        this.container.appendChild(this.legend);
-        this.legend.attach(this, gd.legendPosition, { glass: gd.glass });
+        this.cornerSlot(gd.legendPosition).appendChild(this.legend);
+        this.legend.attach(this, { glass: gd.glass });
       }
     }
+  }
+
+  /** The container that stacks the floating elements of a corner (created on demand). */
+  private cornerSlot(corner: UICorner): HTMLDivElement {
+    let slot = this.corners.get(corner);
+    if (slot) return slot;
+    slot = document.createElement('div');
+    slot.className = 'treelet-corner';
+    slot.dataset.corner = corner;
+    const st = slot.style;
+    st.position = 'absolute';
+    st.zIndex = '998';
+    st.display = 'flex';
+    st.flexDirection = 'column';
+    st.gap = '8px';
+    st.pointerEvents = 'none';
+    st.maxWidth = 'calc(100% - 24px)';
+    const [v, h] = corner.split('-') as ['top' | 'bottom', 'left' | 'right'];
+    st.alignItems = h === 'left' ? 'flex-start' : 'flex-end';
+    if (h === 'left') st.left = '12px'; else st.right = '12px';
+    // Bottom corners sit above the attribution bar
+    if (v === 'top') st.top = '12px'; else st.bottom = '24px';
+    this.container.appendChild(slot);
+    this.corners.set(corner, slot);
+    return slot;
   }
 
   // =========================================================================
@@ -495,11 +537,16 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
   /** Current fractional zoom. */
   getZoom(): number { return this.sceneManager.cameraController.deriveZoom(); }
 
+  /** The element the map renders into. */
+  getContainer(): HTMLElement { return this.container; }
+
   /** Number of terrain tiles drawn in the last frame. */
   getTileCount(): number { return this.terrainRenderer.getInstanceCount(); }
 
-  /** Runtime statistics (tiles, atlas use, pending and failed requests). */
-  getStats(): TreeletStats { return this.terrainRenderer.getStats(); }
+  /** Runtime statistics (tiles, atlas use, pending and failed requests, frame time). */
+  getStats(): TreeletStats {
+    return { ...this.terrainRenderer.getStats(), frameTime: this.sceneManager.frameTime };
+  }
 
   /** Visible ground footprint (on the target's height) as a lng/lat box, or null. */
   getBounds(): { sw: LngLat; ne: LngLat } | null {
@@ -556,8 +603,34 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
   }
 
   /**
+   * The terrain surface at a geographic position (elevation, slope, aspect,
+   * curvature, normal) from the finest loaded tile, or null when no data
+   * covering it is loaded. Slope and aspect are true scale.
+   */
+  sampleTerrain(lngLat: LngLat): TerrainSample | null {
+    if (this.destroyed) return null;
+    const w = this.lngLatToWorld(lngLat);
+    const s = this.terrainRenderer.sampleSurfaceAtWorld(w.x, w.y);
+    return s ? Treelet.toTerrainSample(s) : null;
+  }
+
+  private static toTerrainSample(s: SurfaceSample): TerrainSample {
+    const aspect = aspectDegrees(s);
+    const g = s.g ?? [0, 0];
+    const c = s.c ?? [0, 0, 0];
+    return {
+      elevation: s.h,
+      slope: slopeDegrees(s),
+      aspect: Number.isNaN(aspect) ? null : aspect,
+      curvature: curvatureOf('total', g[0], g[1], c[0], c[1], c[2]),
+      normal: [s.n[0], s.n[1], s.n[2]],
+    };
+  }
+
+  /**
    * Pick the terrain under a point in container-relative CSS pixels.
-   * Ray-marches the loaded elevation data (exaggeration-aware).
+   * Ray-marches the loaded elevation data (exaggeration-aware) and samples
+   * the surface where the ray hits it.
    */
   pick(x: number, y: number): TerrainPick | null {
     if (this.destroyed) return null;
@@ -579,9 +652,14 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
     if (t === null) return null;
     const px = ox + dir.x * t;
     const py = oy + dir.y * t;
-    const elevation = this.terrainRenderer.sampleElevationAtWorld(px, py);
-    if (elevation === null) return null;
-    return { lngLat: this.worldToLngLat(px, py), elevation };
+    const surface = this.terrainRenderer.sampleSurfaceAtWorld(px, py);
+    if (surface === null) return null;
+    return { lngLat: this.worldToLngLat(px, py), ...Treelet.toTerrainSample(surface) };
+  }
+
+  /** The elevation range (min, max in meters) of the tiles drawn in the last frame. */
+  getVisibleElevationRange(): [number, number] {
+    return this.terrainRenderer.autoElevationRange;
   }
 
   /**
@@ -642,6 +720,46 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
     return this;
   }
   getAnalysisParams(handle: LayerHandle | string): Record<string, unknown> | null { return this.displayController.getAnalysisParams(handle); }
+  /**
+   * Animate numeric parameters of an analysis layer: each key gets a target
+   * value, or a `[from, to]` pair. Resolves true when done, false when a
+   * later animation of the same layer replaced it (or the map was destroyed).
+   */
+  animateAnalysisParams(
+    handle: LayerHandle | string,
+    targets: Record<string, number | [number, number]>,
+    duration = 1000,
+  ): Promise<boolean> {
+    const id = typeof handle === 'string' ? handle : handle.id;
+    const current = this.displayController.getAnalysisParams(id);
+    if (!current) return Promise.resolve(false);
+    this.tweens.get(id)?.cancel();
+    const spans: Array<[string, number, number]> = [];
+    for (const [key, target] of Object.entries(targets)) {
+      const from = Array.isArray(target) ? target[0] : current[key];
+      const to = Array.isArray(target) ? target[1] : target;
+      if (typeof from !== 'number' || !Number.isFinite(from) || !Number.isFinite(to)) {
+        console.warn(`treelet: cannot animate ${id}.${key} from`, from, 'to', to);
+        continue;
+      }
+      spans.push([key, from, to]);
+    }
+    if (spans.length === 0) return Promise.resolve(false);
+    const tween = startTween({
+      duration: requireFinite(duration, 'duration'),
+      onUpdate: (t) => {
+        if (this.destroyed) return;
+        const params: Record<string, number> = {};
+        for (const [key, from, to] of spans) params[key] = from + (to - from) * t;
+        this.setAnalysisParams(id, params);
+      },
+    });
+    this.tweens.set(id, tween);
+    return tween.done.then((completed) => {
+      if (this.tweens.get(id) === tween) this.tweens.delete(id);
+      return completed;
+    });
+  }
   /** Color ramp of a value analysis: a built-in name or stops / classes. */
   setAnalysisRamp(handle: LayerHandle | string, ramp: Ramp): this {
     if (this.displayController.setAnalysisRamp(handle, ramp)) this.emit('layerchange', {});
@@ -768,8 +886,13 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
     this.sceneManager.dispose();
     this.removeAllListeners();
 
+    for (const tween of this.tweens.values()) tween.cancel();
+    this.tweens.clear();
     if (this.compass) { this.compass.remove(); this.compass = null; }
     if (this.attribution) { this.attribution.remove(); this.attribution = null; }
     if (this.legend) { this.legend.remove(); this.legend = null; }
+    if (this.readout) { this.readout.remove(); this.readout = null; }
+    for (const slot of this.corners.values()) slot.remove();
+    this.corners.clear();
   }
 }

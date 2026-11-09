@@ -12,27 +12,37 @@
 /** Color as [r, g, b] in 0–1. */
 export type RGB = [number, number, number];
 
+/** Color with alpha, [r, g, b, a] in 0–1. Ramp colors may carry alpha (a = 0 draws nothing). */
+export type RGBA = [number, number, number, number];
+
 /** How a coat combines with what lies below it. */
 export type CoatBlendMode = 'normal' | 'multiply' | 'screen' | 'softlight';
 
-/** Built-in ramp names. `cyclic` suits circular data such as aspect. */
-export type ColorRamp = 'hypsometric' | 'viridis' | 'inferno' | 'grayscale' | 'cyclic' | 'diverging';
+/**
+ * Built-in ramp names. `cyclic` suits circular data such as aspect.
+ * `avalanche` (slope classes 30–35–40–45°, nothing below 30°) and `aspect8`
+ * (eight compass sectors) are class presets for the slope and aspect analyses.
+ */
+export type ColorRamp =
+  | 'hypsometric' | 'viridis' | 'inferno' | 'grayscale' | 'cyclic' | 'diverging'
+  | 'avalanche' | 'aspect8';
 
 /** Smooth ramp: color stops over the normalized value t in [0, 1]. */
 export interface ContinuousRamp {
   type: 'continuous';
-  stops: Array<[t: number, color: RGB]>;
+  stops: Array<[t: number, color: RGB | RGBA]>;
 }
 
 /**
  * Stepped ramp: `breaks` (ascending, in the analysis' units) split the value
- * domain into `breaks.length + 1` classes, one color each. Optional labels
+ * domain into `breaks.length + 1` classes, one color each. A color with
+ * alpha 0 leaves that class undrawn (and out of the legend). Optional labels
  * replace the generated "a–b" class labels in legends.
  */
 export interface ClassRamp {
   type: 'classes';
   breaks: number[];
-  colors: RGB[];
+  colors: Array<RGB | RGBA>;
   labels?: string[];
 }
 
@@ -55,11 +65,16 @@ export interface RangeParam extends ParamBase {
   max: number;
   step: number;
   unit?: string;
+  /** `'elevation'`: the panel's slider spans the visible elevation range instead of min–max. */
+  bounds?: 'elevation';
 }
 
 /**
  * A [low, high] pair, e.g. the value range a ramp spans. With `auto` the
- * value may also be the string 'auto' (fit to the visible data).
+ * value may also be the string 'auto' (fit to the visible data); with
+ * `optional` it may be null (not applied). `wrap` marks a circular range
+ * (bearings): [from, to] runs clockwise and may pass through min/max, so
+ * the pair is not sorted.
  */
 export interface SpanParam extends ParamBase {
   type: 'span';
@@ -68,6 +83,8 @@ export interface SpanParam extends ParamBase {
   step: number;
   unit?: string;
   auto?: boolean;
+  optional?: boolean;
+  wrap?: boolean;
 }
 
 export interface SelectParam extends ParamBase {
@@ -96,12 +113,16 @@ export interface SurfaceSample {
   h: number;
   /** Unit normal (x east, y north, z up), true scale. */
   n: [number, number, number];
+  /** Gradient dh/dx (east), dh/dy (north) in m/m, true scale. */
+  g?: [number, number];
+  /** Second derivatives [hxx, hyy, hxy] in 1/m, at the sampled tile's resolution. */
+  c?: [number, number, number];
 }
 
 // === Legends ===
 
 export interface LegendClass {
-  color: RGB;
+  color: RGBA;
   label: string;
 }
 
@@ -114,8 +135,8 @@ export interface LegendSpec {
   /** Value range the ramp spans. */
   domain: [number, number];
   /** Continuous ramps: color stops over t in [0, 1]. */
-  stops?: Array<[number, RGB]>;
-  /** Stepped ramps: one entry per class, lowest first. */
+  stops?: Array<[number, RGBA]>;
+  /** Stepped ramps: one entry per drawn class, lowest first. */
   classes?: LegendClass[];
 }
 
@@ -154,4 +175,9 @@ export interface AnalysisDescriptor<P extends object = Record<string, unknown>> 
   pack: (params: P, domain: [number, number]) => { p0: Vec4; p1: Vec4 };
   /** The same quantity on the CPU, for readouts and tests (value kinds). */
   cpu?: (s: SurfaceSample, params: P) => number;
+  /**
+   * Parameters derived from the visible elevation range when a layer is
+   * added (under the caller's `params`), e.g. a water level inside the view.
+   */
+  initialParams?: (visible: [number, number]) => Partial<P>;
 }

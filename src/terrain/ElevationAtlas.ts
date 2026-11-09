@@ -28,6 +28,8 @@ import {
 } from 'three';
 import { packTileKey } from '../tiles/TileIndex';
 import { ELEVATION_NODATA } from '../workers/raster';
+import { sampleSurfaceGrid } from '../analysis/surface';
+import type { SurfaceSample } from '../analysis/types';
 import type { ArrayTextureWriter } from './ArrayTextureWriter';
 
 export { ELEVATION_NODATA } from '../workers/raster';
@@ -203,6 +205,26 @@ export class ElevationAtlas {
     acc(d[base + y1 * S + x0], (1 - fx) * fy);
     acc(d[base + y1 * S + x1], fx * fy);
     return ws > 1e-9 ? sum / ws : null;
+  }
+
+  /**
+   * Elevation, normal, gradient and second derivatives at tile-normalized
+   * (u, v) of a loaded tile, with the fragment shader's stencil (see
+   * src/analysis/surface.ts). `texelMeters` is the ground distance between
+   * the slot's texels. Null when the tile isn't loaded or has no data there.
+   */
+  sampleSurface(key: number, u: number, v: number, texelMeters: number): SurfaceSample | null {
+    const slot = this.slotMap.get(key);
+    if (!slot) return null;
+    const S = this.slotSize;
+    const smax = S - 1;
+    const base = slot.layer * S * S;
+    const d = this.data;
+    return sampleSurfaceGrid(
+      (i, j) => d[base + j * S + i], smax,
+      Math.min(Math.max(u, 0), 1) * smax, Math.min(Math.max(v, 0), 1) * smax,
+      texelMeters, ELEVATION_NODATA + 1,
+    );
   }
 
   // ==== LRU / pinning ====

@@ -32,10 +32,11 @@ const minimal = (id: string): AnalysisDescriptor<{ k: number }> => ({
 
 describe('registerAnalysis', () => {
   it('registers the built-ins once, in panel order, with kinds after imagery', () => {
-    const ids = listAnalyses().slice(0, 5).map((d) => d.id);
-    expect(ids).toEqual(['elevation', 'slope', 'aspect', 'contours', 'hillshade']);
+    const ids = listAnalyses().slice(0, 7).map((d) => d.id);
+    expect(ids).toEqual(['elevation', 'slope', 'aspect', 'contours', 'hillshade', 'curvature', 'water']);
     expect(analysisKind('elevation')).toBe(IMAGERY_KIND + 1);
     expect(analysisKind('hillshade')).toBe(IMAGERY_KIND + 5);
+    expect(analysisKind('water')).toBe(IMAGERY_KIND + 7);
     const before = analysisVersion();
     registerBuiltinAnalyses();
     expect(analysisVersion()).toBe(before);
@@ -126,5 +127,41 @@ describe('built-in CPU twins', () => {
     const packed = contours.pack({ interval: 50, thickness: 2, index: 5, color: [1, 0, 0] }, [0, 1]);
     expect(packed.p0).toEqual([50, 2, 5, 0]);
     expect(packed.p1).toEqual([1, 0, 0, 0]);
+  });
+});
+
+describe('resolveParams: optional and wrapping spans', () => {
+  let slope: AnalysisDescriptor<object>;
+  beforeAll(() => { slope = getAnalysis('slope')!; });
+
+  it('accepts null for an optional span and rejects it elsewhere', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(resolveParams(slope, { aspectMask: null }).aspectMask).toBeNull();
+    expect(resolveParams(slope, { range: null as never }).range).toEqual([0, 60]);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the order of a wrapping span (clockwise through north)', () => {
+    expect(resolveParams(slope, { aspectMask: [315, 45] }).aspectMask).toEqual([315, 45]);
+    expect(resolveParams(slope, { aspectMask: [400, -10] }).aspectMask).toEqual([360, 0]);
+    expect(resolveParams(slope, { range: [50, 10] }).range).toEqual([10, 50]);
+  });
+
+  it('slope packs the aspect mask into p0.zw with a flag in p1.x', () => {
+    const params = resolveParams(slope, { aspectMask: [315, 45] }) as { range: [number, number]; aspectMask: [number, number] | null };
+    expect(slope.pack(params, [0, 60])).toEqual({ p0: [0, 60, 315, 45], p1: [1, 0, 0, 0] });
+    expect(slope.pack(resolveParams(slope, {}) as never, [0, 60])).toEqual({ p0: [0, 60, 0, 360], p1: [0, 0, 0, 0] });
+  });
+
+  it('water packs level, depth fade, shoreline and color; curvature its mode', () => {
+    const water = getAnalysis('water')!;
+    expect(water.pack(water.defaults, [0, 1]).p0).toEqual([500, 100, 2, 0]);
+    expect(water.initialParams!([1000, 2000])).toEqual({ level: 1300 });
+    const curvature = getAnalysis('curvature')!;
+    expect(curvature.pack(resolveParams(curvature, { mode: 'plan' }), [-20, 20])).toEqual({ p0: [-20, 20, 0, 0], p1: [1, 0, 0, 0] });
+    expect(curvature.pack(curvature.defaults, [-20, 20]).p1[0]).toBe(2);
+    const src = analysisShaderSource();
+    expect(src).toContain('analysis_water(Surface s');
+    expect(src).toContain('analysis_curvature(Surface s');
   });
 });

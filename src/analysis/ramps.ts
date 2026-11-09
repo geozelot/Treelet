@@ -1,12 +1,13 @@
 // ============================================================================
 // treelet.js - Color Ramps
 //
-// Ramps are data: the built-in names resolve to color stops, users pass
-// their own stops or classes. The same spec feeds the ramp texture the
-// shader samples, the panel's preview strip and the legend.
+// Ramps are data: the built-in names resolve to color stops or classes,
+// users pass their own. The same spec feeds the ramp texture the shader
+// samples, the panel's preview strip and the legend. Colors may carry
+// alpha; a class with alpha 0 draws nothing.
 // ============================================================================
 
-import type { ColorRamp, ContinuousRamp, ClassRamp, LegendSpec, Ramp, RampSpec, RGB } from './types';
+import type { ColorRamp, ContinuousRamp, ClassRamp, LegendSpec, Ramp, RampSpec, RGB, RGBA } from './types';
 
 /** Texels per ramp row in the ramp texture (and legend resolution). */
 export const RAMP_WIDTH = 1024;
@@ -27,7 +28,18 @@ function cyclicStops(n = 24): Array<[number, RGB]> {
   return stops;
 }
 
-export const BUILTIN_RAMPS: Record<ColorRamp, ContinuousRamp> = {
+const ASPECT8_COLORS: RGB[] = [
+  [0.85, 0.20, 0.20], // N
+  [0.95, 0.55, 0.15], // NE
+  [0.95, 0.88, 0.25], // E
+  [0.45, 0.75, 0.30], // SE
+  [0.20, 0.70, 0.70], // S
+  [0.25, 0.45, 0.85], // SW
+  [0.55, 0.30, 0.75], // W
+  [0.85, 0.40, 0.70], // NW
+];
+
+export const BUILTIN_RAMPS: Record<ColorRamp, RampSpec> = {
   hypsometric: { type: 'continuous', stops: [
     [0.00, [0.08, 0.32, 0.18]],
     [0.08, [0.30, 0.58, 0.22]],
@@ -58,9 +70,37 @@ export const BUILTIN_RAMPS: Record<ColorRamp, ContinuousRamp> = {
     [0.5, [0.96, 0.96, 0.96]],
     [1.0, [0.70, 0.09, 0.17]],
   ] },
+  /** Slope classes of avalanche terrain maps: nothing below 30°, then yellow, orange, red, violet. */
+  avalanche: { type: 'classes', breaks: [30, 35, 40, 45], colors: [
+    [0, 0, 0, 0],
+    [1.00, 0.93, 0.20],
+    [1.00, 0.60, 0.10],
+    [0.90, 0.15, 0.10],
+    [0.60, 0.20, 0.70],
+  ] },
+  /** Eight compass sectors (N wraps around 0°/360°). */
+  aspect8: { type: 'classes',
+    breaks: [22.5, 67.5, 112.5, 157.5, 202.5, 247.5, 292.5, 337.5],
+    colors: [...ASPECT8_COLORS, ASPECT8_COLORS[0]],
+    labels: ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW', 'N'],
+  },
 };
 
 export const BUILTIN_RAMP_NAMES = Object.keys(BUILTIN_RAMPS) as ColorRamp[];
+
+/** Built-in class presets whose breaks only make sense for one analysis kind. */
+export const RAMP_PRESET_FOR: Partial<Record<ColorRamp, string>> = {
+  avalanche: 'slope',
+  aspect8: 'aspect',
+};
+
+/** Built-in ramps that suit an analysis: every general ramp plus its own class presets. */
+export function rampNamesFor(analysisId: string): ColorRamp[] {
+  return BUILTIN_RAMP_NAMES.filter((name) => {
+    const only = RAMP_PRESET_FOR[name];
+    return only === undefined || only === analysisId;
+  });
+}
 
 export function isRampName(ramp: Ramp): ramp is ColorRamp {
   return typeof ramp === 'string';
@@ -97,18 +137,30 @@ export function validateRamp(spec: RampSpec): void {
   }
 }
 
+/** A color with its alpha (1 where none is given). */
+export function rgba(c: RGB | RGBA): RGBA {
+  return [c[0], c[1], c[2], c.length > 3 ? (c as RGBA)[3] : 1];
+}
+
 /** Color of a continuous ramp at t (clamped to [0, 1]), linearly interpolated. */
-export function continuousColorAt(ramp: ContinuousRamp, t: number): RGB {
+export function continuousColorAt(ramp: ContinuousRamp, t: number): RGBA {
   const stops = ramp.stops;
-  if (!(t > stops[0][0])) return [...stops[0][1]];
+  if (!(t > stops[0][0])) return rgba(stops[0][1]);
   const last = stops[stops.length - 1];
-  if (t >= last[0]) return [...last[1]];
+  if (t >= last[0]) return rgba(last[1]);
   let i = 1;
   while (stops[i][0] < t) i++;
-  const [t0, c0] = stops[i - 1];
-  const [t1, c1] = stops[i];
+  const [t0, c0r] = stops[i - 1];
+  const [t1, c1r] = stops[i];
+  const c0 = rgba(c0r);
+  const c1 = rgba(c1r);
   const f = t1 > t0 ? (t - t0) / (t1 - t0) : 0;
-  return [c0[0] + (c1[0] - c0[0]) * f, c0[1] + (c1[1] - c0[1]) * f, c0[2] + (c1[2] - c0[2]) * f];
+  return [
+    c0[0] + (c1[0] - c0[0]) * f,
+    c0[1] + (c1[1] - c0[1]) * f,
+    c0[2] + (c1[2] - c0[2]) * f,
+    c0[3] + (c1[3] - c0[3]) * f,
+  ];
 }
 
 /** Index of the class a value falls in (values at a break belong to the upper class). */
@@ -122,10 +174,10 @@ export function classIndexOf(ramp: ClassRamp, value: number): number {
  * Color for the normalized value t over `domain`. Class breaks are in value
  * units, so a class ramp needs the domain to place them.
  */
-export function rampColorAt(spec: RampSpec, t: number, domain: [number, number]): RGB {
+export function rampColorAt(spec: RampSpec, t: number, domain: [number, number]): RGBA {
   if (spec.type === 'continuous') return continuousColorAt(spec, t);
   const value = domain[0] + t * (domain[1] - domain[0]);
-  return [...spec.colors[classIndexOf(spec, value)]];
+  return rgba(spec.colors[classIndexOf(spec, value)]);
 }
 
 /** Write one ramp row (`width` RGBA8 texels) into `out` starting at `offset`. */
@@ -138,53 +190,72 @@ export function writeRampRow(
     out[o] = Math.round(Math.max(0, Math.min(1, c[0])) * 255);
     out[o + 1] = Math.round(Math.max(0, Math.min(1, c[1])) * 255);
     out[o + 2] = Math.round(Math.max(0, Math.min(1, c[2])) * 255);
-    out[o + 3] = 255;
+    out[o + 3] = Math.round(Math.max(0, Math.min(1, c[3])) * 255);
   }
 }
 
-function hex(c: RGB): string {
-  const h = (v: number) => Math.round(Math.max(0, Math.min(1, v)) * 255).toString(16).padStart(2, '0');
+/** CSS color of a ramp color: `#rrggbb`, or `rgba(...)` when it has alpha below 1. */
+export function cssColor(c: RGB | RGBA): string {
+  const v = (x: number) => Math.round(Math.max(0, Math.min(1, x)) * 255);
+  const a = c.length > 3 ? Math.max(0, Math.min(1, (c as RGBA)[3])) : 1;
+  if (a < 1) return `rgba(${v(c[0])}, ${v(c[1])}, ${v(c[2])}, ${Math.round(a * 1000) / 1000})`;
+  const h = (x: number) => v(x).toString(16).padStart(2, '0');
   return `#${h(c[0])}${h(c[1])}${h(c[2])}`;
 }
 
 /** CSS `linear-gradient` of a ramp (left = domain low), for previews. */
 export function rampGradientCss(spec: RampSpec, domain: [number, number]): string {
   if (spec.type === 'continuous') {
-    return `linear-gradient(to right, ${spec.stops.map(([t, c]) => `${hex(c)} ${(t * 100).toFixed(1)}%`).join(', ')})`;
+    return `linear-gradient(to right, ${spec.stops.map(([t, c]) => `${cssColor(c)} ${(t * 100).toFixed(1)}%`).join(', ')})`;
   }
   const span = domain[1] - domain[0] || 1;
   const parts: string[] = [];
   let from = 0;
   for (let i = 0; i < spec.colors.length; i++) {
     const to = i < spec.breaks.length ? Math.max(0, Math.min(1, (spec.breaks[i] - domain[0]) / span)) : 1;
-    parts.push(`${hex(spec.colors[i])} ${(from * 100).toFixed(1)}% ${(to * 100).toFixed(1)}%`);
+    parts.push(`${cssColor(spec.colors[i])} ${(from * 100).toFixed(1)}% ${(to * 100).toFixed(1)}%`);
     from = to;
   }
   return `linear-gradient(to right, ${parts.join(', ')})`;
 }
 
-function formatValue(v: number): string {
+/** Short number for labels: 3 significant-ish digits, no trailing zeros. */
+export function formatValue(v: number): string {
   const a = Math.abs(v);
   const s = a >= 100 ? v.toFixed(0) : a >= 10 ? v.toFixed(1) : v.toFixed(2);
   return s.includes('.') ? s.replace(/\.?0+$/, '') : s;
 }
 
-/** Legend data for a ramp over a domain. */
+/**
+ * Legend data for a ramp over a domain. Classes that draw nothing (alpha 0)
+ * are left out; classes sharing a label and color (a sector that wraps
+ * around, like north) appear once.
+ */
 export function legendFor(
   id: string, title: string, spec: RampSpec, domain: [number, number], unit?: string,
 ): LegendSpec {
   if (spec.type === 'continuous') {
-    return { id, title, unit, type: 'continuous', domain: [domain[0], domain[1]], stops: spec.stops.map(([t, c]) => [t, [...c]] as [number, RGB]) };
+    return {
+      id, title, unit, type: 'continuous', domain: [domain[0], domain[1]],
+      stops: spec.stops.map(([t, c]) => [t, rgba(c)] as [number, RGBA]),
+    };
   }
   const u = unit ?? '';
-  const classes = spec.colors.map((color, i) => {
+  const classes: LegendSpec['classes'] = [];
+  const seen = new Set<string>();
+  spec.colors.forEach((raw, i) => {
+    const color = rgba(raw);
+    if (color[3] <= 0) return;
     let label = spec.labels?.[i];
     if (label === undefined) {
       if (i === 0) label = `< ${formatValue(spec.breaks[0])}${u}`;
       else if (i === spec.breaks.length) label = `≥ ${formatValue(spec.breaks[i - 1])}${u}`;
       else label = `${formatValue(spec.breaks[i - 1])}–${formatValue(spec.breaks[i])}${u}`;
     }
-    return { color: [...color] as RGB, label };
+    const key = `${label}|${cssColor(color)}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    classes.push({ color, label });
   });
   return { id, title, unit, type: 'classes', domain: [domain[0], domain[1]], classes };
 }

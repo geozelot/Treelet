@@ -1,8 +1,8 @@
 // ============================================================================
 // treelet.js - Full Demo
 // Showcases the layer architecture: the base layer is the geometry; the
-// coat stack (imagery and analyses such as elevation, slope, contours and
-// hillshade) colors it.
+// coat stack (imagery and analyses such as elevation, slope, contours,
+// water and hillshade) colors it. Three presets switch between stacks.
 // ============================================================================
 
 import { Treelet, XYZSource, WMTSSource } from '../src/index';
@@ -41,13 +41,6 @@ const terrain = map.addBaseLayer({
   decoder: 'terrarium',
   layerDisplay: { exaggeration: 1.3 },
 });
-
-// =========================================================================
-// Analysis coats - the map starts with a hillshade; elevation colors go
-// beneath it. Open the Overlay stack in the layer panel to add slope,
-// aspect or contours over any imagery.
-// =========================================================================
-map.addAnalysisLayer({ analysis: 'elevation', params: { range: [0, 4000] } });
 
 // =========================================================================
 // Drape Layer 1 - OpenStreetMap
@@ -90,6 +83,50 @@ const basemapOrtho = map.addDrapeLayer({
   }),
 });
 
+// =========================================================================
+// Presets - a few coat stacks. The map starts with a hillshade coat; each
+// preset adds its own analyses on top of the imagery it picks. Open the
+// Overlay stack in the layer panel to change them.
+// =========================================================================
+type Preset = 'relief' | 'avalanche' | 'flood';
+let presetLayers: ReturnType<typeof map.addAnalysisLayer>[] = [];
+
+function applyPreset(name: Preset): void {
+  for (const h of presetLayers) map.removeAnalysisLayer(h);
+  presetLayers = [];
+
+  if (name === 'relief') {
+    // Elevation colors under the hillshade, no imagery
+    map.deactivateDrapeLayer();
+    presetLayers.push(map.addAnalysisLayer({ analysis: 'elevation', params: { range: [0, 4000] } }));
+  } else if (name === 'avalanche') {
+    // Avalanche terrain: slope classes (nothing below 30°) over the orthophoto, with contours
+    map.activateDrapeLayer(basemapOrtho);
+    presetLayers.push(
+      map.addAnalysisLayer({ analysis: 'slope', ramp: 'avalanche', layerDisplay: { opacity: 0.7 } }),
+      map.addAnalysisLayer({ analysis: 'contours', params: { interval: 100, index: 5 } }),
+    );
+  } else {
+    // Rising water over the satellite imagery: the level animates up through the visible range
+    map.activateDrapeLayer(satellite);
+    const [lo, hi] = map.getVisibleElevationRange();
+    const water = map.addAnalysisLayer({ analysis: 'water', params: { level: lo } });
+    presetLayers.push(water);
+    void map.animateAnalysisParams(water, { level: [lo, lo + 0.45 * (hi - lo)] }, 4000);
+  }
+
+  document.querySelectorAll<HTMLButtonElement>('#presets button').forEach((b) => {
+    b.setAttribute('aria-pressed', String(b.dataset.preset === name));
+  });
+}
+
+document.getElementById('presets')?.addEventListener('click', (e) => {
+  const button = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-preset]');
+  if (button) applyPreset(button.dataset.preset as Preset);
+});
+
+applyPreset('relief');
+
 // Start!
 map.start();
 
@@ -99,5 +136,6 @@ map.start();
 
 console.log(`treelet.js v${Treelet.version} - Full Demo`);
 console.log('Navigate: Left-click drag to pan, scroll to zoom, right-click drag to orbit (touch: 1 finger pans, 2 fingers zoom/rotate)');
-console.log('Inspect: map.getElevation({ lng, lat }), map.pick(x, y), map.getElevationProfile(a, b), map.getStats()');
-console.log('Coats: map.addAnalysisLayer({ analysis: "slope" }), map.getLayerStack(), map.getLegends()');
+console.log('Inspect: map.sampleTerrain({ lng, lat }), map.pick(x, y), map.getElevationProfile(a, b), map.getStats()');
+console.log('Coats: map.addAnalysisLayer({ analysis: "slope", ramp: "avalanche" }), map.getLayerStack(), map.getLegends()');
+console.log('Water: const w = map.addAnalysisLayer({ analysis: "water" }); map.animateAnalysisParams(w, { level: 2000 }, 3000)');

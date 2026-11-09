@@ -23,11 +23,11 @@ vec4 imageryCoat(vec4 drape) {
   return vec4(c, 1.0);
 }
 
-// Nearest texel of the coat's ramp row at the normalized value t.
-vec3 rampColor(float row, float t) {
+// Nearest texel of the coat's ramp row at the normalized value t (with alpha).
+vec4 rampColor(float row, float t) {
   float u = clamp(t, 0.0, 1.0) * (1.0 - 1.0 / uRampSize.x) + 0.5 / uRampSize.x;
   float v = (row + 0.5) / uRampSize.y;
-  return texture(uRampTex, vec2(u, v)).rgb;
+  return texture(uRampTex, vec2(u, v));
 }
 
 vec3 applyCoats(Surface s, vec4 drape) {
@@ -36,7 +36,10 @@ vec3 applyCoats(Surface s, vec4 drape) {
     if (i >= uCoatCount) break;
     int kind = uCoatKind[i];
     vec4 c = kind == 0 ? imageryCoat(drape) : evalAnalysis(kind, s, uCoatP0[i], uCoatP1[i]);
-    if (uCoatRamp[i] >= 0.0) c.rgb = rampColor(uCoatRamp[i], c.x);
+    if (uCoatRamp[i] >= 0.0) {
+      vec4 rc = rampColor(uCoatRamp[i], c.x);
+      c = vec4(rc.rgb, c.w * rc.a);
+    }
     color = blendCoat(uCoatBlend[i], color, c.rgb, c.w * uCoatOpacity[i]);
   }
   return color;

@@ -46,6 +46,7 @@ export class SceneManager {
   private readonly maxPixelRatio: number;
   private readonly renderOnDemand: boolean;
   private animationFrameId: number | null = null;
+  private _frameTime = 0;
   private frameCallback: FrameCallback | null = null;
   private renderRequested = true;
   private lastFrameTime = 0;
@@ -218,6 +219,7 @@ export class SceneManager {
     const dt = Math.min(Math.max((now - this.lastFrameTime) / 1000, 0), 0.25);
     this.lastFrameTime = now;
     if (this.contextLost) return;
+    const t0 = performance.now();
 
     const animating = this.cameraController.update();
     const moved = this.cameraChanged() || animating;
@@ -229,7 +231,15 @@ export class SceneManager {
       this.renderRequested = false;
       this.renderer.render(this.scene, this.camera);
       this.snapshotCamera();
+      // CPU cost of a rendered frame (update + issuing draw calls), smoothed
+      const ms = performance.now() - t0;
+      this._frameTime = this._frameTime === 0 ? ms : this._frameTime + (ms - this._frameTime) * 0.1;
     }
+  }
+
+  /** Smoothed CPU time per rendered frame in milliseconds. */
+  get frameTime(): number {
+    return this._frameTime;
   }
 
   private cameraChanged(): boolean {

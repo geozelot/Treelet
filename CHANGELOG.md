@@ -22,6 +22,11 @@
 - `registerAnalysis(descriptor)`: a custom analysis is a GLSL snippet plus a parameter schema; the panel renders its settings.
 - Contours: index lines (every Nth line bolder).
 - `'rangechange'` event when the visible elevation range used by `'auto'` ramps changes.
+- Slope: `aspectMask: [from, to]` draws only slopes facing a compass sector (through north with `[315, 45]`); built-in class presets `'avalanche'` (nothing below 30°, then 30–35–40–45° in the usual avalanche-map colors) and `'aspect8'` (eight compass sectors). Ramp colors may carry alpha: a class with alpha 0 draws nothing and is left out of the legend.
+- `'water'` analysis: fills the terrain below a `level` with water that darkens with depth (`depthFade`) and fades along the shore (`shoreline`); a new water coat starts a third of the way up the visible range. `animateAnalysisParams(handle, { level: [from, to] }, duration)` tweens numeric parameters of any analysis.
+- `'curvature'` analysis (`mode: 'profile' | 'plan' | 'total'`, 1/km, convex positive) on a diverging ramp. The surface the shader and the CPU see now includes the true-scale gradient and second derivatives (`s.g`, `s.c`), computed at the rendered tile's resolution.
+- Cursor readout: `<treelet-readout>` (`guiDisplay.readoutPosition`) shows elevation, slope and aspect under the mouse (after a tap on touch screens). `pick(x, y)` returns `slope`, `aspect`, `curvature` and `normal` along with the elevation; `sampleTerrain(lngLat)` gives the same for a position; `getVisibleElevationRange()` the elevation range on screen.
+- The legend and the readout stack in a shared corner container above the attribution; `getStats().frameTime` is the smoothed CPU time per rendered frame.
 
 ## 0.3.0
 

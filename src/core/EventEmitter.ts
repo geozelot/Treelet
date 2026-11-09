@@ -2,7 +2,8 @@
 // treelet.js - Typed EventEmitter
 // ============================================================================
 
-type EventHandler<T> = (data: T) => void;
+/** A listener for one event's data. */
+export type EventHandler<T> = (data: T) => void;
 
 /**
  * Lightweight typed event emitter.

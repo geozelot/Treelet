@@ -30,6 +30,14 @@ export type {
   Feature,
   FeatureCollection,
   Geometry,
+  Position,
+  PointGeometry,
+  MultiPointGeometry,
+  LineStringGeometry,
+  MultiLineStringGeometry,
+  PolygonGeometry,
+  MultiPolygonGeometry,
+  GeometryCollection,
   OverlayStyle,
   OverlayStyleSpec,
   ColorValue,
@@ -54,10 +62,11 @@ export type {
   AnalysisJob,
   RegionAnalysisKind,
 } from './core/AnalysisController';
+export { REGION_ANALYSES } from './core/AnalysisController';
 
 // Re-export core classes
 export { Treelet } from './core/Treelet';
-export { EventEmitter } from './core/EventEmitter';
+export { EventEmitter, type EventHandler } from './core/EventEmitter';
 export { WebMercator } from './crs/WebMercator';
 export { TileGrid } from './tiles/TileGrid';
 export { CameraController } from './scene/CameraController';
@@ -80,6 +89,10 @@ export type {
   AnalysisLayerOptions,
   AnalysisLayerDisplay,
   RasterLayerOptions,
+  ResolvedBaseLayerDisplay,
+  ResolvedDrapeLayerDisplay,
+  ResolvedAnalysisLayerDisplay,
+  ResolvedOverlayLayerDisplay,
   OverlayLayerOptions,
   OverlayLayerDisplay,
   LayerHandle,
@@ -111,7 +124,8 @@ export { TreeletCompass } from './ui/TreeletCompass';
 export { TreeletAttribution } from './ui/TreeletAttribution';
 export { TreeletLegend } from './ui/TreeletLegend';
 export { TreeletReadout } from './ui/TreeletReadout';
-export { TreeletLabels } from './ui/TreeletLabels';
-export { TreeletProfile } from './ui/TreeletProfile';
+export { TreeletLabels, type PlacedLabel } from './ui/TreeletLabels';
+export { TreeletProfile, type ProfileData } from './ui/TreeletProfile';
+export type { ProfilePoint } from './ui/profileChart';
 export { TreeletToolbar } from './ui/TreeletToolbar';
 export { defineTreeletElements } from './ui/elements';

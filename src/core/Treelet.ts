@@ -19,7 +19,6 @@ import {
   MAX_TILE_ZOOM,
   WEB_MERCATOR_FULL_EXTENT,
   WEB_MERCATOR_MAX_LAT,
-  tilesForAtlasSize,
   validateTileConfig,
 } from './constants';
 import { version as packageVersion } from '../../package.json';
@@ -145,13 +144,9 @@ export function resolveOptions(user: TreeletOptions): ResolvedTreeletOptions {
   const maxInstances = map.maxInstances ?? dm.maxInstances;
   const maxConcurrentFetches = map.maxConcurrentFetches ?? dm.maxConcurrentFetches;
   const atlasSegments = map.atlasSegments ?? dm.atlasSegments;
-  let tileCacheSize = map.tileCacheSize ?? dm.tileCacheSize;
-  if (map.tileCacheSize === undefined && map.atlasSize !== undefined) {
-    tileCacheSize = tilesForAtlasSize(map.atlasSize, slotSize);
-    console.warn(
-      `treelet: mapDisplay.atlasSize is deprecated; atlasSize ${map.atlasSize} with slotSize ${slotSize} ` +
-      `holds ${tileCacheSize} tiles. Use mapDisplay.tileCacheSize instead (default ${dm.tileCacheSize}).`,
-    );
+  const tileCacheSize = map.tileCacheSize ?? dm.tileCacheSize;
+  if ((map as { atlasSize?: unknown }).atlasSize !== undefined) {
+    console.warn(`treelet: mapDisplay.atlasSize was removed in 1.0 and is ignored; set mapDisplay.tileCacheSize (a tile count, default ${dm.tileCacheSize})`);
   }
   validateTileConfig(tileCacheSize, slotSize, maxInstances, maxConcurrentFetches, atlasSegments, drapeSlotSize);
 
@@ -693,9 +688,13 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
   /** Number of terrain tiles drawn in the last frame. */
   getTileCount(): number { return this.terrainRenderer.getInstanceCount(); }
 
-  /** Runtime statistics (tiles, atlas use, pending and failed requests, frame time). */
+  /** Runtime statistics: tiles, atlas use, requests, coats, rasters, overlays, shadows, frame time. */
   getStats(): TreeletStats {
-    return { ...this.terrainRenderer.getStats(), frameTime: this.sceneManager.frameTime };
+    return {
+      ...this.terrainRenderer.getStats(),
+      overlays: this.layerRegistry.getAllOverlayLayers().length,
+      frameTime: this.sceneManager.frameTime,
+    };
   }
 
   /** Visible ground footprint (on the target's height) as a lng/lat box, or null. */
@@ -1277,24 +1276,61 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
     this.layerController.moveLayer(handle, requireFinite(index, 'index'));
     return this;
   }
-  /** Show or hide a coat without removing it. */
+  /**
+   * Show or hide a layer without removing it: a coat (the active drape or
+   * an analysis layer) or an overlay. For a base layer, `true` makes it the
+   * active one.
+   */
   setLayerVisible(handle: LayerHandle | string, visible: boolean): this {
+    const overlay = this.layerRegistry.getOverlayLayer(handle);
+    if (overlay) {
+      if (overlay.visible === visible) return this;
+      overlay.visible = visible;
+      (overlay.display as { visible: boolean }).visible = visible;
+      this.overlays.setVisible(overlay.id, visible);
+      this.emit('layerchange', {});
+      return this;
+    }
+    if (this.layerRegistry.getBaseLayer(handle)) {
+      if (visible) this.setActiveBaseLayer(handle);
+      else console.warn('treelet: a base layer is hidden by activating another one');
+      return this;
+    }
     if (this.displayController.setLayerVisible(handle, visible)) this.emit('layerchange', {});
     return this;
   }
+  /** Opacity 0–1 of a coat or an overlay (lines, points, labels and its fill). */
   setLayerOpacity(handle: LayerHandle | string, opacity: number): this {
+    const overlay = this.layerRegistry.getOverlayLayer(handle);
+    if (overlay) {
+      if (!Number.isFinite(opacity)) return this;
+      (overlay.display as { opacity: number }).opacity = Math.max(0, Math.min(1, opacity));
+      this.overlays.setOpacity(overlay.id, overlay.display.opacity);
+      this.emit('layerchange', {});
+      return this;
+    }
     if (this.displayController.setLayerOpacity(handle, opacity)) this.emit('layerchange', {});
     return this;
   }
-  getLayerOpacity(handle: LayerHandle | string): number { return this.displayController.getLayerOpacity(handle); }
+  getLayerOpacity(handle: LayerHandle | string): number {
+    return this.layerRegistry.getOverlayLayer(handle)?.display.opacity ?? this.displayController.getLayerOpacity(handle);
+  }
+
+  /** Remove a layer of any kind: base, drape, analysis, raster or overlay. */
+  removeLayer(handle: LayerHandle | string): this {
+    const r = this.layerRegistry;
+    if (r.getOverlayLayer(handle)) return this.removeOverlayLayer(handle);
+    if (r.getAnalysisLayer(handle)) return this.removeAnalysisLayer(handle);
+    if (r.getDrapeLayer(handle)) return this.removeDrapeLayer(handle);
+    if (r.getBaseLayer(handle)) return this.removeBaseLayer(handle);
+    console.warn(`treelet: layer "${typeof handle === 'string' ? handle : handle.id}" not found`);
+    return this;
+  }
   setLayerBlendMode(handle: LayerHandle | string, mode: BlendMode): this {
     if (this.displayController.setLayerBlendMode(handle, mode)) this.emit('layerchange', {});
     return this;
   }
   getLayerBlendMode(handle: LayerHandle | string): BlendMode { return this.displayController.getLayerBlendMode(handle); }
-  /** Alias of setLayerOpacity for drape layers. */
-  setDrapeOpacity(handle: LayerHandle | string, opacity: number): this { return this.setLayerOpacity(handle, opacity); }
-  getDrapeOpacity(handle: LayerHandle | string): number { return this.getLayerOpacity(handle); }
 
   // =========================================================================
   // Overlay Layer API (→ LayerController)
@@ -1331,23 +1367,6 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
     if (!layer) return this;
     layer.style = style;
     this.overlays.setStyle(layer.id, style);
-    this.emit('layerchange', {});
-    return this;
-  }
-  setOverlayVisible(handle: LayerHandle | string, visible: boolean): this {
-    const layer = this.overlayLayer(handle);
-    if (!layer || layer.visible === visible) return this;
-    layer.visible = visible;
-    (layer.display as { visible: boolean }).visible = visible;
-    this.overlays.setVisible(layer.id, visible);
-    this.emit('layerchange', {});
-    return this;
-  }
-  setOverlayOpacity(handle: LayerHandle | string, opacity: number): this {
-    const layer = this.overlayLayer(handle);
-    if (!layer || !Number.isFinite(opacity)) return this;
-    (layer.display as { opacity: number }).opacity = Math.max(0, Math.min(1, opacity));
-    this.overlays.setOpacity(layer.id, layer.display.opacity);
     this.emit('layerchange', {});
     return this;
   }

@@ -7,7 +7,7 @@
 
 #### A GPU-driven, lightweight 3D elevation & overlay mapping engine for web-based terrain exploration and beautiful landscapes - inspired by the simplicity of [Leaflet.js](https://leafletjs.com/) and powered by [Three.js](https://threejs.org/).
 
-Treelet provides a slim, high-level API for rendering elevation data as a continuous 3D surface, superimposed with data-driven, hypsometric modes (_topography, slope, aspect, isopleths_) or common drape imagery overlays (e.g. satellite imagery, topology maps).
+Treelet provides a slim, high-level API for rendering elevation data as a continuous 3D surface, colored by a stack of *coats*: drape imagery (satellite, topographic maps) and terrain analyses (elevation, slope, aspect, contours, hillshade, shadows, viewsheds, sun hours…) blended over each other, with GeoJSON overlays and measuring tools on top.
 
 Treelet aims to allow fast, web-based DEM exploration and visualization of self-hosted data-sets - easily integrated and enriched with available global-coverage data sources.
 
@@ -24,10 +24,12 @@ The library is designed to be easily extendable - via registry or plugin package
 - **Render on demand** - No GPU work while the view and data are idle
 
 ##
+
+##
 ### [Live Demo](https://geozelot.github.io/Treelet/)
 
 ##
-### Current Features (v0.3.0):
+### Features
 
 - #### **Data Sources:**
   - **XYZ** - _Slippy map_ | TMS
@@ -71,9 +73,9 @@ The library is designed to be easily extendable - via registry or plugin package
 
 ###
 ###
-###
 
 ## Quick Start
+
 
 ### Installation
 
@@ -135,13 +137,15 @@ map.addAnalysisLayer({ analysis: 'contours', params: { interval: 50 } });
 map.start();
 ```
 
----
+## Guide
 
-## API Reference
+A map draws one **base layer** as terrain (elevation tiles decoded into a 3D surface) and colors it with a **coat stack**: the active drape (imagery) and any number of analysis layers, each with an opacity and a blend mode. Region analyses compute grids in a worker and add them as coats; **overlays** draw GeoJSON on the terrain; **tools** measure on it. Every layer is added with an `add…Layer` method that returns a `LayerHandle`, and changed or removed through that handle (`setLayerVisible`, `setLayerOpacity`, `removeLayer`, …). The sections below follow that order; the [API reference](https://geozelot.github.io/Treelet/api/) lists every class, method and type.
 
-### Factory
+### The map
 
-#### `Treelet.map(container, options)`
+A `Treelet` is the map: it owns the canvas, the camera and the layers, and emits events (it extends `EventEmitter`).
+
+#### Creating a map
 
 Create a new Treelet map instance (static factory).
 
@@ -152,13 +156,9 @@ Create a new Treelet map instance (static factory).
 
 Returns `Treelet`. Equivalent to `new Treelet(container, options)`.
 
-#### `Treelet.version`
+`Treelet.version` is the library version.
 
-Library version string (static).
-
----
-
-### TreeletOptions
+#### Options
 
 | Option | Type | Default | Description |
 |---|---|---|---|
@@ -183,7 +183,6 @@ Zoom follows the standard web-map scale: at zoom `z` the world spans `256 · 2^z
 | `minPitch` | `number` | `25` | Minimum pitch (most tilted) in degrees |
 | `maxPitch` | `number` | `90` | Maximum pitch (top-down) in degrees |
 | `tileCacheSize` | `number` | `256` | Tiles kept in GPU memory (64–2048); up to 60% of them can be on screen. ~0.5 MB per tile, plus ~0.35 MB with a drape active (~1.4 MB with `drapeSlotSize: 512`) |
-| `atlasSize` | `number` | — | *Deprecated*: use `tileCacheSize`. Holds `(atlasSize / slotSize)²` tiles; the former default `4096` equals `tileCacheSize: 256` |
 | `slotSize` | `number` | `256` | Elevation texels per tile edge |
 | `drapeSlotSize` | `number` | `slotSize` | Drape pixels per tile edge. Each tile fetches imagery as fine as this holds: with 256-px source tiles, `512` loads one zoom finer (4 source tiles per terrain tile), sharp on high-DPI screens at ~4× the drape memory and requests |
 | `maxInstances` | `number` | `512` | Tile budget per frame (capped at 60% of `tileCacheSize`) |
@@ -211,12 +210,6 @@ The defaults fit a typical view in well under the tile budget at any screen size
 
 The controls open on mouse hover, on a tap (touch screens; a tap elsewhere closes them) and with the keyboard (Tab to a control, Escape to close). On a touch screen the first tap on the compass opens its panel and the next one resets the orientation. On narrow maps the compass panel drops its Map and Viewport sections and the layer panel shrinks to fit.
 
----
-
-### Treelet
-
-The main map class. Extends `EventEmitter`.
-
 #### View
 
 | Method | Returns | Description |
@@ -226,105 +219,77 @@ The main map class. Extends `EventEmitter`.
 | `getZoom()` | `number` | Get current (fractional) zoom |
 | `getBounds()` | `{ sw, ne } \| null` | Get visible bounding box |
 | `getTileCount()` | `number` | Number of terrain tiles drawn in the last frame |
-| `getStats()` | `TreeletStats` | Tiles, atlas use, pending and failed requests |
+| `getStats()` | `TreeletStats` | Tiles, atlas use, pending and failed requests, coats, rasters, overlays, shadows, frame time |
 | `setLodQuality(q)` | `this` | Change the LOD multiplier at runtime |
 | `setHorizonDistance(factor)` | `this` | Visible range as a multiple of the camera's height (4–64) |
 | `getHorizonDistance()` | `number` | Get the visible range factor |
 | `setFog(enabled)` | `this` | Toggle atmospheric haze over distant terrain |
 | `requestRender()` | `this` | Force a redraw (with `renderOnDemand`) |
 
-#### Inspection
+#### Camera
+
+The camera keeps its height while you pan or zoom. The orbit target is the terrain at the screen center, so the zoom follows the distance to it: panning onto a mountain zooms in. The camera only rises where it would otherwise touch the terrain (at once, so the terrain never cuts into the view), or, smoothly and keeping its pitch, where moving brings the terrain at the screen center closer than half the zoom's distance. Rotating into a mountain lifts the camera over it, still looking at the same point. Once past the obstacle, the camera glides back down until it shows your zoom again, but never below the height you were at, so it doesn't dive into valleys.
 
 | Method | Returns | Description |
 |---|---|---|
-| `getElevation(lngLat)` | `number \| null` | Elevation in meters from the finest loaded tile |
-| `sampleTerrain(lngLat)` | `TerrainSample \| null` | `{ elevation, slope, aspect, curvature, normal }` at a position (true scale; aspect is `null` on flat ground) |
-| `pick(x, y)` | `TerrainPick \| null` | The same plus `lngLat` for the terrain under container-relative pixel `(x, y)` |
-| `getElevationProfile(from, to, samples?)` | `ProfileSample[]` | `{ lngLat, distance, elevation }` samples along a line (distance in meters) |
-| `getVisibleElevationRange()` | `[number, number]` | Min and max elevation of the tiles on screen |
-| `getElevationGrid(options?)` | `Promise<ElevationGrid>` | Elevations of a region as one grid (see [Region analyses](#region-analyses)) |
-| `pickLocation(options?)` | `Promise<TerrainPick \| null>` | Wait for a click on the terrain (crosshair cursor; `prompt` shown in the legend); `null` after Escape or `cancelPick()` |
-| `project(lngLat)` | `{ x, y } \| null` | Screen position (container pixels) of the terrain at a position |
-| `measureDistance(points)` | `PathMeasure` | `{ distance, surfaceDistance, gain, loss, minElevation, maxElevation, profile }` of a path |
-| `measureArea(ring)` | `AreaMeasure` | `{ area, surfaceArea, perimeter, minElevation, maxElevation }` of a polygon |
-| `lineOfSight(from, to, options?)` | `LineOfSightResult \| null` | `{ visible, obstruction, clearance, distance, profile }`; options `fromHeight` (1.7 m), `toHeight` (0), `curvature`, `refraction` |
-| `showProfile(path \| lineOfSight, options?)` | `this` | Open the profile panel for a path or a line-of-sight result |
-| `hideProfile()` | `this` | Close it |
+| `setMinPitch(degrees)` | `this` | Set minimum pitch (most tilted), 0–90 |
+| `getMinPitch()` | `number` | Get minimum pitch |
+| `setMaxPitch(degrees)` | `this` | Set maximum pitch (top-down), 0–90 |
+| `getMaxPitch()` | `number` | Get maximum pitch |
+| `getCameraController()` | `CameraController` | Direct camera access |
 
-Slope, aspect and curvature come from the same 12-texel surface the shader shades, at the finest loaded tile's resolution.
+#### Input
 
-```ts
-map.on('moveend', () => {
-  const pick = map.pick(200, 150);
-  if (pick) console.log(`${pick.elevation.toFixed(1)} m, ${pick.slope.toFixed(1)}°`, pick.lngLat);
-});
-```
+| Input | Action |
+|---|---|
+| Left-click drag / one-finger drag | Pan |
+| Scroll wheel / pinch | Zoom (towards the cursor) |
+| Right-click drag / two-finger rotate | Orbit (rotate + tilt) |
+| Arrow keys (canvas focused) | Pan |
+| Compass click | Reset orientation |
 
-Distances are geodesic (WGS84 ellipsoid); `surfaceDistance` follows the terrain, sampled at the loaded tiles' resolution. Areas are computed on the authalic sphere (within about 0.5 % of the ellipsoid for regional polygons); `surfaceArea` adds the slopes. A line of sight drops distant terrain by the Earth's curvature less refraction, like the viewshed.
-
-#### Tools
-
-`startTool(mode)` starts a measuring tool on the map: `'distance'`, `'area'`, `'profile'` (a path whose profile opens when finished) or `'sight'` (observer, then target). Click (tap) to add points, drag a point to move it, double-click, Enter or a long press to finish, Backspace to remove the last point, Escape to stop. The geometry stays until `clearTool()` or the next tool.
+#### Lifecycle
 
 | Method | Returns | Description |
 |---|---|---|
-| `startTool(mode)` | `this` | Start a tool |
-| `finishTool()` | `this` | Finish drawing |
-| `clearTool()` | `this` | Stop and remove its geometry |
-| `getTool()` | `{ mode, drawing, points, result }` | The tool's state |
+| `start()` | `this` | Begin rendering and tile loading |
+| `stop()` | `this` | Pause rendering |
+| `destroy()` | `void` | Release all resources, including the WebGL context (idempotent) |
+
+#### Events
 
 ```ts
-map.on('measure', ({ mode, final, result }) => {
-  if (final && result?.mode === 'distance') console.log(formatDistance(result.path.surfaceDistance));
-});
-map.startTool('distance');
+map.on('ready', () => { /* map started */ });
+map.on('move', ({ center }) => { /* every frame the camera moves */ });
+map.on('tileerror', ({ coord, layer, error }) => { /* request failed; retried with backoff */ });
 ```
 
-With `guiDisplay.tools` the toolbar offers the tools, plus the viewshed from a clicked point, and shows the live result with *Profile*, *Finish* and *Clear*.
-
-#### Overlay Layers
-
-GeoJSON features drawn on the terrain: lines draped along it (densified to the loaded terrain and draped again as finer tiles load), points as round markers, polygon fills rasterized into a coat (so they lie exactly on the ground; they take one of the 4 raster slots), labels from a property. Terrain in front hides them.
-
-| Method | Returns | Description |
+| Event | Data | Description |
 |---|---|---|
-| `addOverlayLayer(options)` | `LayerHandle` | Add an overlay |
-| `setOverlayData(handle, data)` | `this` | Replace its features |
-| `setOverlayStyle(handle, style)` | `this` | Replace its style |
-| `setOverlayVisible(handle, visible)` | `this` | |
-| `setOverlayOpacity(handle, opacity)` | `this` | Lines, points, labels and the fill coat |
-| `removeOverlayLayer(handle)` | `this` | |
-| `getOverlayLayers()` | `OverlayLayer[]` | |
+| `'ready'` | `{}` | Map started |
+| `'zoom'` | `{ zoom }` | Zoom changed |
+| `'move'` | `{ center: LngLat }` | Camera moved (once per frame) |
+| `'moveend'` | `{ center, zoom }` | Camera movement settled (debounced) |
+| `'tileload'` | `{ coord: TileCoord }` | Elevation tile loaded |
+| `'tileunload'` | `{ coord: TileCoord }` | Elevation tile evicted |
+| `'tileerror'` | `{ coord, layer, error }` | Tile request failed (`layer`: `'elevation' \| 'drape'`) |
+| `'layeradd'` | `{ id }` | Layer added |
+| `'layerremove'` | `{ id }` | Layer removed |
+| `'layerchange'` | `{}` | Layer configuration changed |
+| `'rangechange'` | `{ min, max }` | Visible elevation range changed (`'auto'` ramps) |
+| `'analysisstart'` | `{ id, kind, label }` | A region analysis started |
+| `'analysisprogress'` | `{ id, kind, label, stage, progress }` | `stage`: `'loading'` (tiles) or `'computing'`; `progress` 0–1 of the stage |
+| `'analysisend'` | `{ id, kind, label, status, error? }` | `status`: `'done' \| 'cancelled' \| 'error'` |
+| `'sunchange'` | `{ azimuth, altitude, time }` | The sun moved |
+| `'pickstart'` / `'pickend'` | `{ prompt }` / `{}` | `pickLocation()` waits for a click / stopped waiting |
+| `'toolchange'` | `{ mode, drawing }` | A tool started, finished drawing or stopped |
+| `'measure'` | `{ mode, final, result }` | A tool's result changed (`final` when drawing ended; `result` null when cleared) |
 
-| Option | Type | Default | Description |
-|---|---|---|---|
-| `layerName` | `string` | *required* | Display name (also of the fill coat) |
-| `data` | `GeoJSON` | — | FeatureCollection, Feature or Geometry in lng/lat; z values are ignored |
-| `style` | `OverlayStyle \| (feature) => OverlayStyle` | — | One style, or one per feature |
-| `fills` | `boolean` | `true` | Draw polygon fills as a coat |
-| `minZoom`, `maxZoom` | `number` | `0`, `20` | Zoom range the overlay shows in |
-| `layerDisplay` | `{ visible?, opacity? }` | | |
+### Terrain
 
-| Style | Default | Description |
-|---|---|---|
-| `color` | `'#ff6a00'` | Default for lines, points and fills (CSS color or `[r, g, b]`) |
-| `opacity` | `1` | Lines and points |
-| `lineWidth`, `lineColor` | `2.5`, `color` | Width in CSS pixels |
-| `fillColor`, `fillOpacity` | `color`, `0.3` | `fillColor: null` for no fill |
-| `pointRadius`, `pointColor` | `5`, `color` | Radius in CSS pixels |
-| `pointStroke`, `pointStrokeWidth` | white, `1.5` | Marker outline |
-| `label` | — | A property name, or `(properties) => text` |
-| `labelColor`, `labelHalo`, `labelSize` | dark, white, `12` | |
+The active base layer is the terrain: elevation tiles from a tile source, decoded into meters.
 
-```ts
-map.addOverlayLayer({
-  layerName: 'Huts',
-  data: huts, // a GeoJSON FeatureCollection of points
-  style: (f) => ({ color: f.properties?.open ? '#2f9e44' : '#868e96', label: 'name' }),
-});
-```
-
-#### Base Layers
+#### Base layers
 
 Only one base layer is active at a time. The active base layer provides elevation data for the terrain mesh. The first layer added becomes active; later ones only become active with `setActiveBaseLayer()` or `layerDisplay: { visible: true }`.
 
@@ -347,7 +312,163 @@ Only one base layer is active at a time. The active base layer provides elevatio
 | `minZoom` | `number` | `0` | Minimum zoom level |
 | `maxZoom` | `number` | `22` | Maximum zoom level (≤ 22) |
 
-#### Drape Layers
+#### Tile sources
+
+Layers accept `TileSource` instances via the `layerSource` option. Construct sources directly using `XYZSource` or `WMTSSource`.
+
+##### Shared options (TileSourceOptions)
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `url` | `string` | *required* | Endpoint URL or template |
+| `tileSize` | `number` | `256` | Pixel size of the source's tiles (with `retina`, of the 1× tiles). Drapes use it to decide how many source tiles fill a slot until the first tile shows the real size; a mismatch is logged |
+| `minZoom` | `number` | `0` | Minimum zoom level |
+| `maxZoom` | `number` | `22` | Maximum zoom level |
+| `attribution` | `string` | `''` | Attribution text (simple HTML links allowed; sanitized) |
+| `accessToken` | `string` | - | Substituted for `{accessToken}`, otherwise appended as `access_token=` |
+| `headers` | `Record<string, string>` | - | Extra request headers (e.g. `Authorization`) |
+| `credentials` | `RequestCredentials` | `'same-origin'` | Fetch credentials mode |
+| `referrerPolicy` | `ReferrerPolicy` | - | Fetch referrer policy |
+| `retina` | `boolean \| string` | `''` | Value for `{r}`: `true` → `'@2x'` on high-DPI screens |
+| `maxConcurrency` | `number` | `12` | Concurrent requests for this source |
+
+Tiles answering **404 / 410 / 204** (or an empty body) are treated as nonexistent: elevation renders at sea level and drapes fall back to coarser imagery. Other failures are retried with exponential backoff (1 s → 60 s), never in a loop.
+
+##### XYZ source
+
+Standard slippy-map tiles. Placeholders: `{z}`, `{x}`, `{y}`, `{-y}` (TMS row), `{s}` (subdomain), `{quadkey}` (Bing), `{r}` (retina suffix), `{accessToken}`.
+
+```ts
+import { XYZSource } from '@geozelot/treelet';
+
+const source = new XYZSource({
+  url: 'https://{s}.tile.example.com/{z}/{x}/{y}.png',
+  subdomains: ['a', 'b', 'c'],
+  tileSize: 256,
+  maxZoom: 19,
+});
+```
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `subdomains` | `string[]` | `[]` | Subdomain rotation via `{s}` |
+
+##### WMTS source
+
+OGC WMTS GetTile requests. Two modes, auto-detected:
+
+**RESTful** - URL contains `{z}` placeholder (treated like XYZ):
+
+```ts
+import { WMTSSource } from '@geozelot/treelet';
+
+const source = new WMTSSource({
+  url: 'https://example.com/wmts/rest/dem/default/EPSG3857/{z}/{y}/{x}.png',
+});
+```
+
+**KVP** - URL without placeholders (constructs `GetTile` query):
+
+```ts
+const source = new WMTSSource({
+  url: 'https://example.com/wmts',
+  layers: 'dem',
+  tilematrixSet: 'EPSG:3857',
+  style: 'default',
+  format: 'image/png',
+});
+```
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `layers` | `string` | `''` | WMTS layer name |
+| `style` | `string` | `'default'` | WMTS style |
+| `tilematrixSet` | `string` | `'EPSG:3857'` | WMTS TileMatrixSet |
+| `format` | `string` | `'image/png'` | Image format |
+| `subdomains` | `string[]` | `[]` | Subdomain rotation via `{s}` |
+
+##### WMS source (plugin)
+
+```ts
+// Source lives in the repository under plugins/source/wms (not part of the npm bundle)
+import { WMSSource } from './plugins/source/wms';
+
+const source = new WMSSource({
+  url: 'https://example.com/geoserver/wms',
+  layers: 'dem',
+  crs: 'EPSG:4326',
+  version: '1.3.0', // lat/lon axis order for EPSG:4326
+});
+```
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `layers` | `string` | *required* | WMS layer list |
+| `styles` | `string` | `''` | WMS styles |
+| `format` | `string` | `'image/png'` | Image format |
+| `crs` | `string` | `'EPSG:3857'` | `EPSG:3857`, `EPSG:900913`, `EPSG:4326` or `CRS:84` |
+| `version` | `'1.1.1' \| '1.3.0'` | `'1.1.1'` | WMS version |
+| `transparent` | `boolean` | `true` | Request transparent images |
+
+#### Elevation decoders
+
+Built-in decoders for common DEM tile formats:
+
+| Decoder | Formula | Precision |
+|---|---|---|
+| `'terrain-rgb'` | `-10000 + (R×65536 + G×256 + B) × 0.1` | 0.1 m |
+| `'mapbox'` | Alias for `terrain-rgb` | 0.1 m |
+| `'terrarium'` | `R×256 + G + B/256 - 32768` | ~0.004 m |
+
+Pixels with alpha 0 are treated as **nodata** for every decoder. Images are decoded with color management and premultiplication disabled, so encoded RGB values reach the decoder bit-exact.
+
+##### Custom decoder
+
+A decoder receives the tile's RGBA pixels and returns one elevation per pixel (meters, `NaN` for nodata). Decoders run inside the workers: they must be self-contained pure functions (they are serialized and compiled there, so the page's CSP must allow `unsafe-eval` for custom decoders).
+
+```ts
+import { registerDecoder, XYZSource } from '@geozelot/treelet';
+
+// Inline: pass a function directly as the decoder
+map.addBaseLayer({
+  layerName: 'Custom DEM',
+  layerSource: new XYZSource({ url: '...' }),
+  decoder: (pixels, width, height) => {
+    const out = new Float32Array(width * height);
+    for (let i = 0; i < out.length; i++) out[i] = pixels[i * 4] * 10 - 500;
+    return out;
+  },
+});
+
+// Or register globally by name for reuse
+registerDecoder('myformat', (pixels, width, height) => { /* ... */ return new Float32Array(width * height); });
+map.addBaseLayer({
+  layerName: 'Custom DEM',
+  layerSource: new XYZSource({ url: '...' }),
+  decoder: 'myformat' as any,
+});
+```
+
+### Coloring the ground
+
+The ground color is a stack of coats, bottom first: the active drape (imagery) and analysis layers. Each coat has an opacity and a blend mode; value analyses map their value through a color ramp and show a legend.
+
+#### The coat stack
+
+| Method | Returns | Description |
+|---|---|---|
+| `getLayerStack()` | `(DrapeLayer \| AnalysisLayer)[]` | The coats in drawing order, bottom first |
+| `moveLayer(handle, index)` | `this` | Move a coat (0 = bottom) |
+| `setLayerVisible(handle, visible)` | `this` | Show or hide a coat or an overlay (for a base layer, `true` activates it) |
+| `setLayerOpacity(handle, opacity)` | `this` | Opacity 0–1 of a coat or an overlay |
+| `getLayerOpacity(handle)` | `number` | |
+| `removeLayer(handle)` | `this` | Remove a layer of any kind (base, drape, analysis, raster, overlay) |
+| `setLayerBlendMode(handle, mode)` | `this` | `'normal' \| 'multiply' \| 'screen' \| 'softlight'` |
+| `getLayerBlendMode(handle)` | `BlendMode` | |
+
+At most 6 coats are drawn (the lowest visible ones). The layer panel's *Overlay* row opens the stack: visibility, order, removal and each coat's settings, rendered from its parameter schema.
+
+#### Drape layers
 
 Drape layers render raster imagery onto the terrain. One drape is active at a time: it forms the **imagery coat** at the bottom of the coat stack.
 
@@ -371,7 +492,7 @@ Drape layers render raster imagery onto the terrain. One drape is active at a ti
 | `minZoom` | `number` | `0` | Minimum zoom level |
 | `maxZoom` | `number` | `22` | Maximum zoom level |
 
-#### Analysis Layers
+#### Analysis layers
 
 An analysis layer is a coat computed from the terrain: elevation, slope, aspect, curvature, contours, water or hillshade (or a kind you register). Any number can be stacked over the imagery, each with opacity and a blend mode. Kinds that map a value (elevation, slope, aspect, curvature) use a color **ramp** and have a legend; contours, water and hillshade produce a color directly.
 
@@ -437,6 +558,49 @@ await map.animateAnalysisParams(water, { level: [lo, (lo + hi) / 2] }, 4000);
 
 `registerAnalysis(descriptor)` adds a kind. The descriptor's `glsl` defines `vec4 analysis_<id>(Surface s, vec4 p0, vec4 p1)`; `s.h` is the elevation in meters, `s.n` the true-scale unit normal (x east, y north, z up), `s.g` the gradient (dh/dx east, dh/dy north, m/m), `s.c` the second derivatives (hxx, hyy, hxy in 1/m), `s.fw` the screen-space derivative of `s.h`, and `uSunDirection` the sun. A value kind (with a `ramp`) returns the normalized value in `.x` and the alpha in `.w`; a color kind returns `rgb` and alpha. `params` is the schema the panel renders (`range`, `span`, `select`, `color`, `boolean`; a `span` may be `optional` and `wrap` for compass sectors, a `range` may take its slider `bounds` from the visible elevation), `pack(params, domain)` fills `p0`/`p1`, `domain(params, auto)` gives the ramp's value range, `initialParams(visible)` derives defaults from the visible elevation range, and `cpu(sample, params)` computes the same value for readouts. See `src/analysis/builtins/` for examples.
 
+#### Color ramps
+
+| Ramp | Description |
+|---|---|
+| `'hypsometric'` | Green, tan, brown, white (elevation default) |
+| `'viridis'` | Purple, teal, yellow (perceptually uniform) |
+| `'inferno'` | Black, purple, orange, white (high contrast) |
+| `'grayscale'` | Black to white |
+| `'cyclic'` | Hue wheel for circular data (aspect default) |
+| `'diverging'` | Blue, white, red (curvature default) |
+| `'avalanche'` | Slope classes: nothing below 30°, then 30–35° yellow, 35–40° orange, 40–45° red, ≥ 45° violet |
+| `'aspect8'` | Eight compass sectors (N, NE, … NW) |
+| `'visibility'` | Viewshed: hidden ground shaded, visible ground green |
+
+A ramp can also be given as data: `{ type: 'continuous', stops: [[t, [r, g, b]], …] }` with `t` in 0–1 over the value range, or `{ type: 'classes', breaks: [...], colors: [...], labels? }` with breaks in the analysis' units (one more color than breaks). Colors may be `[r, g, b, a]`; a class with alpha 0 draws nothing and is left out of the legend. Legends, the panel preview and the shader all read the same spec.
+
+### Light, shadow and exaggeration
+
+The sun lights the hillshade and casts the shadows coat; place it by hand or by date and time. Exaggeration stretches the relief (analyses stay true to scale).
+
+#### Visualization
+
+| Method | Returns | Description |
+|---|---|---|
+| `setExaggeration(value)` | `this` | Set vertical exaggeration on active base layer |
+| `setExaggeration(handle, value)` | `this` | Set exaggeration on a specific base layer |
+| `getExaggeration()` | `number` | Get exaggeration factor |
+| `setWireframe(enabled)` | `this` | Draw the mesh as a wireframe (colored by the coats) |
+| `getWireframe()` | `boolean` | |
+| `setWireframeWhite(white)` | `this` | Flat-white wireframe |
+| `getWireframeWhite()` | `boolean` | |
+| `setSunAzimuth(degrees)` | `this` | Sun azimuth for hillshade (default 315°, north-west) |
+| `getSunAzimuth()` | `number` | |
+| `setSunAltitude(degrees)` | `this` | Sun altitude for hillshade (default 45°) |
+| `getSunAltitude()` | `number` | |
+| `setSunTime(date \| null)` | `this` | Place the sun where it stands at `date` over the map center (it follows the map as it moves); `null` returns to the manual sun |
+| `getSunTime()` | `Date \| null` | |
+| `getSunPosition(date?, lngLat?)` | `SunPosition` | `{ azimuth, altitude, declination, equationOfTime }` (NOAA algorithm, refraction-corrected) |
+
+Setting the azimuth or altitude by hand clears the sun time. The layer panel's *Terrain* settings switch between a manual sun and a day and time.
+
+### Region analyses and rasters
+
 #### Region analyses
 
 Analyses that need more than one point of the surface run in a dedicated worker over a *region*: the elevation tiles covering a box, at the finest zoom that needs no more than `maxTiles` tiles (default 64, i.e. about 2048 × 2048 cells), assembled into one grid. The result is shown as a coat (a raster layer of the analysis' kind) and returned with its data. The worker keeps the last two regions, so several analyses of the same view load the tiles once.
@@ -483,7 +647,7 @@ const sun = await map.computeSunHours({ date: new Date(2026, 11, 21) });
 console.log(`${sun.daylight} h of daylight`);
 ```
 
-#### Raster Layers
+#### Raster layers
 
 Your own grids, drawn like any coat: single-band values (`Float32Array`, colored by a ramp, with a legend) or images (RGBA bytes). Rows run from north to south; `bounds` are the outer edges of the cells. At most 4 raster coats (including analysis results) are shown at once.
 
@@ -514,248 +678,104 @@ map.addRasterLayer({
 
 Value rasters are filtered bilinearly between cell centers in the shader (no-data cells are skipped), so they work on GPUs without float-texture filtering.
 
-#### Coat Stack
+### Overlays
+
+#### Overlay layers
+
+GeoJSON features drawn on the terrain: lines draped along it (densified to the loaded terrain and draped again as finer tiles load), points as round markers, polygon fills rasterized into a coat (so they lie exactly on the ground; they take one of the 4 raster slots), labels from a property. Terrain in front hides them.
 
 | Method | Returns | Description |
 |---|---|---|
-| `getLayerStack()` | `(DrapeLayer \| AnalysisLayer)[]` | The coats in drawing order, bottom first |
-| `moveLayer(handle, index)` | `this` | Move a coat (0 = bottom) |
-| `setLayerVisible(handle, visible)` | `this` | Show or hide a coat |
-| `setLayerOpacity(handle, opacity)` | `this` | Opacity 0–1 (`setDrapeOpacity` is an alias) |
-| `getLayerOpacity(handle)` | `number` | |
-| `setLayerBlendMode(handle, mode)` | `this` | `'normal' \| 'multiply' \| 'screen' \| 'softlight'` |
-| `getLayerBlendMode(handle)` | `BlendMode` | |
+| `addOverlayLayer(options)` | `LayerHandle` | Add an overlay |
+| `setOverlayData(handle, data)` | `this` | Replace its features |
+| `setOverlayStyle(handle, style)` | `this` | Replace its style |
+| `setLayerVisible(handle, visible)` | `this` | Show or hide it (with its fill coat) |
+| `setLayerOpacity(handle, opacity)` | `this` | Lines, points, labels and the fill coat |
+| `removeLayer(handle)` | `this` | Remove it (`removeOverlayLayer` does the same) |
+| `getOverlayLayers()` | `OverlayLayer[]` | |
 
-At most 6 coats are drawn (the lowest visible ones). The layer panel's *Overlay* row opens the stack: visibility, order, removal and each coat's settings, rendered from its parameter schema.
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `layerName` | `string` | *required* | Display name (also of the fill coat) |
+| `data` | `GeoJSON` | — | FeatureCollection, Feature or Geometry in lng/lat; z values are ignored |
+| `style` | `OverlayStyle \| (feature) => OverlayStyle` | — | One style, or one per feature |
+| `fills` | `boolean` | `true` | Draw polygon fills as a coat |
+| `minZoom`, `maxZoom` | `number` | `0`, `20` | Zoom range the overlay shows in |
+| `layerDisplay` | `{ visible?, opacity? }` | | |
 
-#### Visualization
+| Style | Default | Description |
+|---|---|---|
+| `color` | `'#ff6a00'` | Default for lines, points and fills (CSS color or `[r, g, b]`) |
+| `opacity` | `1` | Lines and points |
+| `lineWidth`, `lineColor` | `2.5`, `color` | Width in CSS pixels |
+| `fillColor`, `fillOpacity` | `color`, `0.3` | `fillColor: null` for no fill |
+| `pointRadius`, `pointColor` | `5`, `color` | Radius in CSS pixels |
+| `pointStroke`, `pointStrokeWidth` | white, `1.5` | Marker outline |
+| `label` | — | A property name, or `(properties) => text` |
+| `labelColor`, `labelHalo`, `labelSize` | dark, white, `12` | |
+
+```ts
+map.addOverlayLayer({
+  layerName: 'Huts',
+  data: huts, // a GeoJSON FeatureCollection of points
+  style: (f) => ({ color: f.properties?.open ? '#2f9e44' : '#868e96', label: 'name' }),
+});
+```
+
+### Inspection and tools
+
+#### Inspection
 
 | Method | Returns | Description |
 |---|---|---|
-| `setExaggeration(value)` | `this` | Set vertical exaggeration on active base layer |
-| `setExaggeration(handle, value)` | `this` | Set exaggeration on a specific base layer |
-| `getExaggeration()` | `number` | Get exaggeration factor |
-| `setWireframe(enabled)` | `this` | Draw the mesh as a wireframe (colored by the coats) |
-| `getWireframe()` | `boolean` | |
-| `setWireframeWhite(white)` | `this` | Flat-white wireframe |
-| `getWireframeWhite()` | `boolean` | |
-| `setSunAzimuth(degrees)` | `this` | Sun azimuth for hillshade (default 315°, north-west) |
-| `getSunAzimuth()` | `number` | |
-| `setSunAltitude(degrees)` | `this` | Sun altitude for hillshade (default 45°) |
-| `getSunAltitude()` | `number` | |
-| `setSunTime(date \| null)` | `this` | Place the sun where it stands at `date` over the map center (it follows the map as it moves); `null` returns to the manual sun |
-| `getSunTime()` | `Date \| null` | |
-| `getSunPosition(date?, lngLat?)` | `SunPosition` | `{ azimuth, altitude, declination, equationOfTime }` (NOAA algorithm, refraction-corrected) |
+| `getElevation(lngLat)` | `number \| null` | Elevation in meters from the finest loaded tile |
+| `sampleTerrain(lngLat)` | `TerrainSample \| null` | `{ elevation, slope, aspect, curvature, normal }` at a position (true scale; aspect is `null` on flat ground) |
+| `pick(x, y)` | `TerrainPick \| null` | The same plus `lngLat` for the terrain under container-relative pixel `(x, y)` |
+| `getElevationProfile(from, to, samples?)` | `ProfileSample[]` | `{ lngLat, distance, elevation }` samples along a line (distance in meters) |
+| `getVisibleElevationRange()` | `[number, number]` | Min and max elevation of the tiles on screen |
+| `getElevationGrid(options?)` | `Promise<ElevationGrid>` | Elevations of a region as one grid (see [Region analyses](#region-analyses)) |
+| `pickLocation(options?)` | `Promise<TerrainPick \| null>` | Wait for a click on the terrain (crosshair cursor; `prompt` shown in the legend); `null` after Escape or `cancelPick()` |
+| `project(lngLat)` | `{ x, y } \| null` | Screen position (container pixels) of the terrain at a position |
+| `measureDistance(points)` | `PathMeasure` | `{ distance, surfaceDistance, gain, loss, minElevation, maxElevation, profile }` of a path |
+| `measureArea(ring)` | `AreaMeasure` | `{ area, surfaceArea, perimeter, minElevation, maxElevation }` of a polygon |
+| `lineOfSight(from, to, options?)` | `LineOfSightResult \| null` | `{ visible, obstruction, clearance, distance, profile }`; options `fromHeight` (1.7 m), `toHeight` (0), `curvature`, `refraction` |
+| `showProfile(path \| lineOfSight, options?)` | `this` | Open the profile panel for a path or a line-of-sight result |
+| `hideProfile()` | `this` | Close it |
 
-Setting the azimuth or altitude by hand clears the sun time. The layer panel's *Terrain* settings switch between a manual sun and a day and time.
+Slope, aspect and curvature come from the same 12-texel surface the shader shades, at the finest loaded tile's resolution.
 
-##### ColorRamp
+```ts
+map.on('moveend', () => {
+  const pick = map.pick(200, 150);
+  if (pick) console.log(`${pick.elevation.toFixed(1)} m, ${pick.slope.toFixed(1)}°`, pick.lngLat);
+});
+```
 
-| Ramp | Description |
-|---|---|
-| `'hypsometric'` | Green, tan, brown, white (elevation default) |
-| `'viridis'` | Purple, teal, yellow (perceptually uniform) |
-| `'inferno'` | Black, purple, orange, white (high contrast) |
-| `'grayscale'` | Black to white |
-| `'cyclic'` | Hue wheel for circular data (aspect default) |
-| `'diverging'` | Blue, white, red (curvature default) |
-| `'avalanche'` | Slope classes: nothing below 30°, then 30–35° yellow, 35–40° orange, 40–45° red, ≥ 45° violet |
-| `'aspect8'` | Eight compass sectors (N, NE, … NW) |
-| `'visibility'` | Viewshed: hidden ground shaded, visible ground green |
+Distances are geodesic (WGS84 ellipsoid); `surfaceDistance` follows the terrain, sampled at the loaded tiles' resolution. Areas are computed on the authalic sphere (within about 0.5 % of the ellipsoid for regional polygons); `surfaceArea` adds the slopes. A line of sight drops distant terrain by the Earth's curvature less refraction, like the viewshed.
 
-A ramp can also be given as data: `{ type: 'continuous', stops: [[t, [r, g, b]], …] }` with `t` in 0–1 over the value range, or `{ type: 'classes', breaks: [...], colors: [...], labels? }` with breaks in the analysis' units (one more color than breaks). Colors may be `[r, g, b, a]`; a class with alpha 0 draws nothing and is left out of the legend. Legends, the panel preview and the shader all read the same spec.
+#### Tools
 
-#### Camera
-
-The camera keeps its height while you pan or zoom. The orbit target is the terrain at the screen center, so the zoom follows the distance to it: panning onto a mountain zooms in. The camera only rises where it would otherwise touch the terrain (at once, so the terrain never cuts into the view), or, smoothly and keeping its pitch, where moving brings the terrain at the screen center closer than half the zoom's distance. Rotating into a mountain lifts the camera over it, still looking at the same point. Once past the obstacle, the camera glides back down until it shows your zoom again, but never below the height you were at, so it doesn't dive into valleys.
+`startTool(mode)` starts a measuring tool on the map: `'distance'`, `'area'`, `'profile'` (a path whose profile opens when finished) or `'sight'` (observer, then target). Click (tap) to add points, drag a point to move it, double-click, Enter or a long press to finish, Backspace to remove the last point, Escape to stop. The geometry stays until `clearTool()` or the next tool.
 
 | Method | Returns | Description |
 |---|---|---|
-| `setMinPitch(degrees)` | `this` | Set minimum pitch (most tilted), 0–90 |
-| `getMinPitch()` | `number` | Get minimum pitch |
-| `setMaxPitch(degrees)` | `this` | Set maximum pitch (top-down), 0–90 |
-| `getMaxPitch()` | `number` | Get maximum pitch |
-| `getCameraController()` | `CameraController` | Direct camera access |
-
-#### Lifecycle
-
-| Method | Returns | Description |
-|---|---|---|
-| `start()` | `this` | Begin rendering and tile loading |
-| `stop()` | `this` | Pause rendering |
-| `destroy()` | `void` | Release all resources, including the WebGL context (idempotent) |
-
-#### Events
+| `startTool(mode)` | `this` | Start a tool |
+| `finishTool()` | `this` | Finish drawing |
+| `clearTool()` | `this` | Stop and remove its geometry |
+| `getTool()` | `{ mode, drawing, points, result }` | The tool's state |
 
 ```ts
-map.on('ready', () => { /* map started */ });
-map.on('move', ({ center }) => { /* every frame the camera moves */ });
-map.on('tileerror', ({ coord, layer, error }) => { /* request failed; retried with backoff */ });
+map.on('measure', ({ mode, final, result }) => {
+  if (final && result?.mode === 'distance') console.log(formatDistance(result.path.surfaceDistance));
+});
+map.startTool('distance');
 ```
 
-| Event | Data | Description |
-|---|---|---|
-| `'ready'` | `{}` | Map started |
-| `'zoom'` | `{ zoom }` | Zoom changed |
-| `'move'` | `{ center: LngLat }` | Camera moved (once per frame) |
-| `'moveend'` | `{ center, zoom }` | Camera movement settled (debounced) |
-| `'tileload'` | `{ coord: TileCoord }` | Elevation tile loaded |
-| `'tileunload'` | `{ coord: TileCoord }` | Elevation tile evicted |
-| `'tileerror'` | `{ coord, layer, error }` | Tile request failed (`layer`: `'elevation' \| 'drape'`) |
-| `'layeradd'` | `{ id }` | Layer added |
-| `'layerremove'` | `{ id }` | Layer removed |
-| `'layerchange'` | `{}` | Layer configuration changed |
-| `'rangechange'` | `{ min, max }` | Visible elevation range changed (`'auto'` ramps) |
-| `'analysisstart'` | `{ id, kind, label }` | A region analysis started |
-| `'analysisprogress'` | `{ id, kind, label, stage, progress }` | `stage`: `'loading'` (tiles) or `'computing'`; `progress` 0–1 of the stage |
-| `'analysisend'` | `{ id, kind, label, status, error? }` | `status`: `'done' \| 'cancelled' \| 'error'` |
-| `'sunchange'` | `{ azimuth, altitude, time }` | The sun moved |
-| `'pickstart'` / `'pickend'` | `{ prompt }` / `{}` | `pickLocation()` waits for a click / stopped waiting |
-| `'toolchange'` | `{ mode, drawing }` | A tool started, finished drawing or stopped |
-| `'measure'` | `{ mode, final, result }` | A tool's result changed (`final` when drawing ended; `result` null when cleared) |
+With `guiDisplay.tools` the toolbar offers the tools, plus the viewshed from a clicked point, and shows the live result with *Profile*, *Finish* and *Clear*.
 
----
+## API Reference
 
-### Tile Sources
-
-Layers accept `TileSource` instances via the `layerSource` option. Construct sources directly using `XYZSource` or `WMTSSource`.
-
-##### Shared options (TileSourceOptions)
-
-| Option | Type | Default | Description |
-|---|---|---|---|
-| `url` | `string` | *required* | Endpoint URL or template |
-| `tileSize` | `number` | `256` | Pixel size of the source's tiles (with `retina`, of the 1× tiles). Drapes use it to decide how many source tiles fill a slot until the first tile shows the real size; a mismatch is logged |
-| `minZoom` | `number` | `0` | Minimum zoom level |
-| `maxZoom` | `number` | `22` | Maximum zoom level |
-| `attribution` | `string` | `''` | Attribution text (simple HTML links allowed; sanitized) |
-| `accessToken` | `string` | - | Substituted for `{accessToken}`, otherwise appended as `access_token=` |
-| `headers` | `Record<string, string>` | - | Extra request headers (e.g. `Authorization`) |
-| `credentials` | `RequestCredentials` | `'same-origin'` | Fetch credentials mode |
-| `referrerPolicy` | `ReferrerPolicy` | - | Fetch referrer policy |
-| `retina` | `boolean \| string` | `''` | Value for `{r}`: `true` → `'@2x'` on high-DPI screens |
-| `maxConcurrency` | `number` | `12` | Concurrent requests for this source |
-
-Tiles answering **404 / 410 / 204** (or an empty body) are treated as nonexistent: elevation renders at sea level and drapes fall back to coarser imagery. Other failures are retried with exponential backoff (1 s → 60 s), never in a loop.
-
-#### XYZ Source
-
-Standard slippy-map tiles. Placeholders: `{z}`, `{x}`, `{y}`, `{-y}` (TMS row), `{s}` (subdomain), `{quadkey}` (Bing), `{r}` (retina suffix), `{accessToken}`.
-
-```ts
-import { XYZSource } from '@geozelot/treelet';
-
-const source = new XYZSource({
-  url: 'https://{s}.tile.example.com/{z}/{x}/{y}.png',
-  subdomains: ['a', 'b', 'c'],
-  tileSize: 256,
-  maxZoom: 19,
-});
-```
-
-| Option | Type | Default | Description |
-|---|---|---|---|
-| `subdomains` | `string[]` | `[]` | Subdomain rotation via `{s}` |
-
-#### WMTS Source
-
-OGC WMTS GetTile requests. Two modes, auto-detected:
-
-**RESTful** - URL contains `{z}` placeholder (treated like XYZ):
-
-```ts
-import { WMTSSource } from '@geozelot/treelet';
-
-const source = new WMTSSource({
-  url: 'https://example.com/wmts/rest/dem/default/EPSG3857/{z}/{y}/{x}.png',
-});
-```
-
-**KVP** - URL without placeholders (constructs `GetTile` query):
-
-```ts
-const source = new WMTSSource({
-  url: 'https://example.com/wmts',
-  layers: 'dem',
-  tilematrixSet: 'EPSG:3857',
-  style: 'default',
-  format: 'image/png',
-});
-```
-
-| Option | Type | Default | Description |
-|---|---|---|---|
-| `layers` | `string` | `''` | WMTS layer name |
-| `style` | `string` | `'default'` | WMTS style |
-| `tilematrixSet` | `string` | `'EPSG:3857'` | WMTS TileMatrixSet |
-| `format` | `string` | `'image/png'` | Image format |
-| `subdomains` | `string[]` | `[]` | Subdomain rotation via `{s}` |
-
-#### WMS Source (plugin)
-
-```ts
-// Source lives in the repository under plugins/source/wms (not part of the npm bundle)
-import { WMSSource } from './plugins/source/wms';
-
-const source = new WMSSource({
-  url: 'https://example.com/geoserver/wms',
-  layers: 'dem',
-  crs: 'EPSG:4326',
-  version: '1.3.0', // lat/lon axis order for EPSG:4326
-});
-```
-
-| Option | Type | Default | Description |
-|---|---|---|---|
-| `layers` | `string` | *required* | WMS layer list |
-| `styles` | `string` | `''` | WMS styles |
-| `format` | `string` | `'image/png'` | Image format |
-| `crs` | `string` | `'EPSG:3857'` | `EPSG:3857`, `EPSG:900913`, `EPSG:4326` or `CRS:84` |
-| `version` | `'1.1.1' \| '1.3.0'` | `'1.1.1'` | WMS version |
-| `transparent` | `boolean` | `true` | Request transparent images |
-
----
-
-### Elevation Decoders
-
-Built-in decoders for common DEM tile formats:
-
-| Decoder | Formula | Precision |
-|---|---|---|
-| `'terrain-rgb'` | `-10000 + (R×65536 + G×256 + B) × 0.1` | 0.1 m |
-| `'mapbox'` | Alias for `terrain-rgb` | 0.1 m |
-| `'terrarium'` | `R×256 + G + B/256 - 32768` | ~0.004 m |
-
-Pixels with alpha 0 are treated as **nodata** for every decoder. Images are decoded with color management and premultiplication disabled, so encoded RGB values reach the decoder bit-exact.
-
-#### Custom Decoder
-
-A decoder receives the tile's RGBA pixels and returns one elevation per pixel (meters, `NaN` for nodata). Decoders run inside the workers: they must be self-contained pure functions (they are serialized and compiled there, so the page's CSP must allow `unsafe-eval` for custom decoders).
-
-```ts
-import { registerDecoder, XYZSource } from '@geozelot/treelet';
-
-// Inline: pass a function directly as the decoder
-map.addBaseLayer({
-  layerName: 'Custom DEM',
-  layerSource: new XYZSource({ url: '...' }),
-  decoder: (pixels, width, height) => {
-    const out = new Float32Array(width * height);
-    for (let i = 0; i < out.length; i++) out[i] = pixels[i * 4] * 10 - 500;
-    return out;
-  },
-});
-
-// Or register globally by name for reuse
-registerDecoder('myformat', (pixels, width, height) => { /* ... */ return new Float32Array(width * height); });
-map.addBaseLayer({
-  layerName: 'Custom DEM',
-  layerSource: new XYZSource({ url: '...' }),
-  decoder: 'myformat' as any,
-});
-```
-
----
+The full reference, generated from the source with TypeDoc, is published with the demo: **[geozelot.github.io/Treelet/api](https://geozelot.github.io/Treelet/api/)** (`npm run docs:api` builds it into `docs/api/`).
 
 ### Types
 
@@ -786,14 +806,13 @@ interface LineOfSightResult { visible: boolean; distance: number; clearance: num
 type ToolMode = 'distance' | 'area' | 'profile' | 'sight';
 interface ProfileSample { lngLat: LngLat; distance: number; elevation: number | null }
 interface TreeletStats {
-  tiles: number; drawCalls: number; frameTime: number; atlasUsed: number; atlasCapacity: number;
+  tiles: number; drawCalls: number; coats: number; rasters: number; overlays: number; shadows: boolean;
+  frameTime: number; atlasUsed: number; atlasCapacity: number;
   drapeTiles: number; pendingElevation: number; pendingDrape: number; failedTiles: number;
 }
 ```
 
----
-
-### Low-Level API
+### Low-level API
 
 For advanced use, Treelet re-exports its internal building blocks:
 
@@ -802,7 +821,11 @@ For advanced use, Treelet re-exports its internal building blocks:
 | `Treelet` | Main class with static `Treelet.map()` factory |
 | `UrlTileSource` | Base tile source class |
 | `XYZSource`, `WMTSSource` | Concrete tile sources |
-| `BaseLayer`, `DrapeLayer`, `OverlayLayer` | Layer wrappers |
+| `BaseLayer`, `DrapeLayer`, `AnalysisLayer`, `OverlayLayer` | Layer classes (what `getLayerStack()`, `getBaseLayers()` … return) |
+| `registerAnalysis()`, `getAnalysis()`, `listAnalyses()`, `resolveParams()` | Analysis registry |
+| `BUILTIN_RAMPS`, `resolveRamp()`, `rampColorAt()`, `rampGradientCss()`, `legendFor()` | Ramps and legends |
+| `sunPosition()`, `sunPathOfDay()` | NOAA solar position |
+| `planRegion()` | The tiles a region analysis loads |
 | `LayerRegistry` | Layer management registry |
 | `CameraController` | Camera state + controls |
 | `WebMercator` | EPSG:3857 projection utilities |
@@ -811,20 +834,13 @@ For advanced use, Treelet re-exports its internal building blocks:
 | `RawRGBDecoder`, `MapboxDecoder`, `TerrariumDecoder` | Built-in decoder instances |
 | `registerDecoder()`, `resolveDecoder()` | Decoder registration and lookup |
 | `TreeletPanel`, `TreeletCompass`, `TreeletAttribution`, `TreeletLegend`, `TreeletReadout`, `TreeletToolbar`, `TreeletProfile`, `TreeletLabels` | UI components |
-| `geodesicDistance`, `polygonArea`, `lineOfSightProfile`, `formatDistance`, `formatArea` | Geodesy, line of sight and formatting helpers |
+| `geodesicDistance`, `pathLength`, `ringArea`, `polygonArea`, `lineOfSightProfile` | Geodesy and line of sight |
+| `formatDistance`, `formatArea`, `formatElevation` | Measurement formatting |
 | `defineTreeletElements()` | Register the UI custom elements (done automatically by `Treelet`) |
 
----
+## Migrating from 0.3
 
-## Controls
-
-| Input | Action |
-|---|---|
-| Left-click drag / one-finger drag | Pan |
-| Scroll wheel / pinch | Zoom (towards the cursor) |
-| Right-click drag / two-finger rotate | Orbit (rotate + tilt) |
-| Arrow keys (canvas focused) | Pan |
-| Compass click | Reset orientation |
+1.0 replaces the base-drape modes with the coat stack and removes deprecated options. The [changelog](CHANGELOG.md#migrating-from-03) maps every removed call to its replacement.
 
 ## Bundles
 
@@ -836,9 +852,9 @@ Treelet ships three minified files:
 | `treelet.cdn.standalone.js` | IIFE | Included | `<script>` tag, CDN, no dependencies |
 | `treelet.worker.js` | ESM worker | - | Optional: self-hosted worker for strict CSP (`workerUrl`) |
 
-**Slim** (`treelet.es.js`) - ~240 KB minified. Three.js is a peer dependency; install it alongside treelet via npm. Best for projects that already use Three.js or want control over the Three.js version.
+**Slim** (`treelet.es.js`) - ~460 KB minified (~130 KB gzipped). Three.js is a peer dependency; install it alongside treelet via npm. Best for projects that already use Three.js or want control over the Three.js version.
 
-**Standalone** (`treelet.cdn.standalone.js`) - ~665 KB minified. Bundles only the Three.js modules treelet actually uses (tree-shaken). Drop-in ready for CDN or direct `<script>` tag usage - zero external dependencies.
+**Standalone** (`treelet.cdn.standalone.js`) - ~850 KB minified (~230 KB gzipped). Bundles only the Three.js modules treelet actually uses (tree-shaken). Drop-in ready for CDN or direct `<script>` tag usage - zero external dependencies.
 
 Both bundles **inline the tile worker** and start it from a `blob:` URL, so nothing else needs to be served and they work from any CDN or bundler. If your Content-Security-Policy does not allow `worker-src blob:`, serve `dist/treelet.worker.js` from your own origin and pass its URL as `workerUrl`.
 
@@ -847,7 +863,6 @@ The package is side-effect free (`"sideEffects": false`) and safe to import duri
 ## Browser Support
 
 Modern browsers with **WebGL2**, module **Web Workers** and **OffscreenCanvas** (Chrome/Edge 80+, Firefox 105+, Safari 16.4+). Requires ES2022.
-
 
 ## License
 

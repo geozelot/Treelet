@@ -61,24 +61,6 @@ function isPowerOfTwo(n: number): boolean {
   return Number.isInteger(n) && n > 0 && (n & (n - 1)) === 0;
 }
 
-/**
- * Tile capacity of the deprecated `atlasSize` option: an atlasSize² texture
- * cut into slotSize² slots.
- */
-export function tilesForAtlasSize(atlasSize: number, slotSize: number): number {
-  const hint = `atlasSize is deprecated: set mapDisplay.tileCacheSize (number of tiles, default ${DEFAULT_TILE_CACHE_SIZE}) instead`;
-  if (!isPowerOfTwo(atlasSize) || atlasSize < slotSize) {
-    throw new Error(`treelet: atlasSize must be a power-of-two >= slotSize (${slotSize}), got ${atlasSize}. ${hint}`);
-  }
-  const tiles = (atlasSize / slotSize) ** 2;
-  if (tiles < MIN_TILE_CACHE_SIZE || tiles > MAX_TILE_CACHE_SIZE) {
-    throw new Error(
-      `treelet: atlasSize ${atlasSize} with slotSize ${slotSize} holds ${tiles} tiles; ` +
-      `${MIN_TILE_CACHE_SIZE}–${MAX_TILE_CACHE_SIZE} are supported. ${hint}`,
-    );
-  }
-  return tiles;
-}
 
 /**
  * Validate tile cache and geometry parameters.

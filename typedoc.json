@@ -1,0 +1,22 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "entryPoints": ["src/index.ts"],
+  "out": "docs/api",
+  "name": "treelet.js",
+  "readme": "none",
+  "tsconfig": "tsconfig.json",
+  "excludePrivate": true,
+  "excludeProtected": true,
+  "excludeInternal": true,
+  "excludeExternals": true,
+  "sort": ["kind", "instance-first", "source-order"],
+  "validation": {
+    "notExported": true,
+    "invalidLink": true,
+    "notDocumented": false
+  },
+  "navigationLinks": {
+    "Guide": "https://github.com/geozelot/treelet#readme",
+    "Demo": "https://geozelot.github.io/Treelet/"
+  }
+}

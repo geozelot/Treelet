@@ -4,7 +4,7 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import { resolveOptions } from '../../src/core/Treelet';
-import { validateTileConfig, tilesForAtlasSize } from '../../src/core/constants';
+import { validateTileConfig } from '../../src/core/constants';
 
 const base = { initCenter: { lng: 11.4, lat: 47.3 }, initZoom: 10 };
 
@@ -45,17 +45,15 @@ describe('resolveOptions', () => {
     expect(resolveOptions({ ...base, mapDisplay: { horizonDistance: 1000 } }).mapDisplay.horizonDistance).toBe(64);
   });
 
-  it('maps the deprecated atlasSize to a tile count, with a warning', () => {
+  it('ignores the removed atlasSize with a warning that points to tileCacheSize', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    expect(resolveOptions({ ...base, mapDisplay: { atlasSize: 8192 } }).mapDisplay.tileCacheSize).toBe(1024);
-    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/tileCacheSize/));
-    // An explicit tileCacheSize wins.
-    expect(resolveOptions({ ...base, mapDisplay: { atlasSize: 8192, tileCacheSize: 300 } }).mapDisplay.tileCacheSize).toBe(300);
+    const o = resolveOptions({ ...base, mapDisplay: { atlasSize: 8192 } as never });
+    expect(o.mapDisplay.tileCacheSize).toBe(256);
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/atlasSize was removed.*tileCacheSize/));
     warn.mockRestore();
   });
 
   it('explains too-small caches in terms of tiles', () => {
-    expect(() => resolveOptions({ ...base, mapDisplay: { atlasSize: 512 } })).toThrow(/holds 4 tiles.*tileCacheSize/);
     expect(() => resolveOptions({ ...base, mapDisplay: { tileCacheSize: 32 } })).toThrow(/tileCacheSize must be an integer in \[64, 2048\]/);
   });
 });
@@ -68,10 +66,5 @@ describe('validateTileConfig', () => {
     expect(() => validateTileConfig(256, 256, 512, 12, 63)).toThrow(/even/);
     expect(() => validateTileConfig(256, 256, 512, 0)).toThrow(/maxConcurrentFetches/);
     expect(() => validateTileConfig(256, 256, 512, 12, 64)).not.toThrow();
-  });
-
-  it('converts legacy atlas sizes', () => {
-    expect(tilesForAtlasSize(4096, 256)).toBe(256);
-    expect(() => tilesForAtlasSize(3000, 256)).toThrow(/power-of-two/);
   });
 });

@@ -40,6 +40,9 @@ jobs:
         env:
           BASE_PATH: ${{ steps.pages.outputs.base_path }}
 
+      - name: Build API reference
+        run: npm run docs:api -- --out dist-demo/api
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:

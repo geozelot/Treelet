@@ -1,6 +1,8 @@
 # Changelog
 
-## 1.0.0 (unreleased)
+## 1.0.0
+
+The API is frozen for 1.x: methods, options, events and types reachable from the package entry are public (see the [API reference](https://geozelot.github.io/Treelet/api/)); everything else may change in minor releases. Upgrading from 0.3? See [Migrating from 0.3](#migrating-from-03) below.
 
 ### Breaking changes
 
@@ -11,6 +13,8 @@
   - `DrapeLayerOptions.layerDisplay.blendMode: 'hillshade'` and `hillshadeStrength`, `setDrapeBlendMode`, `setHillshadeStrength` → a `'hillshade'` analysis coat (every new map has one; its opacity is the strength). Drape `blendMode` now takes the coat blend modes (default `'normal'`).
   - `getActiveDrapeId()` returns the drape id or `null` (never `'__base_drape__'`); `isBaseDrapeActive()`, `getBaseDrapeMode()`, `BASE_DRAPE_ID`, `BaseDrapeMode` and `ShaderMode` are removed.
   - The deprecated `DrapeLayerOptions.lodOffset` is removed.
+- The deprecated `mapDisplay.atlasSize` is removed (it is ignored with a warning); set `mapDisplay.tileCacheSize`, a tile count.
+- `setDrapeOpacity` / `getDrapeOpacity` are removed: `setLayerOpacity` / `getLayerOpacity` take any layer.
 - A new map starts with a hillshade coat over neutral gray instead of the elevation ramp; add `addAnalysisLayer({ analysis: 'elevation' })` for the 0.3 look.
 - The layer panel's *Overlay* row opens the stack (visibility, order, removal, per-coat settings rendered from each analysis' parameter schema); its dropdown adds analyses or swaps the imagery. Wireframe moved to the *Terrain* settings.
 
@@ -32,13 +36,68 @@
 - Sun position from a date: `setSunTime(date)` places the sun (NOAA solar position) over the map center and keeps it there as the map moves; `getSunPosition(date?, lngLat?)`. The *Terrain* settings switch between a manual sun and a day and time.
 - The layer panel's *Analysis* list runs the region analyses over the view (the viewshed asks for a click on the observer); a new run replaces the previous result. `pickLocation()` waits for a click on the terrain.
 - `'visibility'` ramp preset (hidden / visible) for viewsheds.
-- Overlay layers draw GeoJSON on the terrain (the 0.3 stub is now real): `addOverlayLayer({ layerName, data, style })` with lines draped along the terrain (densified to the loaded tiles, draped again as finer tiles load, wide lines in CSS pixels), round point markers, polygon fills rasterized into a coat, and labels from a property (hidden behind terrain and where they would overlap). Styles are objects or functions of each feature. `setOverlayData`, `setOverlayStyle`, `setOverlayVisible`, `setOverlayOpacity`.
+- Overlay layers draw GeoJSON on the terrain (the 0.3 stub is now real): `addOverlayLayer({ layerName, data, style })` with lines draped along the terrain (densified to the loaded tiles, draped again as finer tiles load, wide lines in CSS pixels), round point markers, polygon fills rasterized into a coat, and labels from a property (hidden behind terrain and where they would overlap). Styles are objects or functions of each feature. `setOverlayData`, `setOverlayStyle`; visibility and opacity through `setLayerVisible` / `setLayerOpacity`.
 - Measuring: `measureDistance(points)` (geodesic length on WGS84, length along the terrain, ascent, descent, lowest and highest point, profile), `measureArea(ring)` (geodesic and surface area, perimeter), `lineOfSight(from, to)` (curvature and refraction, first obstruction, sight line), `project(lngLat)`.
 - Tools on the map: `startTool('distance' | 'area' | 'profile' | 'sight')` with click / drag / double-click / Enter / Backspace / Escape and long press on touch; `'measure'` and `'toolchange'` events; `finishTool`, `clearTool`, `getTool`.
 - Profile panel (`<treelet-profile>`, `showProfile(path | lineOfSight)`): SVG chart, hover marks the point on the terrain, statistics, CSV and PNG export.
 - Toolbar (`<treelet-toolbar>`, `guiDisplay.tools`, off by default): distance, area, profile, line of sight and viewshed, with the live result and Profile / Finish / Clear.
 - Hillshade `mode: 'multi'`: four lights around the sun azimuth weighted by aspect (multidirectional oblique weighting).
 - `'shadows'` analysis: terrain-cast shadows from a 2048² shadow map of the terrain seen from the sun (same vertex program as the terrain, so morphing and exaggeration match), fitted around the visible terrain, snapped to texels, 3 × 3 filtered, faded at its edge, redrawn only when the sun, the view or the terrain changes. Combined with `setSunTime`, shows the shadows of a given moment.
+- One way to handle any layer: `removeLayer(handle)` removes a base, drape, analysis, raster or overlay layer; `setLayerVisible` / `setLayerOpacity` also take overlays (and `setLayerVisible(base, true)` activates a base layer).
+- `getStats()` reports `coats`, `rasters`, `overlays` and `shadows` as well.
+- API reference generated with TypeDoc (`npm run docs:api`), published with the demo; CI checks that every type the public API references is exported and that the library's GLSL parses (with undeclared names as errors).
+
+### Migrating from 0.3
+
+Most 0.3 code needs a few renames. The ground used to show one *mode* of a virtual "base drape" (or a drape blended with hillshade); in 1.0 it shows a stack of coats, so modes become analysis layers you add, combine and remove.
+
+```ts
+// 0.3
+map.setBaseDrapeMode('slope');
+map.setSlopeRange(0, 50);
+map.setColorRamp('inferno');
+
+// 1.0
+const slope = map.addAnalysisLayer({ analysis: 'slope', params: { range: [0, 50] }, ramp: 'inferno' });
+```
+
+```ts
+// 0.3: contours over the elevation ramp
+map.setBaseDrapeMode('contours');
+map.setIsolineInterval(50);
+
+// 1.0: two coats, the lines above the colors
+map.addAnalysisLayer({ analysis: 'elevation' });
+map.addAnalysisLayer({ analysis: 'contours', params: { interval: 50 } });
+```
+
+```ts
+// 0.3: imagery with hillshade
+const ortho = map.addDrapeLayer({ layerName: 'Ortho', layerSource, layerDisplay: { blendMode: 'hillshade', hillshadeStrength: 0.6 } });
+map.activateDrapeLayer(ortho);
+
+// 1.0: every map starts with a hillshade coat (multiply, opacity 0.6) above the imagery
+const ortho = map.addDrapeLayer({ layerName: 'Ortho', layerSource });
+map.activateDrapeLayer(ortho);
+map.setLayerOpacity(map.getAnalysisLayers().find((l) => l.descriptor.id === 'hillshade')!, 0.6);
+```
+
+| 0.3 | 1.0 |
+|---|---|
+| `setBaseDrapeMode(mode)`, `activateBaseDrape()` | `addAnalysisLayer({ analysis: mode })` (`'wireframe'` is `setWireframe(true)`) |
+| `getBaseDrapeMode()`, `isBaseDrapeActive()` | `getLayerStack()`, `getAnalysisLayers()` |
+| `setColorRamp(ramp)` | `setAnalysisRamp(handle, ramp)` on the coat |
+| `setElevationRange(min, max)`, `setSlopeRange(min, max)` | `setAnalysisParams(handle, { range: [min, max] })` |
+| `setIsolineInterval / Thickness / Color` | `setAnalysisParams(handle, { interval / thickness / color })` |
+| `BaseLayerOptions.terrainDisplay` | the analysis layers' `params` |
+| `DrapeLayerOptions.layerDisplay.blendMode: 'hillshade'`, `hillshadeStrength`, `setDrapeBlendMode`, `setHillshadeStrength` | the `'hillshade'` coat (its opacity is the strength); drapes blend with `'normal' \| 'multiply' \| 'screen' \| 'softlight'` |
+| `getActiveDrapeId() === '__base_drape__'`, `BASE_DRAPE_ID` | `getActiveDrapeId() === null` |
+| `setDrapeOpacity`, `getDrapeOpacity` | `setLayerOpacity`, `getLayerOpacity` |
+| `mapDisplay.atlasSize` | `mapDisplay.tileCacheSize` (tiles; the old default 4096 = 256 tiles) |
+| `DrapeLayerOptions.lodOffset` | `mapDisplay.drapeSlotSize` |
+| `BaseDrapeMode`, `ShaderMode` types | `ColorRamp`, `Ramp`, analysis kinds as strings |
+
+A new map shows shaded relief over neutral gray; add `addAnalysisLayer({ analysis: 'elevation' })` for the 0.3 default look.
 
 ## 0.3.0
 

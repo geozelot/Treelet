@@ -144,6 +144,7 @@ export class DrapeLayer implements Layer {
    * z/x/y: one tile (or a crop of a coarser one past the source's maxZoom),
    * or a grid of finer tiles. `z` is the zoom of the result (the tile's own
    * zoom for crops); null when the source can't cover the tile.
+   * @internal
    */
   drapeParts(z: number, x: number, y: number, slotSize: number): { z: number; parts: DrapePart[] } | null {
     const ez = this.sourceZoomFor(z, slotSize);

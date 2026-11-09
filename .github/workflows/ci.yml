@@ -23,8 +23,11 @@ jobs:
       - name: Type-check
         run: npm run typecheck
 
-      - name: Test
+      - name: Test (includes the GLSL check)
         run: npm test -- --run
+
+      - name: API reference (every public type exported and linked)
+        run: npm run docs:api -- --emit none --treatWarningsAsErrors
 
       - name: Build
         run: npm run build

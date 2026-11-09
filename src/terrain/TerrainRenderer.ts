@@ -1168,6 +1168,10 @@ export class TerrainRenderer {
     return {
       tiles: this.geometry.instanceCount,
       drawCalls: this.geometry.instanceCount > 0 ? 1 : 0,
+      coats: this.coatStack.packed.length,
+      rasters: this.rasters.size,
+      overlays: 0,
+      shadows: this.shadowsEnabled,
       frameTime: 0,
       atlasUsed: this.atlas.size,
       atlasCapacity: this.atlas.capacity,

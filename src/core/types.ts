@@ -91,11 +91,6 @@ export interface MapDisplayOptions {
    * of GPU memory while a drape layer is active. Default 256.
    */
   tileCacheSize?: number;
-  /**
-   * @deprecated Use `tileCacheSize`. Holds `(atlasSize / slotSize)²` tiles,
-   * so the former default 4096 equals `tileCacheSize: 256`.
-   */
-  atlasSize?: number;
   /** Elevation tile slot resolution in pixels (power-of-two). Default 256. */
   slotSize?: number;
   /**
@@ -140,7 +135,7 @@ export interface ResolvedTreeletOptions {
   minZoom: number;
   maxZoom: number;
   guiDisplay: Required<GuiDisplayOptions>;
-  mapDisplay: Required<Omit<MapDisplayOptions, 'atlasSize'>>;
+  mapDisplay: Required<MapDisplayOptions>;
   workerCount: number;
   workerUrl: string | URL | null;
 }
@@ -157,13 +152,20 @@ export type UICorner = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right'
 
 // === Events ===
 
+/** Events of a map (`map.on(name, handler)`) and their data. */
 export interface TreeletEventMap {
+  /** The fractional zoom changed. */
   zoom: { zoom: number };
+  /** The camera moved (at most once per frame). */
   move: { center: LngLat };
+  /** A camera movement settled (debounced). */
   moveend: { center: LngLat; zoom: number };
+  /** An elevation tile loaded, or was evicted from the cache. */
   tileload: { coord: TileCoord };
   tileunload: { coord: TileCoord };
+  /** A tile request failed (it is retried with backoff). */
   tileerror: { coord: TileCoord; layer: 'elevation' | 'drape'; error: string };
+  /** A layer of any kind was added or removed. */
   layeradd: { id: string };
   layerremove: { id: string };
   /** The coat stack, a layer's parameters or display, or the active base layer changed. */
@@ -183,6 +185,7 @@ export interface TreeletEventMap {
   toolchange: { mode: 'distance' | 'area' | 'profile' | 'sight' | null; drawing: boolean };
   /** A tool's result changed (`final` once drawing ends; `result` null when it was cleared). */
   measure: { mode: 'distance' | 'area' | 'profile' | 'sight' | null; final: boolean; result: import('../tools/ToolController').ToolResult | null };
+  /** The map started (after `start()`). */
   ready: Record<string, never>;
 }
 
@@ -244,6 +247,12 @@ export interface TreeletStats {
   /** Tile instances drawn in the last frame. */
   tiles: number;
   drawCalls: number;
+  /** Coats drawn (at most 6), raster coats bound (at most 4), overlay layers. */
+  coats: number;
+  rasters: number;
+  overlays: number;
+  /** Whether a shadow map is kept (a shadows coat is visible). */
+  shadows: boolean;
   /** Smoothed CPU time per rendered frame in milliseconds (update + draw calls). */
   frameTime: number;
   /** Elevation slots in use / total. */

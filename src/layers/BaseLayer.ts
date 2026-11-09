@@ -15,7 +15,6 @@ import type { Layer } from './Layer';
 import type {
   BaseLayerOptions,
   ResolvedBaseLayerDisplay,
-  ResolvedTerrainDisplay,
   DecoderName,
 } from './types';
 
@@ -29,7 +28,6 @@ let nextBaseLayerId = 0;
  *   - Which tile source to fetch DEM data from
  *   - How to decode tile pixels into elevation values
  *   - Per-layer display settings (exaggeration)
- *   - Per-layer terrain display settings (isolines, color ramps)
  *
  * Only one base layer is active at a time. Treelet uses the active layer
  * to drive the elevation pipeline.
@@ -62,9 +60,6 @@ export class BaseLayer implements Layer {
 
   /** Per-layer display settings. */
   readonly display: ResolvedBaseLayerDisplay;
-
-  /** Per-layer terrain display settings (isolines, color ramps). */
-  readonly terrainDisplay: ResolvedTerrainDisplay;
 
   /** Whether this base layer is visible (active). */
   visible: boolean;
@@ -108,18 +103,6 @@ export class BaseLayer implements Layer {
     };
     this.visible = this.display.visible;
 
-    // Resolve terrain display settings with defaults
-    const td = options.terrainDisplay;
-    this.terrainDisplay = {
-      isoplethInterval: td?.isoplethInterval ?? 100,
-      isolineStrength: td?.isolineStrength ?? 1.5,
-      isolineColor: td?.isolineColor ?? [0.12, 0.08, 0.04],
-      rampInterpolationRange: td?.rampInterpolationRange ?? [0, 4000],
-      slopeRange: td?.slopeRange ?? [0, 60],
-      rampDefaultElevation: td?.rampDefaultElevation ?? 'hypsometric',
-      rampDefaultSlope: td?.rampDefaultSlope ?? 'viridis',
-      rampDefaultAspect: td?.rampDefaultAspect ?? 'cyclic',
-    };
   }
 
   /**

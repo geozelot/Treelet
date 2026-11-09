@@ -55,12 +55,11 @@ describe('DrapeLayer construction', () => {
     expect(layer.maxZoom).toBe(22);
   });
 
-  it('applies default display: visible=true, opacity=1.0, blendMode="hillshade"', () => {
+  it('applies default display: visible=true, opacity=1.0, blendMode="normal"', () => {
     const layer = new DrapeLayer({ layerName: 'T', layerSource: makeMockSource() });
     expect(layer.display.visible).toBe(true);
     expect(layer.display.opacity).toBe(1.0);
-    expect(layer.display.blendMode).toBe('hillshade');
-    expect(layer.display.hillshadeStrength).toBe(0.5);
+    expect(layer.display.blendMode).toBe('normal');
     expect(layer.visible).toBe(true);
   });
 
@@ -72,76 +71,23 @@ describe('DrapeLayer construction', () => {
         visible: false,
         opacity: 0.25,
         blendMode: 'softlight',
-        hillshadeStrength: 0.8,
       },
     });
     expect(layer.display.visible).toBe(false);
     expect(layer.display.opacity).toBe(0.25);
     expect(layer.display.blendMode).toBe('softlight');
-    expect(layer.display.hillshadeStrength).toBe(0.8);
     expect(layer.visible).toBe(false);
   });
 });
 
 // ---------------------------------------------------------------------------
-// lodOffset clamping
+// Mock hygiene
 // ---------------------------------------------------------------------------
 
 afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('DrapeLayer.lodOffset', () => {
-  // lodOffset > 1 prints a deprecation warning (covered below).
-  beforeEach(() => {
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
-  });
-
-  it('defaults to 1 (match elevation zoom)', () => {
-    const layer = new DrapeLayer({ layerName: 'T', layerSource: makeMockSource() });
-    expect(layer.lodOffset).toBe(1);
-  });
-
-  it('accepts valid values 1, 2, and 3', () => {
-    const a = new DrapeLayer({ layerName: 'A', layerSource: makeMockSource(), lodOffset: 1 });
-    const b = new DrapeLayer({ layerName: 'B', layerSource: makeMockSource(), lodOffset: 2 });
-    const c = new DrapeLayer({ layerName: 'C', layerSource: makeMockSource(), lodOffset: 3 });
-    expect(a.lodOffset).toBe(1);
-    expect(b.lodOffset).toBe(2);
-    expect(c.lodOffset).toBe(3);
-  });
-
-  it('clamps values below 1 to 1 and above 3 to 3 (defensive runtime clamp)', () => {
-    // The public type is 1 | 2 | 3, but the runtime clamp guards against
-    // invalid values slipping through at the JS boundary. Cast to exercise it.
-    const low = new DrapeLayer({
-      layerName: 'T',
-      layerSource: makeMockSource(),
-      lodOffset: 0 as unknown as 1 | 2 | 3,
-    });
-    const high = new DrapeLayer({
-      layerName: 'T',
-      layerSource: makeMockSource(),
-      lodOffset: 99 as unknown as 1 | 2 | 3,
-    });
-    expect(low.lodOffset).toBe(1);
-    expect(high.lodOffset).toBe(3);
-  });
-});
-
-describe('DrapeLayer.lodOffset deprecation', () => {
-  it('warns once that lodOffset is ignored', async () => {
-    vi.resetModules();
-    const { DrapeLayer: Fresh } = await import('../../src/layers/DrapeLayer');
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    new Fresh({ layerName: 'A', layerSource: makeMockSource(), lodOffset: 1 });
-    expect(warn).not.toHaveBeenCalled();
-    new Fresh({ layerName: 'B', layerSource: makeMockSource(), lodOffset: 2 });
-    new Fresh({ layerName: 'C', layerSource: makeMockSource(), lodOffset: 3 });
-    expect(warn).toHaveBeenCalledTimes(1);
-    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/drapeSlotSize/));
-  });
-});
 
 // ---------------------------------------------------------------------------
 // Source zoom per terrain tile

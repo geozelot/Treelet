@@ -13,8 +13,6 @@ export type {
   TileCoord,
   TileBounds,
   VisibleExtent,
-  BaseDrapeMode,
-  ShaderMode,
   ColorRamp,
   BlendMode,
   UICorner,
@@ -44,9 +42,10 @@ export type { Layer } from './layers/Layer';
 export type {
   BaseLayerOptions,
   BaseLayerDisplay,
-  TerrainDisplay,
   DrapeLayerOptions,
   DrapeLayerDisplay,
+  AnalysisLayerOptions,
+  AnalysisLayerDisplay,
   OverlayLayerOptions,
   OverlayLayerDisplay,
   LayerHandle,
@@ -54,8 +53,12 @@ export type {
 } from './layers/types';
 export { BaseLayer } from './layers/BaseLayer';
 export { DrapeLayer } from './layers/DrapeLayer';
+export { AnalysisLayer } from './layers/AnalysisLayer';
 export { OverlayLayer } from './layers/OverlayLayer';
-export { LayerRegistry } from './layers/LayerRegistry';
+export { LayerRegistry, type StackLayer } from './layers/LayerRegistry';
+
+// Re-export analysis architecture (descriptors, ramps, legends)
+export * from './analysis';
 
 // Re-export elevation decoder API
 export {
@@ -72,4 +75,5 @@ export {
 export { TreeletPanel } from './ui/TreeletPanel';
 export { TreeletCompass } from './ui/TreeletCompass';
 export { TreeletAttribution } from './ui/TreeletAttribution';
+export { TreeletLegend } from './ui/TreeletLegend';
 export { defineTreeletElements } from './ui/elements';

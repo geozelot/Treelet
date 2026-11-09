@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.0.0 (unreleased)
+
+### Breaking changes
+
+- **The ground is a stack of coats.** Imagery (the active drape) and any number of analysis layers (elevation, slope, aspect, contours, hillshade) are drawn in order, each with opacity and a blend mode (`normal`, `multiply`, `screen`, `softlight`), so analyses can sit over imagery. The virtual "BaseDrape" and its modes are gone:
+  - `setBaseDrapeMode(mode)` / `activateBaseDrape()` → `addAnalysisLayer({ analysis: mode })`; `'contours'` is its own coat over an `'elevation'` coat; `'wireframe'` is `setWireframe(true)`.
+  - `setColorRamp`, `setElevationRange`, `setSlopeRange`, `setIsolineInterval/Thickness/Color` and their getters → `setAnalysisRamp(handle, ramp)` / `setAnalysisParams(handle, { range | interval | thickness | color })` on the coat.
+  - `BaseLayerOptions.terrainDisplay` → the parameters of the analysis layers.
+  - `DrapeLayerOptions.layerDisplay.blendMode: 'hillshade'` and `hillshadeStrength`, `setDrapeBlendMode`, `setHillshadeStrength` → a `'hillshade'` analysis coat (every new map has one; its opacity is the strength). Drape `blendMode` now takes the coat blend modes (default `'normal'`).
+  - `getActiveDrapeId()` returns the drape id or `null` (never `'__base_drape__'`); `isBaseDrapeActive()`, `getBaseDrapeMode()`, `BASE_DRAPE_ID`, `BaseDrapeMode` and `ShaderMode` are removed.
+  - The deprecated `DrapeLayerOptions.lodOffset` is removed.
+- A new map starts with a hillshade coat over neutral gray instead of the elevation ramp; add `addAnalysisLayer({ analysis: 'elevation' })` for the 0.3 look.
+- The layer panel's *Overlay* row opens the stack (visibility, order, removal, per-coat settings rendered from each analysis' parameter schema); its dropdown adds analyses or swaps the imagery. Wireframe moved to the *Terrain* settings.
+
+### Added
+
+- Analysis layers: `addAnalysisLayer`, `removeAnalysisLayer`, `setAnalysisParams`, `setAnalysisRamp`, `getLegend`, `getLegends`; stack control with `getLayerStack`, `moveLayer`, `setLayerVisible`, `setLayerOpacity`, `setLayerBlendMode`; `deactivateDrapeLayer`.
+- Color ramps as data: built-in names (plus `'diverging'`) or custom `{ stops }` / `{ breaks, colors }` classes, usable on every value analysis (e.g. avalanche slope classes). Ramps live in a texture row per coat, so legends, panel previews and the shader always agree.
+- `<treelet-legend>` (`guiDisplay.legendPosition`): ramp bars with their range, or class swatches, for the visible analyses; glass-aware.
+- `registerAnalysis(descriptor)`: a custom analysis is a GLSL snippet plus a parameter schema; the panel renders its settings.
+- Contours: index lines (every Nth line bolder).
+- `'rangechange'` event when the visible elevation range used by `'auto'` ramps changes.
+
 ## 0.3.0
 
 ### Breaking changes

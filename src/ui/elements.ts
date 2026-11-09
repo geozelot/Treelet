@@ -8,11 +8,13 @@
 import { TreeletPanel } from './TreeletPanel';
 import { TreeletCompass } from './TreeletCompass';
 import { TreeletAttribution } from './TreeletAttribution';
+import { TreeletLegend } from './TreeletLegend';
 
-/** Register <treelet-panel>, <treelet-compass> and <treelet-attribution> (once). */
+/** Register <treelet-panel>, <treelet-compass>, <treelet-attribution> and <treelet-legend> (once). */
 export function defineTreeletElements(): void {
   if (typeof customElements === 'undefined') return;
   if (!customElements.get('treelet-panel')) customElements.define('treelet-panel', TreeletPanel);
   if (!customElements.get('treelet-compass')) customElements.define('treelet-compass', TreeletCompass);
   if (!customElements.get('treelet-attribution')) customElements.define('treelet-attribution', TreeletAttribution);
+  if (!customElements.get('treelet-legend')) customElements.define('treelet-legend', TreeletLegend);
 }

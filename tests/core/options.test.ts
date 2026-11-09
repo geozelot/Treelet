@@ -20,6 +20,8 @@ describe('resolveOptions', () => {
     expect(o.mapDisplay.fog).toBe(true);
     expect(o.guiDisplay.glass).toBe(false);
     expect(resolveOptions({ ...base, guiDisplay: { glass: true } }).guiDisplay.glass).toBe(true);
+    expect(o.guiDisplay.legendPosition).toBe('bottom-left');
+    expect(resolveOptions({ ...base, guiDisplay: { legendPosition: false } }).guiDisplay.legendPosition).toBe(false);
     expect(o.workerCount).toBeGreaterThanOrEqual(1);
     expect(o.workerCount).toBeLessThanOrEqual(4);
   });

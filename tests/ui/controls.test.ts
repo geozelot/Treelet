@@ -5,16 +5,32 @@
 
 import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import { defineTreeletElements } from '../../src/ui/elements';
+import { registerBuiltinAnalyses } from '../../src/analysis/builtins';
+import { getAnalysis } from '../../src/analysis/registry';
 import type { TreeletCompass } from '../../src/ui/TreeletCompass';
 import type { TreeletPanel } from '../../src/ui/TreeletPanel';
+import type { TreeletLegend } from '../../src/ui/TreeletLegend';
 import type { Treelet } from '../../src/core/Treelet';
 
+/** A stack member as the panel reads it. */
+function fakeAnalysis(id: string, analysis: string, over: Record<string, unknown> = {}) {
+  const descriptor = getAnalysis(analysis)!;
+  return {
+    id, layerName: descriptor.label, visible: true, descriptor,
+    params: { ...descriptor.defaults }, ramp: descriptor.ramp,
+    isValueKind: descriptor.ramp !== undefined,
+    display: { visible: true, opacity: descriptor.opacity ?? 1, blendMode: descriptor.blendMode ?? 'normal' },
+    ...over,
+  };
+}
+
 /** The parts of Treelet the controls use, with spies for actions. */
-function fakeMap(opts: { baseLayers?: number } = {}) {
+function fakeMap(opts: { baseLayers?: number; stack?: unknown[]; legends?: unknown[] } = {}) {
   const baseLayers = Array.from({ length: opts.baseLayers ?? 1 }, (_, i) => ({
     id: `base-${i}`, layerName: `Base ${i}`, visible: i === 0,
   }));
   const drapes = [{ id: 'osm', layerName: 'OpenStreetMap' }];
+  const stack = opts.stack ?? [fakeAnalysis('analysis-0', 'hillshade'), fakeAnalysis('analysis-1', 'elevation')];
   const camera = {
     getState: () => ({ zoom: 10, pitch: 0, rotation: 0 }),
     resetOrientation: vi.fn(),
@@ -22,33 +38,42 @@ function fakeMap(opts: { baseLayers?: number } = {}) {
     setAzimuth: vi.fn(),
     setPitch: vi.fn(),
   };
+  const handlers = new Map<string, Array<() => void>>();
   const map = {
     camera,
-    on: vi.fn(),
+    on: vi.fn((event: string, fn: () => void) => { handlers.set(event, [...(handlers.get(event) ?? []), fn]); }),
+    off: vi.fn(),
+    emit: (event: string) => handlers.get(event)?.forEach((fn) => fn()),
     getCameraController: () => camera,
     getCenter: () => ({ lng: 11, lat: 47 }),
     getBounds: () => ({ sw: { lng: 10, lat: 46 }, ne: { lng: 12, lat: 48 } }),
     getBaseLayers: () => baseLayers,
     getDrapeLayers: () => drapes,
+    getLayerStack: () => stack,
     getActiveDrapeId: () => null,
-    isBaseDrapeActive: () => true,
-    getBaseDrapeMode: () => 'elevation',
-    getColorRamp: () => 'hypsometric',
+    getLegend: () => ({ domain: [0, 4000] }),
+    getLegends: () => opts.legends ?? [],
     getExaggeration: () => 1,
     getSunAzimuth: () => 315,
     getSunAltitude: () => 45,
-    getIsolineColor: () => [0, 0, 0],
-    getIsolineInterval: () => 100,
-    getIsolineThickness: () => 1,
+    getWireframe: () => false,
     getWireframeWhite: () => false,
-    getDrapeOpacity: () => 1,
-    getDrapeBlendMode: () => 'normal',
-    getHillshadeStrength: () => 0.5,
-    setColorRamp: vi.fn(),
-    setBaseDrapeMode: vi.fn(),
-    activateBaseDrape: vi.fn(),
+    addAnalysisLayer: vi.fn(() => ({ id: 'analysis-9', layerName: 'Slope' })),
+    removeAnalysisLayer: vi.fn(),
     activateDrapeLayer: vi.fn(),
+    deactivateDrapeLayer: vi.fn(),
     setActiveBaseLayer: vi.fn(),
+    setLayerVisible: vi.fn(),
+    setLayerOpacity: vi.fn(),
+    setLayerBlendMode: vi.fn(),
+    moveLayer: vi.fn(),
+    setAnalysisParams: vi.fn(),
+    setAnalysisRamp: vi.fn(),
+    setExaggeration: vi.fn(),
+    setSunAzimuth: vi.fn(),
+    setSunAltitude: vi.fn(),
+    setWireframe: vi.fn(),
+    setWireframeWhite: vi.fn(),
   };
   return map;
 }
@@ -74,20 +99,16 @@ function mount(map = fakeMap(), options = { compassPosition: 'top-right' as cons
   return { map, compass, root, panel, proot: panel.shadowRoot! };
 }
 
-beforeAll(() => defineTreeletElements());
+beforeAll(() => { defineTreeletElements(); registerBuiltinAnalyses(); });
 afterEach(() => { document.body.innerHTML = ''; });
 
 describe('layer panel', () => {
   it('renders a title with a single source as a plain label', () => {
     const { proot } = mount();
-    const terrain = proot.querySelector('[data-col="terrain"]')!;
+    const terrain = proot.querySelector('[data-col="terrain"] .layer-col-selector')!;
+    expect(terrain.classList.contains('has-choices')).toBe(false);
+    expect(terrain.querySelector('.layer-col-header')!.tagName).toBe('DIV');
     expect(terrain.querySelector('.header-chevron')).toBeNull();
-    expect(terrain.querySelector('.layer-col-body')).toBeNull();
-    expect(terrain.querySelector('button.layer-col-header')).toBeNull();
-
-    const overlay = proot.querySelector('.has-choices[data-col="overlay"] > button.layer-col-header')!;
-    expect(overlay.getAttribute('aria-expanded')).toBe('false');
-    expect(overlay.querySelector('.header-chevron')).not.toBeNull();
   });
 
   it('offers other base layers when there are several', () => {
@@ -96,10 +117,18 @@ describe('layer panel', () => {
     expect(terrain.querySelector('.layer-btn')!.textContent).toBe('Base 1');
   });
 
-  it('groups the overlay choices as Analysis and Layers', () => {
+  it('groups the overlay choices as Analysis (registered kinds) and Layers (inactive drapes)', () => {
     const { proot } = mount();
     const labels = [...proot.querySelectorAll('.dropdown-group-label')].map((l) => l.textContent);
     expect(labels).toEqual(['Analysis', 'Layers']);
+    const kinds = [...proot.querySelectorAll('.layer-entry[data-layer-type="analysis"]')].map((e) => (e as HTMLElement).dataset.kind);
+    expect(kinds).toEqual(['elevation', 'slope', 'aspect', 'contours', 'hillshade']);
+    expect(proot.querySelector('[data-layer-type="drape"] .layer-btn')!.textContent).toBe('OpenStreetMap');
+  });
+
+  it('names the visible coats in the Overlay row, bottom first', () => {
+    const { proot } = mount();
+    expect(proot.querySelector('[data-col="overlay"] .active-name')!.textContent).toBe('Hillshade · Elevation');
   });
 
   it('opens a dropdown while the mouse is over it; mouse clicks do not pin it', () => {
@@ -133,13 +162,20 @@ describe('layer panel', () => {
     expect(sel.classList.contains('open')).toBe(false);
   });
 
-  it('activating a choice closes the dropdown', () => {
+  it('choosing an analysis adds a coat, closes the dropdown and opens the stack', () => {
     const { map, proot } = mount();
     press(proot.querySelector('[data-col="overlay"] .layer-col-header') as HTMLElement, 'touch');
-    const slope = proot.querySelector('[data-mode="slope"] .layer-btn') as HTMLElement;
-    press(slope, 'touch');
-    expect(map.setBaseDrapeMode).toHaveBeenCalledWith('slope');
+    press(proot.querySelector('[data-kind="slope"] .layer-btn') as HTMLElement, 'touch');
+    expect(map.addAnalysisLayer).toHaveBeenCalledWith({ analysis: 'slope' });
     expect(proot.querySelector('.has-choices.open')).toBeNull();
+    map.emit('layerchange');
+    expect(proot.querySelector('[data-col="overlay"] .active-row')!.getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('choosing a drape activates it', () => {
+    const { map, proot } = mount();
+    press(proot.querySelector('[data-layer-type="drape"] .layer-btn') as HTMLElement, 'mouse');
+    expect(map.activateDrapeLayer).toHaveBeenCalledWith('osm');
   });
 
   it('opens with Enter and closes with Escape, returning focus to the header', () => {
@@ -167,9 +203,14 @@ describe('layer panel', () => {
     const settings = () => proot.querySelector('[data-col="overlay"] .active-settings')!;
     expect(settings().classList.contains('entering')).toBe(true);
 
-    // Picking a ramp re-renders; the open settings must not fade in again
+    // Stack rows, top first; expanding one shows its ramp list
+    const names = [...proot.querySelectorAll('.stack-name')].map((b) => b.textContent);
+    expect(names).toEqual(['Elevation', 'Hillshade']);
+    press(proot.querySelector('.stack-row[data-layer-id="analysis-1"] .stack-name') as HTMLElement, 'mouse');
     press(proot.querySelector('.ramp-btn[data-value="viridis"]') as HTMLElement, 'mouse');
-    expect(map.setColorRamp).toHaveBeenCalledWith('viridis');
+    expect(map.setAnalysisRamp).toHaveBeenCalledWith('analysis-1', 'viridis');
+    // The map's 'layerchange' re-renders; the open settings must not fade in again
+    map.emit('layerchange');
     expect(settings().classList.contains('hidden')).toBe(false);
     expect(settings().classList.contains('entering')).toBe(false);
 
@@ -177,15 +218,99 @@ describe('layer panel', () => {
     expect(settings().classList.contains('hidden')).toBe(true);
   });
 
-  it('keeps keyboard focus on the same control across a re-render', () => {
-    const { proot } = mount();
+  it('stack rows: visibility, order and removal go to the map', () => {
+    const { map, proot } = mount();
     press(proot.querySelector('[data-col="overlay"] .active-row') as HTMLElement, 'mouse');
+    const row = (id: string) => proot.querySelector(`.stack-row[data-layer-id="${id}"]`)!;
+    press(row('analysis-1').querySelector('[data-action="visible"]') as HTMLElement, 'mouse');
+    expect(map.setLayerVisible).toHaveBeenCalledWith('analysis-1', false);
+    press(row('analysis-0').querySelector('[data-action="up"]') as HTMLElement, 'mouse');
+    expect(map.moveLayer).toHaveBeenCalledWith('analysis-0', 1);
+    expect((row('analysis-1').querySelector('[data-action="up"]') as HTMLButtonElement).disabled).toBe(true);
+    press(row('analysis-1').querySelector('[data-action="remove"]') as HTMLElement, 'mouse');
+    expect(map.removeAnalysisLayer).toHaveBeenCalledWith('analysis-1');
+  });
+
+  it('coat settings render from the schema and send parameters', () => {
+    const stack = [fakeAnalysis('analysis-2', 'contours', { params: { interval: 100, thickness: 1.5, index: 0, color: [0, 0, 0] } })];
+    const { map, proot } = mount(fakeMap({ stack }));
+    press(proot.querySelector('[data-col="overlay"] .active-row') as HTMLElement, 'mouse');
+    press(proot.querySelector('.stack-name') as HTMLElement, 'mouse');
+
+    const opacity = proot.querySelector('input[data-param="opacity"]') as HTMLInputElement;
+    opacity.value = '0.4';
+    opacity.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    expect(map.setLayerOpacity).toHaveBeenCalledWith('analysis-2', 0.4);
+
+    const interval = proot.querySelector('input[data-param="interval"]') as HTMLInputElement;
+    interval.value = '50';
+    interval.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    expect(map.setAnalysisParams).toHaveBeenCalledWith('analysis-2', { interval: 50 });
+
+    press(proot.querySelector('[data-action="select"][data-value="5"]') as HTMLElement, 'mouse');
+    expect(map.setAnalysisParams).toHaveBeenCalledWith('analysis-2', { index: '5' });
+    press(proot.querySelector('[data-action="color"][title="red"]') as HTMLElement, 'mouse');
+    expect(map.setAnalysisParams).toHaveBeenCalledWith('analysis-2', { color: [0.8, 0.15, 0.1] });
+    press(proot.querySelector('[data-action="blend"][data-value="multiply"]') as HTMLElement, 'mouse');
+    expect(map.setLayerBlendMode).toHaveBeenCalledWith('analysis-2', 'multiply');
+    expect(proot.querySelector('.ramp-list')).toBeNull(); // contours have no ramp
+  });
+
+  it('an elevation span offers Auto / Manual', () => {
+    const { map, proot } = mount();
+    press(proot.querySelector('[data-col="overlay"] .active-row') as HTMLElement, 'mouse');
+    press(proot.querySelector('.stack-row[data-layer-id="analysis-1"] .stack-name') as HTMLElement, 'mouse');
+    expect(proot.querySelectorAll('input[data-param="range"]')).toHaveLength(2);
+    press(proot.querySelector('[data-action="auto"][data-value="true"]') as HTMLElement, 'mouse');
+    expect(map.setAnalysisParams).toHaveBeenCalledWith('analysis-1', { range: 'auto' });
+  });
+
+  it('keeps keyboard focus on the same control across a re-render', () => {
+    const { map, proot } = mount();
+    press(proot.querySelector('[data-col="overlay"] .active-row') as HTMLElement, 'mouse');
+    press(proot.querySelector('.stack-row[data-layer-id="analysis-1"] .stack-name') as HTMLElement, 'mouse');
     const viridis = proot.querySelector('.ramp-btn[data-value="viridis"]') as HTMLElement;
     viridis.focus();
     viridis.click();
+    map.emit('layerchange');
     const after = proot.querySelector('.ramp-btn[data-value="viridis"]');
     expect(after).not.toBe(viridis);
     expect(proot.activeElement).toBe(after);
+  });
+});
+
+describe('legend', () => {
+  function mountLegend(legends: unknown[]) {
+    const map = fakeMap({ legends });
+    const el = document.createElement('treelet-legend') as TreeletLegend;
+    document.body.appendChild(el);
+    el.attach(map as unknown as Treelet, 'bottom-left', { glass: true });
+    return { map, el, root: el.shadowRoot! };
+  }
+
+  it('is hidden without legends and renders bars and classes otherwise', () => {
+    const { el, root } = mountLegend([
+      { id: 'a', title: 'Elevation', unit: 'm', type: 'continuous', domain: [100, 3000], stops: [[0, [0, 0, 0]], [1, [1, 1, 1]]] },
+      { id: 'b', title: 'Slope', type: 'classes', domain: [0, 60], classes: [{ color: [1, 0, 0], label: '< 30°' }, { color: [0, 0, 1], label: '≥ 30°' }] },
+    ]);
+    expect(el.hidden).toBe(false);
+    expect(el.getAttribute('data-v')).toBe('bottom');
+    expect(el.hasAttribute('glass')).toBe(true);
+    const titles = [...root.querySelectorAll('.legend-title')].map((t) => t.textContent);
+    expect(titles).toEqual(['Elevation (m)', 'Slope']);
+    expect(root.querySelector('.legend-range')!.textContent).toBe('1003000');
+    // Classes listed highest first
+    expect([...root.querySelectorAll('.legend-class span:last-child')].map((s) => s.textContent)).toEqual(['≥ 30°', '< 30°']);
+  });
+
+  it('re-renders on layerchange and rangechange', () => {
+    const legends: unknown[] = [];
+    const { map, el } = mountLegend(legends);
+    expect(el.hidden).toBe(true);
+    legends.push({ id: 'a', title: 'Elevation', type: 'continuous', domain: [0, 1], stops: [[0, [0, 0, 0]]] });
+    map.emit('rangechange');
+    expect(el.hidden).toBe(false);
+    expect(map.on).toHaveBeenCalledWith('layerchange', expect.any(Function));
   });
 });
 

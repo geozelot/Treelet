@@ -66,12 +66,10 @@ export class TreeletAttribution extends BaseElement {
       }
     }
 
-    // Active external drape attribution (skip when BaseDrape is active)
-    if (!this.map.isBaseDrapeActive()) {
-      for (const drape of this.map.getDrapeLayers()) {
-        if (drape.visible && drape.attribution) {
-          parts.push(drape.attribution);
-        }
+    // The active drape's attribution (while its imagery is shown)
+    for (const drape of this.map.getDrapeLayers()) {
+      if (drape.visible && drape.attribution) {
+        parts.push(drape.attribution);
       }
     }
 

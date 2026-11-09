@@ -1,7 +1,8 @@
 // ============================================================================
 // treelet.js - Full Demo
-// Showcases the layer architecture: base layer = geometry, drape = coloring.
-// Base mesh defaults to wireframe. Drapes (BaseDrape or external) color it.
+// Showcases the layer architecture: the base layer is the geometry; the
+// coat stack (imagery and analyses such as elevation, slope, contours and
+// hillshade) colors it.
 // ============================================================================
 
 import { Treelet, XYZSource, WMTSSource } from '../src/index';
@@ -39,11 +40,14 @@ const terrain = map.addBaseLayer({
   }),
   decoder: 'terrarium',
   layerDisplay: { exaggeration: 1.3 },
-  terrainDisplay: {
-    rampInterpolationRange: [0, 6000],
-    isoplethInterval: 10,
-  },
 });
+
+// =========================================================================
+// Analysis coats - the map starts with a hillshade; elevation colors go
+// beneath it. Open the Overlay stack in the layer panel to add slope,
+// aspect or contours over any imagery.
+// =========================================================================
+map.addAnalysisLayer({ analysis: 'elevation', params: { range: [0, 4000] } });
 
 // =========================================================================
 // Drape Layer 1 - OpenStreetMap
@@ -96,4 +100,4 @@ map.start();
 console.log(`treelet.js v${Treelet.version} - Full Demo`);
 console.log('Navigate: Left-click drag to pan, scroll to zoom, right-click drag to orbit (touch: 1 finger pans, 2 fingers zoom/rotate)');
 console.log('Inspect: map.getElevation({ lng, lat }), map.pick(x, y), map.getElevationProfile(a, b), map.getStats()');
-console.log('Default: elevation mode. Use panel to switch visualization and drapes.');
+console.log('Coats: map.addAnalysisLayer({ analysis: "slope" }), map.getLayerStack(), map.getLegends()');

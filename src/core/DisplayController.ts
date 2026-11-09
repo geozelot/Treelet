@@ -1,29 +1,31 @@
 // ============================================================================
 // treelet.js - Display Controller
 //
-// Owns all visual/material state and mutations: drape mode, sun direction,
-// exaggeration, isolines, color ramps, wireframe, drape blend, pitch.
+// Owns the visual state and its mutations: the coat stack's display
+// (visibility, opacity, blend, analysis parameters and ramps), sun
+// direction, exaggeration, wireframe, pitch. Turns the registry's stack
+// into the coats the terrain renderer draws.
 //
 // Extracted from Treelet to keep the main orchestrator focused on wiring.
 // ============================================================================
 
 import { Vector3 } from 'three';
 import type { TerrainRenderer } from '../terrain/TerrainRenderer';
-import type { LayerRegistry } from '../layers/LayerRegistry';
+import type { LayerRegistry, StackLayer } from '../layers/LayerRegistry';
 import type { SceneManager } from '../scene/SceneManager';
 import type { BaseLayer } from '../layers/BaseLayer';
-import type { DrapeLayer } from '../layers/DrapeLayer';
-import type {
-  ResolvedTreeletOptions,
-  BaseDrapeMode,
-  BlendMode,
-  ShaderMode,
-  ColorRamp,
-} from './types';
+import type { AnalysisLayer } from '../layers/AnalysisLayer';
+import type { ResolvedTreeletOptions } from './types';
 import type { LayerHandle } from '../layers/types';
+import type { CoatBlendMode, LegendSpec, Ramp } from '../analysis/types';
+import { IMAGERY_KIND, MAX_COATS, analysisKind } from '../analysis/registry';
+import { resolveRamp, legendFor } from '../analysis/ramps';
+import type { CoatInput } from '../terrain/CoatStack';
 
-/** Special ID for the virtual BaseDrape layer. */
-export const BASE_DRAPE_ID = '__base_drape__';
+const BLEND_MODES: readonly CoatBlendMode[] = ['normal', 'multiply', 'screen', 'softlight'];
+
+/** Passed to descriptors' `domain()`; returned as-is it means "follow the visible range". */
+const AUTO_DOMAIN: [number, number] = [0, 1];
 
 export class DisplayController {
   private readonly terrainRenderer: TerrainRenderer;
@@ -31,13 +33,8 @@ export class DisplayController {
   private readonly sceneManager: SceneManager;
   private readonly options: ResolvedTreeletOptions;
 
-  /** Currently active drape: BASE_DRAPE_ID=BaseDrape, or external drape ID. */
-  private _activeDrapeId: string | null = BASE_DRAPE_ID;
-
-  /** BaseDrape sub-mode: wireframe, elevation, slope, aspect, or contours. */
-  private _baseDrapeMode: BaseDrapeMode = 'elevation';
-
-  /** Whether wireframe renders flat white (true) or normals coloring (false). */
+  private _wireframe = false;
+  /** Whether wireframe renders flat white (true) or the coats (false). */
   private _wireframeWhite = false;
 
   /** Sun azimuth in degrees (0–360, clockwise from north). Default 315° (north-west),
@@ -49,6 +46,8 @@ export class DisplayController {
 
   /** Reusable Vector3 for sun direction computation. */
   private readonly _sunDir = new Vector3();
+
+  private coatLimitWarned = false;
 
   constructor(
     terrainRenderer: TerrainRenderer,
@@ -63,53 +62,122 @@ export class DisplayController {
   }
 
   // =========================================================================
-  // Drape ID State (read/write for LayerController coordination)
+  // Coat stack display
   // =========================================================================
 
-  get activeDrapeId(): string | null {
-    return this._activeDrapeId;
-  }
-
-  set activeDrapeId(id: string | null) {
-    this._activeDrapeId = id;
-  }
-
-  get baseDrapeMode(): BaseDrapeMode {
-    return this._baseDrapeMode;
-  }
-
-  // =========================================================================
-  // BaseDrape Mode
-  // =========================================================================
-
-  /**
-   * Set the BaseDrape sub-mode (wireframe, elevation, slope, aspect, contours).
-   * If an external drape is active, switches back to BaseDrape first.
-   * @param deactivateDrapes - callback to deactivate all external drapes (avoids circular dep)
-   */
-  setBaseDrapeMode(mode: BaseDrapeMode, deactivateDrapes: () => void): void {
-    this._baseDrapeMode = mode;
-
-    // If an external drape was active, switch to BaseDrape
-    if (this._activeDrapeId !== BASE_DRAPE_ID) {
-      deactivateDrapes();
-      this._activeDrapeId = BASE_DRAPE_ID;
-      this.clearAllDrapeTextures();
+  private stackLayer(handle: LayerHandle | string): StackLayer | null {
+    const layer = this.layerRegistry.getStackLayer(handle);
+    if (!layer) {
+      console.warn(`treelet: layer "${typeof handle === 'string' ? handle : handle.id}" is not in the coat stack`);
+      return null;
     }
+    return layer;
+  }
 
+  private analysisLayer(handle: LayerHandle | string): AnalysisLayer | null {
+    const layer = this.layerRegistry.getAnalysisLayer(handle);
+    if (!layer) {
+      console.warn(`treelet: analysis layer "${typeof handle === 'string' ? handle : handle.id}" not found`);
+      return null;
+    }
+    return layer;
+  }
+
+  /** Show or hide a coat (the active drape or an analysis layer). */
+  setLayerVisible(handle: LayerHandle | string, visible: boolean): boolean {
+    const layer = this.stackLayer(handle);
+    if (!layer || layer.visible === visible) return false;
+    layer.visible = visible;
     this.applyMaterialState();
+    return true;
   }
 
-  getBaseDrapeMode(): BaseDrapeMode {
-    return this._baseDrapeMode;
+  setLayerOpacity(handle: LayerHandle | string, opacity: number): boolean {
+    if (!Number.isFinite(opacity)) return false;
+    const layer = this.stackLayer(handle);
+    if (!layer) return false;
+    (layer.display as { opacity: number }).opacity = Math.max(0, Math.min(1, opacity));
+    this.applyMaterialState();
+    return true;
   }
 
-  getActiveDrapeId(): string | null {
-    return this._activeDrapeId;
+  getLayerOpacity(handle: LayerHandle | string): number {
+    return this.layerRegistry.getStackLayer(handle)?.display.opacity ?? 1;
   }
 
-  isBaseDrapeActive(): boolean {
-    return this._activeDrapeId === BASE_DRAPE_ID;
+  setLayerBlendMode(handle: LayerHandle | string, mode: CoatBlendMode): boolean {
+    if (!BLEND_MODES.includes(mode)) {
+      console.warn(`treelet: unknown blend mode "${mode}"`);
+      return false;
+    }
+    const layer = this.stackLayer(handle);
+    if (!layer) return false;
+    (layer.display as { blendMode: CoatBlendMode }).blendMode = mode;
+    this.applyMaterialState();
+    return true;
+  }
+
+  getLayerBlendMode(handle: LayerHandle | string): CoatBlendMode {
+    return this.layerRegistry.getStackLayer(handle)?.display.blendMode ?? 'normal';
+  }
+
+  setAnalysisParams(handle: LayerHandle | string, params: object): boolean {
+    const layer = this.analysisLayer(handle);
+    if (!layer) return false;
+    layer.setParams(params);
+    this.applyMaterialState();
+    return true;
+  }
+
+  getAnalysisParams(handle: LayerHandle | string): Record<string, unknown> | null {
+    const layer = this.layerRegistry.getAnalysisLayer(handle);
+    return layer ? { ...layer.params } : null;
+  }
+
+  setAnalysisRamp(handle: LayerHandle | string, ramp: Ramp): boolean {
+    const layer = this.analysisLayer(handle);
+    if (!layer) return false;
+    resolveRamp(ramp); // validates (throws)
+    layer.ramp = ramp;
+    this.applyMaterialState();
+    return true;
+  }
+
+  getAnalysisRamp(handle: LayerHandle | string): Ramp | undefined {
+    return this.layerRegistry.getAnalysisLayer(handle)?.ramp;
+  }
+
+  // =========================================================================
+  // Legends
+  // =========================================================================
+
+  /** Value domain of an analysis layer's ramp ('auto' resolved to the visible range). */
+  getAnalysisDomain(layer: AnalysisLayer): [number, number] | null {
+    const d = layer.descriptor;
+    if (!d.domain) return null;
+    const domain = d.domain(layer.params, AUTO_DOMAIN);
+    return domain === AUTO_DOMAIN ? this.terrainRenderer.autoElevationRange : domain;
+  }
+
+  /** Legend of a value analysis layer; null for color kinds and unknown layers. */
+  getLegend(handle: LayerHandle | string): LegendSpec | null {
+    const layer = this.layerRegistry.getAnalysisLayer(handle);
+    if (!layer || !layer.isValueKind) return null;
+    const domain = this.getAnalysisDomain(layer) ?? [0, 1];
+    return legendFor(layer.id, layer.layerName, resolveRamp(layer.ramp ?? layer.descriptor.ramp!), domain, layer.descriptor.unit);
+  }
+
+  /** Legends of the visible value analyses, top of the stack first. */
+  getLegends(): LegendSpec[] {
+    const out: LegendSpec[] = [];
+    const stack = this.layerRegistry.getStack();
+    for (let i = stack.length - 1; i >= 0; i--) {
+      const layer = stack[i];
+      if (!layer.visible || !('descriptor' in layer)) continue;
+      const legend = this.getLegend(layer.id);
+      if (legend) out.push(legend);
+    }
+    return out;
   }
 
   // =========================================================================
@@ -177,186 +245,26 @@ export class DisplayController {
   }
 
   // =========================================================================
-  // Isolines
+  // Wireframe
   // =========================================================================
 
-  setIsolineInterval(interval: number): void {
-    if (!Number.isFinite(interval) || interval <= 0) return;
-    const baseLayer = this.layerRegistry.getActiveBaseLayer();
-    if (baseLayer) {
-      (baseLayer.terrainDisplay as { isoplethInterval: number }).isoplethInterval = interval;
-    }
-    this.terrainRenderer.setIsolineSettings(
-      interval,
-      baseLayer?.terrainDisplay.isolineStrength ?? 1.5,
-    );
+  setWireframe(enabled: boolean): void {
+    this._wireframe = enabled;
+    this.terrainRenderer.setWireframe(enabled);
+    this.terrainRenderer.setBaseWhite(enabled && this._wireframeWhite);
   }
 
-  getIsolineInterval(): number {
-    const baseLayer = this.layerRegistry.getActiveBaseLayer();
-    return baseLayer?.terrainDisplay.isoplethInterval ?? 100;
-  }
-
-  setIsolineThickness(thickness: number): void {
-    if (!Number.isFinite(thickness) || thickness < 0) return;
-    const baseLayer = this.layerRegistry.getActiveBaseLayer();
-    if (baseLayer) {
-      (baseLayer.terrainDisplay as { isolineStrength: number }).isolineStrength = thickness;
-    }
-    this.terrainRenderer.setIsolineSettings(
-      baseLayer?.terrainDisplay.isoplethInterval ?? 100,
-      thickness,
-    );
-  }
-
-  getIsolineThickness(): number {
-    const baseLayer = this.layerRegistry.getActiveBaseLayer();
-    return baseLayer?.terrainDisplay.isolineStrength ?? 1.5;
-  }
-
-  setIsolineColor(r: number, g: number, b: number): void {
-    const baseLayer = this.layerRegistry.getActiveBaseLayer();
-    if (baseLayer) {
-      (baseLayer.terrainDisplay as { isolineColor: [number, number, number] }).isolineColor = [r, g, b];
-    }
-    this.terrainRenderer.setIsolineColor(r, g, b);
-  }
-
-  getIsolineColor(): [number, number, number] {
-    const baseLayer = this.layerRegistry.getActiveBaseLayer();
-    const c = baseLayer?.terrainDisplay.isolineColor ?? [0.12, 0.08, 0.04];
-    return [...c] as [number, number, number];
-  }
-
-  // =========================================================================
-  // Ramp ranges
-  // =========================================================================
-
-  /** Elevation ramp range in meters, or 'auto' to fit the visible tiles' data. */
-  setElevationRange(range: [number, number] | 'auto'): void {
-    const baseLayer = this.layerRegistry.getActiveBaseLayer();
-    if (range !== 'auto' && !(Number.isFinite(range[0]) && Number.isFinite(range[1]) && range[1] > range[0])) return;
-    if (baseLayer) {
-      (baseLayer.terrainDisplay as { rampInterpolationRange: [number, number] | 'auto' }).rampInterpolationRange =
-        range === 'auto' ? 'auto' : [range[0], range[1]];
-    }
-    this.applyElevationRange();
-  }
-
-  getElevationRange(): [number, number] | 'auto' {
-    const r = this.layerRegistry.getActiveBaseLayer()?.terrainDisplay.rampInterpolationRange ?? [0, 4000];
-    return r === 'auto' ? 'auto' : [r[0], r[1]];
-  }
-
-  /** Slope ramp range in degrees. */
-  setSlopeRange(min: number, max: number): void {
-    if (!(Number.isFinite(min) && Number.isFinite(max) && max > min)) return;
-    const lo = Math.max(0, min);
-    const hi = Math.min(90, max);
-    const baseLayer = this.layerRegistry.getActiveBaseLayer();
-    if (baseLayer) {
-      (baseLayer.terrainDisplay as { slopeRange: [number, number] }).slopeRange = [lo, hi];
-    }
-    this.terrainRenderer.setSlopeRange(lo, hi);
-  }
-
-  getSlopeRange(): [number, number] {
-    const r = this.layerRegistry.getActiveBaseLayer()?.terrainDisplay.slopeRange ?? [0, 60];
-    return [r[0], r[1]];
-  }
-
-  private applyElevationRange(): void {
-    const range = this.layerRegistry.getActiveBaseLayer()?.terrainDisplay.rampInterpolationRange ?? [0, 4000];
-    if (range === 'auto') this.terrainRenderer.setAutoElevationRange();
-    else this.terrainRenderer.setElevationRange(range[0], range[1]);
-  }
-
-  // =========================================================================
-  // Color Ramp + Wireframe
-  // =========================================================================
-
-  setColorRamp(ramp: ColorRamp): void {
-    const baseLayer = this.layerRegistry.getActiveBaseLayer();
-    if (baseLayer) {
-      const td = baseLayer.terrainDisplay as {
-        rampDefaultElevation: ColorRamp;
-        rampDefaultSlope: ColorRamp;
-        rampDefaultAspect: ColorRamp;
-      };
-      const mode = this._baseDrapeMode;
-      if (mode === 'elevation' || mode === 'contours') td.rampDefaultElevation = ramp;
-      else if (mode === 'slope') td.rampDefaultSlope = ramp;
-      else if (mode === 'aspect') td.rampDefaultAspect = ramp;
-    }
-    this.terrainRenderer.setColorRamp(ramp);
-  }
-
-  getColorRamp(): ColorRamp {
-    const baseLayer = this.layerRegistry.getActiveBaseLayer();
-    if (!baseLayer) return 'hypsometric';
-    const td = baseLayer.terrainDisplay;
-    const mode = this._baseDrapeMode;
-    if (mode === 'elevation' || mode === 'contours') return td.rampDefaultElevation;
-    if (mode === 'slope') return td.rampDefaultSlope;
-    if (mode === 'aspect') return td.rampDefaultAspect;
-    return td.rampDefaultElevation;
+  getWireframe(): boolean {
+    return this._wireframe;
   }
 
   setWireframeWhite(white: boolean): void {
     this._wireframeWhite = white;
-    this.terrainRenderer.setBaseWhite(white);
+    this.terrainRenderer.setBaseWhite(this._wireframe && white);
   }
 
   getWireframeWhite(): boolean {
     return this._wireframeWhite;
-  }
-
-  // =========================================================================
-  // Drape Display
-  // =========================================================================
-
-  setDrapeOpacity(handle: LayerHandle | string, opacity: number): void {
-    if (!Number.isFinite(opacity)) return;
-    const id = typeof handle === 'string' ? handle : handle.id;
-    const drape = this.layerRegistry.getDrapeLayer(id);
-    if (drape) {
-      (drape.display as { opacity: number }).opacity = Math.max(0, Math.min(1, opacity));
-      if (this._activeDrapeId === id) {
-        this.terrainRenderer.setDrapeOpacity(drape.display.opacity);
-      }
-    }
-  }
-
-  getDrapeOpacity(handle: LayerHandle | string): number {
-    const drape = this.layerRegistry.getDrapeLayer(handle);
-    return drape?.display.opacity ?? 1.0;
-  }
-
-  setDrapeBlendMode(mode: BlendMode): void {
-    const drape = this.getActiveDrape();
-    if (drape) {
-      (drape.display as { blendMode: BlendMode }).blendMode = mode;
-    }
-    this.terrainRenderer.setDrapeBlendMode(mode);
-  }
-
-  getDrapeBlendMode(): BlendMode {
-    const drape = this.getActiveDrape();
-    return drape?.display.blendMode ?? 'hillshade';
-  }
-
-  setHillshadeStrength(strength: number): void {
-    const clamped = Math.max(0, Math.min(1, strength));
-    const drape = this.getActiveDrape();
-    if (drape) {
-      (drape.display as { hillshadeStrength: number }).hillshadeStrength = clamped;
-    }
-    this.terrainRenderer.setHillshadeStrength(clamped);
-  }
-
-  getHillshadeStrength(): number {
-    const drape = this.getActiveDrape();
-    return drape?.display.hillshadeStrength ?? 0.5;
   }
 
   // =========================================================================
@@ -388,65 +296,49 @@ export class DisplayController {
   // =========================================================================
 
   /**
-   * Resolve material configuration from the current drape state.
-   */
-  resolveMaterialConfig(): { shaderMode: ShaderMode; wireframe: boolean; isolineEnabled: boolean } {
-    if (this._activeDrapeId === BASE_DRAPE_ID || this._activeDrapeId === null) {
-      const mode = this._baseDrapeMode;
-      if (mode === 'wireframe') {
-        return { shaderMode: 'base', wireframe: true, isolineEnabled: false };
-      } else if (mode === 'contours') {
-        return { shaderMode: 'elevation', wireframe: false, isolineEnabled: true };
-      } else {
-        return { shaderMode: mode, wireframe: false, isolineEnabled: false };
-      }
-    } else {
-      return { shaderMode: 'texture', wireframe: false, isolineEnabled: false };
-    }
-  }
-
-  /**
-   * Apply the correct material state to the terrain renderer.
-   * Reads display settings from the active layer's display objects.
+   * Hand the visible coats, bottom first, to the terrain renderer.
    * Public so LayerController can call it after layer changes.
    */
   applyMaterialState(): void {
-    const { shaderMode, wireframe, isolineEnabled } = this.resolveMaterialConfig();
-    const baseLayer = this.layerRegistry.getActiveBaseLayer();
-    const td = baseLayer?.terrainDisplay;
-
-    this.terrainRenderer.setMode(shaderMode);
-    this.terrainRenderer.setWireframe(wireframe);
-    this.terrainRenderer.setIsolineEnabled(isolineEnabled);
-    this.terrainRenderer.setColorRamp(this.getColorRamp());
-    this.terrainRenderer.setBaseWhite(this._wireframeWhite);
-
-    // Isoline settings from active base layer's terrainDisplay
-    const isolineColor = td?.isolineColor ?? [0.12, 0.08, 0.04];
-    this.terrainRenderer.setIsolineColor(isolineColor[0], isolineColor[1], isolineColor[2]);
-    this.terrainRenderer.setIsolineSettings(
-      td?.isoplethInterval ?? 100,
-      td?.isolineStrength ?? 1.5,
-    );
-
-    // Ramp ranges from active base layer's terrainDisplay
-    this.applyElevationRange();
-    const slope = td?.slopeRange ?? [0, 60];
-    this.terrainRenderer.setSlopeRange(slope[0], slope[1]);
+    const coats: CoatInput[] = [];
+    for (const layer of this.layerRegistry.getStack()) {
+      if (!layer.visible) continue;
+      if ('descriptor' in layer) coats.push(this.analysisCoat(layer));
+      else {
+        coats.push({
+          id: layer.id,
+          kind: IMAGERY_KIND,
+          blendMode: layer.display.blendMode,
+          opacity: layer.display.opacity,
+          ramp: null,
+          domain: [0, 1],
+          pack: () => ({ p0: [0, 0, 0, 0], p1: [0, 0, 0, 0] }),
+        });
+      }
+    }
+    if (coats.length > MAX_COATS && !this.coatLimitWarned) {
+      this.coatLimitWarned = true;
+      console.warn(`treelet: only the lowest ${MAX_COATS} visible coats are drawn (${coats.length} visible)`);
+    }
+    this.terrainRenderer.setCoats(coats);
   }
 
-  /**
-   * Clear drape textures from the terrain material.
-   */
-  clearAllDrapeTextures(): void {
-    this.terrainRenderer.clearDrapes();
-  }
-
-  /**
-   * Get the currently active external drape layer, or null.
-   */
-  getActiveDrape(): DrapeLayer | null {
-    if (!this._activeDrapeId || this._activeDrapeId === BASE_DRAPE_ID) return null;
-    return this.layerRegistry.getDrapeLayer(this._activeDrapeId) ?? null;
+  private analysisCoat(layer: AnalysisLayer): CoatInput {
+    const d = layer.descriptor;
+    const params = layer.params;
+    let domain: [number, number] | 'auto' = [0, 1];
+    if (d.domain) {
+      const dom = d.domain(params, AUTO_DOMAIN);
+      domain = dom === AUTO_DOMAIN ? 'auto' : dom;
+    }
+    return {
+      id: layer.id,
+      kind: analysisKind(d.id),
+      blendMode: layer.display.blendMode,
+      opacity: layer.display.opacity,
+      ramp: layer.isValueKind ? resolveRamp(layer.ramp ?? d.ramp!) : null,
+      domain,
+      pack: (dom) => d.pack(params, dom),
+    };
   }
 }

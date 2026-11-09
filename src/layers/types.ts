@@ -6,7 +6,7 @@
 
 import type { TileSource } from '../sources/TileSource';
 import type { ElevationDecoder } from '../decoders/ElevationDecoder';
-import type { ColorRamp, BlendMode } from '../core/types';
+import type { CoatBlendMode, Ramp } from '../analysis/types';
 
 // === Decoder Name ===
 
@@ -29,7 +29,6 @@ export interface BaseLayerOptions {
   minZoom?: number;
   maxZoom?: number;
   layerDisplay?: BaseLayerDisplay;
-  terrainDisplay?: TerrainDisplay;
   layerAttribution?: string;
   decoder?: ElevationDecoder | DecoderName;
 }
@@ -40,34 +39,10 @@ export interface BaseLayerDisplay {
   exaggeration?: number;
 }
 
-export interface TerrainDisplay {
-  isoplethInterval?: number;
-  isolineStrength?: number;
-  isolineColor?: [number, number, number];
-  /** Elevation ramp range in meters, or 'auto' to fit the visible tiles' data. Default [0, 4000]. */
-  rampInterpolationRange?: [number, number] | 'auto';
-  /** Slope ramp range in degrees. Default [0, 60]. */
-  slopeRange?: [number, number];
-  rampDefaultElevation?: ColorRamp;
-  rampDefaultSlope?: ColorRamp;
-  rampDefaultAspect?: ColorRamp;
-}
-
 // Fully resolved (no optional fields)
 export interface ResolvedBaseLayerDisplay {
   visible: boolean;
   exaggeration: number;
-}
-
-export interface ResolvedTerrainDisplay {
-  isoplethInterval: number;
-  isolineStrength: number;
-  isolineColor: [number, number, number];
-  rampInterpolationRange: [number, number] | 'auto';
-  slopeRange: [number, number];
-  rampDefaultElevation: ColorRamp;
-  rampDefaultSlope: ColorRamp;
-  rampDefaultAspect: ColorRamp;
 }
 
 // === Drape Layer ===
@@ -79,25 +54,48 @@ export interface DrapeLayerOptions {
   maxZoom?: number;
   layerDisplay?: DrapeLayerDisplay;
   layerAttribution?: string;
-  /**
-   * @deprecated Ignored. Drape tiles fetch as much detail as their slot
-   * holds; raise `mapDisplay.drapeSlotSize` (e.g. 512) for sharper imagery.
-   */
-  lodOffset?: 1 | 2 | 3;
 }
 
+/** Display of the imagery coat a drape layer forms when active. */
 export interface DrapeLayerDisplay {
   visible?: boolean;
   opacity?: number;
-  blendMode?: BlendMode;
-  hillshadeStrength?: number;
+  /** How the imagery combines with the coats below it. Default 'normal'. */
+  blendMode?: CoatBlendMode;
 }
 
 export interface ResolvedDrapeLayerDisplay {
   visible: boolean;
   opacity: number;
-  blendMode: BlendMode;
-  hillshadeStrength: number;
+  blendMode: CoatBlendMode;
+}
+
+// === Analysis Layer ===
+
+export interface AnalysisLayerOptions<P extends object = Record<string, unknown>> {
+  /** Registered analysis kind, e.g. 'slope'. */
+  analysis: string;
+  /** Display name. Default: the analysis' label. */
+  layerName?: string;
+  /** Parameters; unset ones take the analysis' defaults. */
+  params?: Partial<P>;
+  /** Ramp for value analyses. Default: the analysis' ramp. */
+  ramp?: Ramp;
+  minZoom?: number;
+  maxZoom?: number;
+  layerDisplay?: AnalysisLayerDisplay;
+}
+
+export interface AnalysisLayerDisplay {
+  visible?: boolean;
+  opacity?: number;
+  blendMode?: CoatBlendMode;
+}
+
+export interface ResolvedAnalysisLayerDisplay {
+  visible: boolean;
+  opacity: number;
+  blendMode: CoatBlendMode;
 }
 
 // === Overlay Layer (stub) ===

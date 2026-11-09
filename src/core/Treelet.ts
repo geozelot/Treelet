@@ -5,10 +5,11 @@
 // lifecycle to LayerController.
 //
 // Layer architecture:
-//   Base layer  = geometry source (elevation data)
-//   Drape layer = visualization (BaseDrape: wireframe/elevation/slope/aspect/contours,
-//                                or external texture like OSM/satellite)
-//   Only one drape active at a time (no blending).
+//   Base layer     = geometry source (elevation data)
+//   Coat stack     = what colors the ground, bottom first: the active drape
+//                    (imagery, one at a time) and any number of analysis
+//                    layers (elevation, slope, contours, hillshade…), each
+//                    with opacity and a blend mode.
 // ============================================================================
 
 import { Vector3 } from 'three';
@@ -27,9 +28,7 @@ import type {
   ResolvedTreeletOptions,
   TreeletEventMap,
   LngLat,
-  BaseDrapeMode,
   BlendMode,
-  ColorRamp,
   TerrainPick,
   ProfileSample,
   TreeletStats,
@@ -39,12 +38,17 @@ import { CameraTerrain, marchToTerrain, type GroundSampler } from '../scene/Came
 import type { CameraController } from '../scene/CameraController';
 import type { BaseLayer } from '../layers/BaseLayer';
 import type { DrapeLayer } from '../layers/DrapeLayer';
+import type { AnalysisLayer } from '../layers/AnalysisLayer';
+import type { StackLayer } from '../layers/LayerRegistry';
 import type {
   BaseLayerOptions,
   DrapeLayerOptions,
+  AnalysisLayerOptions,
   OverlayLayerOptions,
   LayerHandle,
 } from '../layers/types';
+import type { LegendSpec, Ramp } from '../analysis/types';
+import { registerBuiltinAnalyses } from '../analysis/builtins';
 import { TileGrid } from '../tiles/TileGrid';
 import { WebMercator } from '../crs/WebMercator';
 import { WorkerPool } from '../workers/WorkerPool';
@@ -55,9 +59,7 @@ import { LayerController } from './LayerController';
 import { defineTreeletElements } from '../ui/elements';
 import type { TreeletCompass } from '../ui/TreeletCompass';
 import type { TreeletAttribution } from '../ui/TreeletAttribution';
-
-/** @deprecated Import from DisplayController instead. */
-export { BASE_DRAPE_ID } from './DisplayController';
+import type { TreeletLegend } from '../ui/TreeletLegend';
 
 /** Minimum camera clearance above the terrain, in meters. */
 const CAMERA_MIN_CLEARANCE_M = 2;
@@ -136,6 +138,7 @@ export function resolveOptions(user: TreeletOptions): ResolvedTreeletOptions {
       enabled: gui.enabled ?? DEFAULT_OPTIONS.guiDisplay.enabled,
       compassPosition: gui.compassPosition ?? DEFAULT_OPTIONS.guiDisplay.compassPosition,
       layerPosition: gui.layerPosition ?? DEFAULT_OPTIONS.guiDisplay.layerPosition,
+      legendPosition: gui.legendPosition ?? DEFAULT_OPTIONS.guiDisplay.legendPosition,
       glass: gui.glass ?? DEFAULT_OPTIONS.guiDisplay.glass,
     },
     mapDisplay: {
@@ -213,11 +216,13 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
   private resizeObserver: ResizeObserver | null = null;
   private compass: TreeletCompass | null = null;
   private attribution: TreeletAttribution | null = null;
+  private legend: TreeletLegend | null = null;
   private readonly scratch = new Vector3();
   private readonly scratchDir = new Vector3();
 
   constructor(container: string | HTMLElement, userOptions: TreeletOptions) {
     super();
+    registerBuiltinAnalyses();
 
     // Resolve container
     if (typeof container === 'string') {
@@ -260,6 +265,7 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
       onTileLoad: (coord) => this.emit('tileload', { coord }),
       onTileUnload: (coord) => this.emit('tileunload', { coord }),
       onTileError: (coord, layer, error) => this.emit('tileerror', { coord, layer, error }),
+      onRangeChange: (min, max) => this.emit('rangechange', { min, max }),
     });
     this.sceneManager.addTileMesh(this.terrainRenderer.mesh);
     this.sceneManager.onContextRestore(() => this.terrainRenderer.onContextRestored());
@@ -277,8 +283,10 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
       this.displayController,
       (event, data) => this.emit(event, data),
       () => this.sceneManager.requestRender(),
-      () => this.isRunning,
     );
+    // A bare map shows shaded relief; imagery and analyses stack over it.
+    this.layerController.addAnalysisLayer({ analysis: 'hillshade' });
+    this.displayController.updateSunDirection();
 
     this.cameraTerrain = new CameraTerrain(this.sceneManager.cameraController, CAMERA_MIN_CLEARANCE_M * this.metersToScene);
     this.sceneManager.onFrame((dt, moved) => this.onFrame(dt, moved));
@@ -328,6 +336,13 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
       this.attribution = document.createElement('treelet-attribution') as TreeletAttribution;
       this.container.appendChild(this.attribution);
       this.attribution.attach(this, attrSide);
+
+      // Legends of the visible analyses, above the attribution by default
+      if (gd.enabled && gd.legendPosition !== false) {
+        this.legend = document.createElement('treelet-legend') as TreeletLegend;
+        this.container.appendChild(this.legend);
+        this.legend.attach(this, gd.legendPosition, { glass: gd.glass });
+      }
     }
   }
 
@@ -606,8 +621,67 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
 
   addDrapeLayer(options: DrapeLayerOptions): LayerHandle { return this.layerController.addDrapeLayer(options); }
   removeDrapeLayer(handle: LayerHandle | string): this { this.layerController.removeDrapeLayer(handle); return this; }
+  /** Make a drape layer the imagery coat (one drape is active at a time). */
   activateDrapeLayer(handle: LayerHandle | string): this { this.layerController.activateDrapeLayer(handle); return this; }
-  activateBaseDrape(mode?: BaseDrapeMode): this { this.layerController.activateBaseDrape(mode); return this; }
+  /** Remove the imagery coat; the drape layer stays registered. */
+  deactivateDrapeLayer(): this { this.layerController.deactivateDrapeLayer(); return this; }
+  getActiveDrapeId(): string | null { return this.layerRegistry.getActiveDrapeId(); }
+
+  // =========================================================================
+  // Analysis API (→ LayerController / DisplayController)
+  // =========================================================================
+
+  /** Add an analysis coat on top of the stack. */
+  addAnalysisLayer<P extends object = Record<string, unknown>>(options: AnalysisLayerOptions<P>): LayerHandle {
+    return this.layerController.addAnalysisLayer(options);
+  }
+  removeAnalysisLayer(handle: LayerHandle | string): this { this.layerController.removeAnalysisLayer(handle); return this; }
+  /** Merge parameters into an analysis layer (see the analysis' param schema). */
+  setAnalysisParams(handle: LayerHandle | string, params: object): this {
+    if (this.displayController.setAnalysisParams(handle, params)) this.emit('layerchange', {});
+    return this;
+  }
+  getAnalysisParams(handle: LayerHandle | string): Record<string, unknown> | null { return this.displayController.getAnalysisParams(handle); }
+  /** Color ramp of a value analysis: a built-in name or stops / classes. */
+  setAnalysisRamp(handle: LayerHandle | string, ramp: Ramp): this {
+    if (this.displayController.setAnalysisRamp(handle, ramp)) this.emit('layerchange', {});
+    return this;
+  }
+  getAnalysisRamp(handle: LayerHandle | string): Ramp | undefined { return this.displayController.getAnalysisRamp(handle); }
+  /** Legend of a value analysis layer (null for color kinds such as contours). */
+  getLegend(handle: LayerHandle | string): LegendSpec | null { return this.displayController.getLegend(handle); }
+  /** Legends of the visible value analyses, top of the stack first. */
+  getLegends(): LegendSpec[] { return this.displayController.getLegends(); }
+
+  // =========================================================================
+  // Coat stack API
+  // =========================================================================
+
+  /** The coats in drawing order, bottom first (the active drape and the analysis layers). */
+  getLayerStack(): StackLayer[] { return this.layerController.getLayerStack(); }
+  /** Move a coat to `index` in the stack (0 = bottom). */
+  moveLayer(handle: LayerHandle | string, index: number): this {
+    this.layerController.moveLayer(handle, requireFinite(index, 'index'));
+    return this;
+  }
+  /** Show or hide a coat without removing it. */
+  setLayerVisible(handle: LayerHandle | string, visible: boolean): this {
+    if (this.displayController.setLayerVisible(handle, visible)) this.emit('layerchange', {});
+    return this;
+  }
+  setLayerOpacity(handle: LayerHandle | string, opacity: number): this {
+    if (this.displayController.setLayerOpacity(handle, opacity)) this.emit('layerchange', {});
+    return this;
+  }
+  getLayerOpacity(handle: LayerHandle | string): number { return this.displayController.getLayerOpacity(handle); }
+  setLayerBlendMode(handle: LayerHandle | string, mode: BlendMode): this {
+    if (this.displayController.setLayerBlendMode(handle, mode)) this.emit('layerchange', {});
+    return this;
+  }
+  getLayerBlendMode(handle: LayerHandle | string): BlendMode { return this.displayController.getLayerBlendMode(handle); }
+  /** Alias of setLayerOpacity for drape layers. */
+  setDrapeOpacity(handle: LayerHandle | string, opacity: number): this { return this.setLayerOpacity(handle, opacity); }
+  getDrapeOpacity(handle: LayerHandle | string): number { return this.getLayerOpacity(handle); }
 
   // =========================================================================
   // Overlay Layer API (→ LayerController)
@@ -620,47 +694,17 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
   // Display API (→ DisplayController)
   // =========================================================================
 
-  setBaseDrapeMode(mode: BaseDrapeMode): this {
-    this.displayController.setBaseDrapeMode(mode, () => this.layerController.deactivateAllDrapes());
-    this.emit('layerchange', {});
-    return this;
-  }
-
-  getBaseDrapeMode(): BaseDrapeMode { return this.displayController.getBaseDrapeMode(); }
-  getActiveDrapeId(): string | null { return this.displayController.getActiveDrapeId(); }
-  isBaseDrapeActive(): boolean { return this.displayController.isBaseDrapeActive(); }
-
-  setDrapeOpacity(handle: LayerHandle | string, opacity: number): this { this.displayController.setDrapeOpacity(handle, opacity); return this; }
-  getDrapeOpacity(handle: LayerHandle | string): number { return this.displayController.getDrapeOpacity(handle); }
-  setDrapeBlendMode(mode: BlendMode): this { this.displayController.setDrapeBlendMode(mode); return this; }
-  getDrapeBlendMode(): BlendMode { return this.displayController.getDrapeBlendMode(); }
-  setHillshadeStrength(strength: number): this { this.displayController.setHillshadeStrength(strength); return this; }
-  getHillshadeStrength(): number { return this.displayController.getHillshadeStrength(); }
-
   setExaggeration(handleOrValue: LayerHandle | string | number, value?: number): this { this.displayController.setExaggeration(handleOrValue, value); return this; }
   getExaggeration(): number { return this.displayController.getExaggeration(); }
-
-  setIsolineInterval(interval: number): this { this.displayController.setIsolineInterval(interval); return this; }
-  getIsolineInterval(): number { return this.displayController.getIsolineInterval(); }
-  setIsolineThickness(thickness: number): this { this.displayController.setIsolineThickness(thickness); return this; }
-  getIsolineThickness(): number { return this.displayController.getIsolineThickness(); }
-  setIsolineColor(r: number, g: number, b: number): this { this.displayController.setIsolineColor(r, g, b); return this; }
-  getIsolineColor(): [number, number, number] { return this.displayController.getIsolineColor(); }
-
-  /** Elevation color-ramp range in meters, or 'auto' to fit the visible data. */
-  setElevationRange(range: [number, number] | 'auto'): this { this.displayController.setElevationRange(range); return this; }
-  getElevationRange(): [number, number] | 'auto' { return this.displayController.getElevationRange(); }
-  /** Slope color-ramp range in degrees. */
-  setSlopeRange(min: number, max: number): this { this.displayController.setSlopeRange(min, max); return this; }
-  getSlopeRange(): [number, number] { return this.displayController.getSlopeRange(); }
 
   setSunAzimuth(degrees: number): this { this.displayController.setSunAzimuth(degrees); return this; }
   getSunAzimuth(): number { return this.displayController.getSunAzimuth(); }
   setSunAltitude(degrees: number): this { this.displayController.setSunAltitude(degrees); return this; }
   getSunAltitude(): number { return this.displayController.getSunAltitude(); }
 
-  setColorRamp(ramp: ColorRamp): this { this.displayController.setColorRamp(ramp); return this; }
-  getColorRamp(): ColorRamp { return this.displayController.getColorRamp(); }
+  /** Draw the terrain mesh as a wireframe (colored by the coats, or white). */
+  setWireframe(enabled: boolean): this { this.displayController.setWireframe(enabled); return this; }
+  getWireframe(): boolean { return this.displayController.getWireframe(); }
   setWireframeWhite(white: boolean): this { this.displayController.setWireframeWhite(white); return this; }
   getWireframeWhite(): boolean { return this.displayController.getWireframeWhite(); }
 
@@ -673,6 +717,7 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
 
   getBaseLayers(): BaseLayer[] { return this.layerController.getBaseLayers(); }
   getDrapeLayers(): DrapeLayer[] { return this.layerController.getDrapeLayers(); }
+  getAnalysisLayers(): AnalysisLayer[] { return this.layerController.getAnalysisLayers(); }
   getCameraController(): CameraController { return this.sceneManager.cameraController; }
 
   setMinPitch(degrees: number): this { this.displayController.setMinPitch(degrees); return this; }
@@ -725,5 +770,6 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
 
     if (this.compass) { this.compass.remove(); this.compass = null; }
     if (this.attribution) { this.attribution.remove(); this.attribution = null; }
+    if (this.legend) { this.legend.remove(); this.legend = null; }
   }
 }

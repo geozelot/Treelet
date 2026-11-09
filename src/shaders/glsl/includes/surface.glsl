@@ -10,6 +10,7 @@
 struct Surface {
   float h;      // elevation in meters
   vec3 n;       // unit normal (true scale, unexaggerated)
+  float fw;     // screen-space derivative of h (set by the caller)
   bool valid;
 };
 
@@ -32,6 +33,7 @@ Surface sampleSurface(vec4 ref, vec2 tileUV, float tileWorldSize, float mercScal
   s.valid = false;
   s.h = 0.0;
   s.n = vec3(0.0, 0.0, 1.0);
+  s.fw = 0.0;
 
   int imax = int(uSlotSize) - 1;
   vec2 t = elevTexelCoord(ref, tileUV);

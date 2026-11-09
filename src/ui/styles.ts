@@ -59,8 +59,10 @@ export const panelStyles = /* css */ `
   .layer-col {
     display: flex;
     position: relative;
-    /* Half the slide's room on narrow maps (--slide-room from treelet-compass) */
+    /* Half the slide's room on narrow maps (--slide-room from treelet-compass);
+       long names (or the Overlay row's list of coats) truncate past 260px */
     min-width: min(190px, var(--slide-room, 380px) / 2);
+    max-width: 260px;
     border-right: 1px solid var(--border);
   }
 
@@ -458,7 +460,90 @@ export const panelStyles = /* css */ `
     outline-offset: 1px;
   }
 
-  /* -- Toggle buttons (wireframe coloring, drape blend mode) -- */
+  /* -- Stack manager (the Overlay row's settings): one row per coat -- */
+
+  .stack-settings {
+    max-height: min(70vh, 480px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  /* Wider than the column, growing outward (away from the Terrain column) */
+  :host([data-h="right"]) .stack-settings { left: auto; right: 0; width: max(100%, 250px); }
+  :host([data-h="left"])  .stack-settings { right: auto; left: 0; width: max(100%, 250px); }
+
+  .stack-empty {
+    font-size: var(--fs-small);
+    color: var(--text-muted);
+    padding: 4px 0;
+  }
+
+  .stack-row {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding: 2px 0;
+  }
+
+  .stack-name {
+    flex: 1;
+    min-width: 0;
+    padding: 3px 6px;
+    border: none;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--text);
+    font-size: var(--fs-body);
+    text-align: left;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    cursor: pointer;
+    transition: background-color var(--fade);
+  }
+
+  .stack-name:hover { background: var(--hover-bg); }
+  .stack-row.open .stack-name { background: var(--active-bg); color: var(--active-text); }
+  .stack-row.is-hidden .stack-name { color: var(--text-muted); }
+
+  .stack-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    border: none;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: background-color var(--fade), color var(--fade);
+  }
+
+  .stack-btn:hover { background: var(--hover-bg); color: var(--text); }
+  .stack-btn:disabled { opacity: 0.3; cursor: default; }
+  .stack-btn:disabled:hover { background: transparent; color: var(--text-muted); }
+  .stack-eye[aria-pressed="true"] { color: var(--accent); }
+
+  .coat-settings {
+    margin: 0 0 4px;
+    padding: 2px 6px 6px;
+    border-radius: var(--radius-sm);
+    background: var(--submenu2-bg);
+  }
+
+  .toggle-row.wrap { flex-wrap: wrap; gap: 4px; }
+
+  .toggle-group {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 4px;
+  }
+
+  /* -- Toggle buttons (mesh, blend mode, selects) -- */
 
   .toggle-row {
     display: flex;

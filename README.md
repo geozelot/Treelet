@@ -39,16 +39,16 @@ The library is designed to be easily extendable - via registry or plugin package
   - **Terrarium**
   - **Custom** (_via interface or registry_)
 
-- #### Terrain mode:
-  - **Relief** - 3D terrain relief
-  - **Isopleth** - 3D stepped relief
-
-
-- #### Hypsometric overlays:
-  - **Elevation** - topographic coloring (fixed or auto range)
-  - **Slope** - slope angle in degrees
-  - **Aspect** - downslope bearing (cyclic ramp)
-  - **Isoline** - contour overlay computed from the DEM per pixel
+- #### Coat stack:
+  - **Imagery** - one drape layer at a time, with opacity and blend mode
+  - **Analyses** - any number, stacked over the imagery with opacity and blend mode:
+    - **Elevation** - topographic coloring (fixed or auto range)
+    - **Slope** - slope angle in degrees
+    - **Aspect** - downslope bearing (cyclic ramp)
+    - **Contours** - lines computed from the DEM per pixel, with index lines
+    - **Hillshade** - terrain light from the map's sun
+  - **Ramps** - built-in or custom color stops and classes, with legends
+  - **Custom analyses** - a GLSL snippet plus a parameter schema (`registerAnalysis`)
 
 - #### Inspection:
   - **Elevation readout** - `getElevation(lngLat)`
@@ -103,7 +103,7 @@ map.addBaseLayer({
   decoder: 'terrarium',
 });
 
-map.addDrapeLayer({
+const osm = map.addDrapeLayer({
   layerName: 'OpenStreetMap',
   layerSource: new XYZSource({
     url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
@@ -111,6 +111,12 @@ map.addDrapeLayer({
     maxZoom: 19,
   }),
 });
+
+// The ground is a stack of coats: imagery at the bottom, analyses above it.
+// A new map starts with a hillshade coat.
+map.activateDrapeLayer(osm);
+map.addAnalysisLayer({ analysis: 'slope', layerDisplay: { opacity: 0.6 } });
+map.addAnalysisLayer({ analysis: 'contours', params: { interval: 50 } });
 
 map.start();
 ```
@@ -184,6 +190,7 @@ The defaults fit a typical view in well under the tile budget at any screen size
 | `enabled` | `boolean` | `true` | Show compass + layer panel |
 | `compassPosition` | `UICorner` | `'top-right'` | Compass widget corner |
 | `layerPosition` | `UICorner` | `'bottom-right'` | Layer panel corner |
+| `legendPosition` | `UICorner \| false` | `'bottom-left'` | Corner of the legend for the visible analyses, or `false` for none |
 | `glass` | `boolean` | `false` | Frosted-glass controls (translucent, map blurred behind); costs some GPU time while the map redraws |
 
 The controls open on mouse hover, on a tap (touch screens; a tap elsewhere closes them) and with the keyboard (Tab to a control, Escape to close). On a touch screen the first tap on the compass opens its panel and the next one resets the orientation. On narrow maps the compass panel drops its Map and Viewport sections and the layer panel shrinks to fit.
@@ -244,44 +251,21 @@ Only one base layer is active at a time. The active base layer provides elevatio
 | `layerSource` | `TileSource` | *required* | Tile source instance (`XYZSource`, `WMTSSource`, etc.) |
 | `decoder` | `DecoderName \| ElevationDecoder` | `'terrain-rgb'` | Elevation decoder |
 | `layerDisplay` | `BaseLayerDisplay` | `{}` | `{ visible?, exaggeration? }` (`visible: true` activates the layer on add) |
-| `terrainDisplay` | `TerrainDisplay` | `{}` | Isoline, color ramp defaults (see below) |
 | `layerAttribution` | `string` | source attribution | Attribution text |
 | `minZoom` | `number` | `0` | Minimum zoom level |
 | `maxZoom` | `number` | `22` | Maximum zoom level (≤ 22) |
 
-##### TerrainDisplay
-
-| Option | Type | Default | Description |
-|---|---|---|---|
-| `isoplethInterval` | `number` | `100` | Contour line spacing in meters |
-| `isolineStrength` | `number` | `1.5` | Contour line thickness |
-| `isolineColor` | `[r, g, b]` | `[0.12, 0.08, 0.04]` | Contour color (0-1 each) |
-| `rampInterpolationRange` | `[min, max] \| 'auto'` | `[0, 4000]` | Elevation range for color mapping; `'auto'` fits the visible data |
-| `slopeRange` | `[min, max]` | `[0, 60]` | Slope range in degrees for slope coloring |
-| `rampDefaultElevation` | `ColorRamp` | `'hypsometric'` | Default ramp for elevation mode |
-| `rampDefaultSlope` | `ColorRamp` | `'viridis'` | Default ramp for slope mode |
-| `rampDefaultAspect` | `ColorRamp` | `'cyclic'` | Default ramp for aspect mode |
-
 #### Drape Layers
 
-Drape layers render raster imagery onto the terrain mesh. Only one drape (external or BaseDrape) is active at a time.
+Drape layers render raster imagery onto the terrain. One drape is active at a time: it forms the **imagery coat** at the bottom of the coat stack.
 
 | Method | Returns | Description |
 |---|---|---|
-| `addDrapeLayer(options)` | `LayerHandle` | Add an imagery overlay layer |
+| `addDrapeLayer(options)` | `LayerHandle` | Register an imagery layer (inactive until activated) |
 | `removeDrapeLayer(handle)` | `this` | Remove a drape layer |
-| `activateDrapeLayer(handle)` | `this` | Activate an external drape |
-| `activateBaseDrape(mode?)` | `this` | Switch to elevation-derived visualization |
-| `setBaseDrapeMode(mode)` | `this` | Change BaseDrape mode |
-| `getBaseDrapeMode()` | `BaseDrapeMode` | Get current BaseDrape mode |
-| `getActiveDrapeId()` | `string \| null` | Active drape ID (`'__base_drape__'` for BaseDrape) |
-| `isBaseDrapeActive()` | `boolean` | Check if BaseDrape is active |
-| `setDrapeOpacity(handle, opacity)` | `this` | Set drape opacity (0-1) |
-| `getDrapeOpacity(handle)` | `number` | Get drape opacity |
-| `setDrapeBlendMode(mode)` | `this` | Set active drape blend mode |
-| `getDrapeBlendMode()` | `BlendMode` | Get active drape blend mode |
-| `setHillshadeStrength(value)` | `this` | Set hillshade blend strength (0-1) |
-| `getHillshadeStrength()` | `number` | Get hillshade strength |
+| `activateDrapeLayer(handle)` | `this` | Make a drape the imagery coat (replaces the active one) |
+| `deactivateDrapeLayer()` | `this` | Remove the imagery coat (the layer stays registered) |
+| `getActiveDrapeId()` | `string \| null` | Active drape ID |
 | `getDrapeLayers()` | `DrapeLayer[]` | Get all registered drape layers |
 
 ##### DrapeLayerOptions
@@ -290,49 +274,93 @@ Drape layers render raster imagery onto the terrain mesh. Only one drape (extern
 |---|---|---|---|
 | `layerName` | `string` | *required* | Display name |
 | `layerSource` | `TileSource` | *required* | Tile source instance |
-| `lodOffset` | `1 \| 2 \| 3` | — | *Deprecated, ignored*: imagery detail follows `mapDisplay.drapeSlotSize` |
-| `layerDisplay` | `DrapeLayerDisplay` | `{}` | `{ visible?, opacity?, blendMode?, hillshadeStrength? }` |
+| `layerDisplay` | `DrapeLayerDisplay` | `{}` | `{ visible?, opacity?, blendMode? }` |
 | `layerAttribution` | `string` | source attribution | Attribution text |
 | `minZoom` | `number` | `0` | Minimum zoom level |
 | `maxZoom` | `number` | `22` | Maximum zoom level |
 
-##### BaseDrapeMode
+#### Analysis Layers
 
-Elevation-derived visualization modes:
+An analysis layer is a coat computed from the terrain: elevation, slope, aspect, contours or hillshade (or a kind you register). Any number can be stacked over the imagery, each with opacity and a blend mode. Kinds that map a value (elevation, slope, aspect) use a color **ramp** and have a legend; contours and hillshade produce a color directly.
 
-| Mode | Description |
-|---|---|
-| `'wireframe'` | Mesh wireframe (normals-colored or flat white) |
-| `'elevation'` | Elevation-colored with lighting |
-| `'slope'` | Slope angle in degrees (true scale, unaffected by exaggeration) |
-| `'aspect'` | Downslope bearing (0° = north), flat ground in neutral gray |
-| `'contours'` | Elevation coloring with contour line overlay |
+| Method | Returns | Description |
+|---|---|---|
+| `addAnalysisLayer(options)` | `LayerHandle` | Add a coat. Value kinds go in just above the imagery and the other value coats; contours and hillshade go on top |
+| `removeAnalysisLayer(handle)` | `this` | Remove the coat |
+| `setAnalysisParams(handle, params)` | `this` | Merge parameters (see the kind's parameters below) |
+| `getAnalysisParams(handle)` | `object \| null` | Current parameters |
+| `setAnalysisRamp(handle, ramp)` | `this` | Ramp of a value kind: a built-in name or stops / classes |
+| `getAnalysisRamp(handle)` | `Ramp \| undefined` | Current ramp |
+| `getLegend(handle)` | `LegendSpec \| null` | Legend of a value coat (title, unit, domain, stops or classes) |
+| `getLegends()` | `LegendSpec[]` | Legends of the visible value coats, top first |
+| `getAnalysisLayers()` | `AnalysisLayer[]` | All analysis layers |
+
+##### AnalysisLayerOptions
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `analysis` | `string` | *required* | Kind: `'elevation' \| 'slope' \| 'aspect' \| 'contours' \| 'hillshade'` or a registered id |
+| `layerName` | `string` | the kind's label | Display name |
+| `params` | `object` | kind defaults | Parameters (below) |
+| `ramp` | `Ramp` | kind default | Color ramp (value kinds) |
+| `layerDisplay` | `AnalysisLayerDisplay` | `{}` | `{ visible?, opacity?, blendMode? }` |
+
+##### Built-in analyses
+
+| Kind | Parameters | Ramp | Default display |
+|---|---|---|---|
+| `'elevation'` | `range: [min, max] \| 'auto'` (m; `'auto'` fits the visible data) | `'hypsometric'` | normal, opacity 1 |
+| `'slope'` | `range: [min, max]` (degrees) | `'viridis'` | normal, opacity 1 |
+| `'aspect'` | — (0° = north; flat ground fades out) | `'cyclic'` | normal, opacity 1 |
+| `'contours'` | `interval` (m), `thickness` (px), `index` (every Nth line bolder, 0 = off), `color: [r, g, b]` | — | normal, opacity 0.75 |
+| `'hillshade'` | `ambient` (light on slopes facing away from the sun, 0–1) | — | multiply, opacity 0.6 |
+
+A new map starts with a hillshade coat. Slope and aspect are true-scale (unaffected by exaggeration).
+
+```ts
+const slope = map.addAnalysisLayer({
+  analysis: 'slope',
+  ramp: { type: 'classes', breaks: [30, 35, 40, 45],
+          colors: [[0.9, 0.9, 0.9], [1, 1, 0], [1, 0.6, 0], [1, 0, 0], [0.5, 0, 0.5]] },
+  layerDisplay: { opacity: 0.7 },
+});
+map.setAnalysisParams(slope, { range: [0, 60] });
+map.getLegend(slope); // { type: 'classes', classes: [{ color, label: '< 30°' }, …] }
+```
+
+##### Custom analyses
+
+`registerAnalysis(descriptor)` adds a kind. The descriptor's `glsl` defines `vec4 analysis_<id>(Surface s, vec4 p0, vec4 p1)`; `s.h` is the elevation in meters, `s.n` the true-scale unit normal (x east, y north, z up), `s.fw` the screen-space derivative of `s.h`, and `uSunDirection` the sun. A value kind (with a `ramp`) returns the normalized value in `.x` and the alpha in `.w`; a color kind returns `rgb` and alpha. `params` is the schema the panel renders (`range`, `span`, `select`, `color`, `boolean`), `pack(params, domain)` fills `p0`/`p1`, `domain(params, auto)` gives the ramp's value range. See `src/analysis/builtins/` for examples.
+
+#### Coat Stack
+
+| Method | Returns | Description |
+|---|---|---|
+| `getLayerStack()` | `(DrapeLayer \| AnalysisLayer)[]` | The coats in drawing order, bottom first |
+| `moveLayer(handle, index)` | `this` | Move a coat (0 = bottom) |
+| `setLayerVisible(handle, visible)` | `this` | Show or hide a coat |
+| `setLayerOpacity(handle, opacity)` | `this` | Opacity 0–1 (`setDrapeOpacity` is an alias) |
+| `getLayerOpacity(handle)` | `number` | |
+| `setLayerBlendMode(handle, mode)` | `this` | `'normal' \| 'multiply' \| 'screen' \| 'softlight'` |
+| `getLayerBlendMode(handle)` | `BlendMode` | |
+
+At most 6 coats are drawn (the lowest visible ones). The layer panel's *Overlay* row opens the stack: visibility, order, removal and each coat's settings, rendered from its parameter schema.
 
 #### Visualization
 
 | Method | Returns | Description |
 |---|---|---|
-| `setColorRamp(ramp)` | `this` | Set color ramp for current BaseDrape mode |
-| `getColorRamp()` | `ColorRamp` | Get current color ramp |
-| `setElevationRange(range)` | `this` | Elevation ramp range `[min, max]` in meters, or `'auto'` |
-| `getElevationRange()` | `[min, max] \| 'auto'` | Get elevation ramp range |
-| `setSlopeRange(min, max)` | `this` | Slope ramp range in degrees |
-| `getSlopeRange()` | `[min, max]` | Get slope ramp range |
 | `setExaggeration(value)` | `this` | Set vertical exaggeration on active base layer |
 | `setExaggeration(handle, value)` | `this` | Set exaggeration on a specific base layer |
 | `getExaggeration()` | `number` | Get exaggeration factor |
-| `setIsolineInterval(meters)` | `this` | Set contour line spacing |
-| `getIsolineInterval()` | `number` | Get contour interval |
-| `setIsolineThickness(value)` | `this` | Set contour line thickness |
-| `getIsolineThickness()` | `number` | Get contour thickness |
-| `setIsolineColor(r, g, b)` | `this` | Set contour color (RGB, 0-1 each) |
-| `getIsolineColor()` | `[r, g, b]` | Get contour color |
-| `setWireframeWhite(white)` | `this` | Toggle wireframe flat-white mode |
-| `getWireframeWhite()` | `boolean` | Get wireframe white state |
-| `setSunAzimuth(degrees)` | `this` | Set sun azimuth for hillshade lighting (default 315°, north-west) |
-| `getSunAzimuth()` | `number` | Get sun azimuth |
-| `setSunAltitude(degrees)` | `this` | Set sun altitude for hillshade lighting (default 45°) |
-| `getSunAltitude()` | `number` | Get sun altitude |
+| `setWireframe(enabled)` | `this` | Draw the mesh as a wireframe (colored by the coats) |
+| `getWireframe()` | `boolean` | |
+| `setWireframeWhite(white)` | `this` | Flat-white wireframe |
+| `getWireframeWhite()` | `boolean` | |
+| `setSunAzimuth(degrees)` | `this` | Sun azimuth for hillshade (default 315°, north-west) |
+| `getSunAzimuth()` | `number` | |
+| `setSunAltitude(degrees)` | `this` | Sun altitude for hillshade (default 45°) |
+| `getSunAltitude()` | `number` | |
 
 ##### ColorRamp
 
@@ -343,6 +371,9 @@ Elevation-derived visualization modes:
 | `'inferno'` | Black, purple, orange, white (high contrast) |
 | `'grayscale'` | Black to white |
 | `'cyclic'` | Hue wheel for circular data (aspect default) |
+| `'diverging'` | Blue, white, red |
+
+A ramp can also be given as data: `{ type: 'continuous', stops: [[t, [r, g, b]], …] }` with `t` in 0–1 over the value range, or `{ type: 'classes', breaks: [...], colors: [...], labels? }` with breaks in the analysis' units (one more color than breaks). Legends, the panel preview and the shader all read the same spec.
 
 #### Camera
 
@@ -536,9 +567,10 @@ interface WorldPoint { x: number; y: number }
 interface TileCoord { z: number; x: number; y: number }
 interface TileBounds { west: number; south: number; east: number; north: number }
 
-type BaseDrapeMode = 'wireframe' | 'elevation' | 'slope' | 'aspect' | 'contours';
-type ColorRamp = 'hypsometric' | 'viridis' | 'inferno' | 'grayscale' | 'cyclic';
-type BlendMode = 'normal' | 'hillshade' | 'softlight';
+type ColorRamp = 'hypsometric' | 'viridis' | 'inferno' | 'grayscale' | 'cyclic' | 'diverging';
+type Ramp = ColorRamp | { type: 'continuous'; stops: [number, RGB][] } | { type: 'classes'; breaks: number[]; colors: RGB[]; labels?: string[] };
+type BlendMode = 'normal' | 'multiply' | 'screen' | 'softlight';
+interface LegendSpec { id: string; title: string; unit?: string; type: 'continuous' | 'classes'; domain: [number, number]; stops?: [number, RGB][]; classes?: { color: RGB; label: string }[] }
 type DecoderName = 'terrain-rgb' | 'mapbox' | 'terrarium';
 type UICorner = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right';
 

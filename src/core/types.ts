@@ -54,6 +54,11 @@ export interface GuiDisplayOptions {
   compassPosition?: UICorner;
   layerPosition?: UICorner;
   /**
+   * Corner of the legend for the visible analyses, or `false` for none.
+   * Default: the bottom corner the layer panel doesn't use.
+   */
+  legendPosition?: UICorner | false;
+  /**
    * Frosted-glass compass and layer controls, including the menus that open
    * from them: translucent, with the map blurred behind. Costs some GPU time
    * while the map redraws, so it is off by default. Default false.
@@ -131,16 +136,10 @@ export interface ResolvedTreeletOptions {
 
 // === Enums / Unions ===
 
-/** Virtual BaseDrape visualization mode derived from the base layer's elevation data. */
-export type BaseDrapeMode = 'wireframe' | 'elevation' | 'slope' | 'aspect' | 'contours';
+export type { ColorRamp } from '../analysis/types';
 
-/** Internal shader mode index type (not user-facing). */
-export type ShaderMode = 'base' | 'elevation' | 'slope' | 'aspect' | 'texture';
-
-/** Color ramp for elevation-based visualizations. `cyclic` suits circular data such as aspect. */
-export type ColorRamp = 'hypsometric' | 'viridis' | 'inferno' | 'grayscale' | 'cyclic';
-
-export type BlendMode = 'normal' | 'hillshade' | 'softlight';
+/** How a coat (imagery or analysis) combines with the coats below it. */
+export type { CoatBlendMode as BlendMode } from '../analysis/types';
 
 /** Corner position for UI components. */
 export type UICorner = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right';
@@ -156,7 +155,10 @@ export interface TreeletEventMap {
   tileerror: { coord: TileCoord; layer: 'elevation' | 'drape'; error: string };
   layeradd: { id: string };
   layerremove: { id: string };
+  /** The coat stack, a layer's parameters or display, or the active base layer changed. */
   layerchange: Record<string, never>;
+  /** The visible elevation range (used by 'auto' ramp domains) changed. */
+  rangechange: { min: number; max: number };
   ready: Record<string, never>;
 }
 

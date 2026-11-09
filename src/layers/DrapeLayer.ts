@@ -2,7 +2,7 @@
 // treelet.js - Drape Layer
 //
 // A drape layer binds a raster imagery source and per-layer display settings
-// (opacity, blend mode, hillshade strength) to the terrain. Fetching and
+// (opacity, blend mode) to the terrain. Fetching and
 // GPU residency are handled by TerrainRenderer + DrapeAtlas — the
 // layer itself is a thin configuration + identity object.
 // ============================================================================
@@ -17,7 +17,6 @@ import type {
 
 /** Auto-incrementing ID counter for drape layers. */
 let nextDrapeLayerId = 0;
-let lodOffsetWarned = false;
 
 /** Most source zoom levels finer than the terrain tile one slot composites (4×4 tiles). */
 const MAX_SLOT_ZOOM_ROOM = 2;
@@ -27,7 +26,7 @@ const MAX_SLOT_ZOOM_ROOM = 2;
  *
  * Each drape layer:
  *   - References a tile source (XYZ, WMTS, or WMS)
- *   - Carries per-layer display settings (opacity, blend mode, hillshade)
+ *   - Carries per-layer display settings (opacity, blend mode)
  *   - Picks the source zoom for each terrain tile (as fine as its slot holds)
  *
  * Multiple drape layers may be registered; TerrainRenderer activates one at
@@ -42,11 +41,6 @@ export class DrapeLayer implements Layer {
   readonly attribution: string;
   readonly minZoom: number;
   readonly maxZoom: number;
-  /**
-   * @deprecated Ignored: drape tiles fetch as much detail as their slot holds
-   * (see `mapDisplay.drapeSlotSize`). Kept for compatibility.
-   */
-  readonly lodOffset: number;
 
   /** Per-layer display settings. */
   readonly display: ResolvedDrapeLayerDisplay;
@@ -67,22 +61,13 @@ export class DrapeLayer implements Layer {
     this.attribution = options.layerAttribution ?? options.layerSource.attribution ?? '';
     this.minZoom = options.minZoom ?? 0;
     this.maxZoom = Math.min(options.maxZoom ?? 22, 22);
-    this.lodOffset = Math.max(1, Math.min(3, options.lodOffset ?? 1));
-    if (this.lodOffset > 1 && !lodOffsetWarned) {
-      lodOffsetWarned = true;
-      console.warn(
-        'treelet: DrapeLayerOptions.lodOffset is deprecated and ignored. Drape tiles now fetch as much ' +
-        'detail as their slot holds; raise mapDisplay.drapeSlotSize (e.g. 512) for sharper imagery.',
-      );
-    }
 
     // Resolve display settings with defaults
     const ld = options.layerDisplay;
     this.display = {
       visible: ld?.visible ?? true,
       opacity: ld?.opacity ?? 1.0,
-      blendMode: ld?.blendMode ?? 'hillshade',
-      hillshadeStrength: ld?.hillshadeStrength ?? 0.5,
+      blendMode: ld?.blendMode ?? 'normal',
     };
     this.visible = this.display.visible;
   }

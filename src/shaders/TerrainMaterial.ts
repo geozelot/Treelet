@@ -2,8 +2,10 @@
 // treelet.js - Instanced Terrain Material
 //
 // ShaderMaterial for the instanced terrain renderer. Assembles modular GLSL
-// includes into vertex/fragment shaders. One shared grid mesh is instanced
-// across all visible tiles via per-instance attributes.
+// includes plus the registered analyses into vertex/fragment shaders. One
+// shared grid mesh is instanced across all visible tiles via per-instance
+// attributes. The ground's color is a stack of coats (imagery, analyses)
+// described by uniform arrays, see includes/coats.glsl.
 // ============================================================================
 
 import {
@@ -11,65 +13,59 @@ import {
   FrontSide,
   Vector2,
   Vector3,
+  Vector4,
   type IUniform,
   type Texture,
 } from 'three';
-import type { ShaderMode, BlendMode, ColorRamp } from '../core/types';
+import type { CoatBlendMode, Vec4 } from '../analysis/types';
+import { MAX_COATS } from '../analysis/registry';
 
 // ==== Import modular GLSL ====
 import declarations from './glsl/includes/declarations.glsl?raw';
 import elevationSampling from './glsl/includes/elevation_sampling.glsl?raw';
 import surface from './glsl/includes/surface.glsl?raw';
-import colorRamps from './glsl/includes/color_ramps.glsl?raw';
-import shaderModes from './glsl/includes/shader_modes.glsl?raw';
-import drapeBlending from './glsl/includes/drape_blending.glsl?raw';
-import isolineOverlay from './glsl/includes/isoline_overlay.glsl?raw';
+import coats from './glsl/includes/coats.glsl?raw';
 import vertexMain from './glsl/terrain.vert.glsl?raw';
 import fragmentMain from './glsl/terrain.frag.glsl?raw';
 
 // ==== Assemble shaders from modular GLSL ====
 // Fragment includes reference uniforms/varyings directly, so declarations
-// must come first to satisfy GLSL declaration-before-use.
+// must come first to satisfy GLSL declaration-before-use. The analyses
+// (from the registry) need Surface and precede the coat loop that calls them.
 
 const vertexShader = [
   elevationSampling,
   vertexMain,
 ].join('\n');
 
-const fragmentShader = [
-  declarations,
-  elevationSampling,
-  surface,
-  colorRamps,
-  shaderModes,
-  drapeBlending,
-  isolineOverlay,
-  fragmentMain,
-].join('\n');
+export function buildFragmentShader(analysisGlsl: string): string {
+  return [
+    declarations,
+    elevationSampling,
+    surface,
+    analysisGlsl,
+    coats,
+    fragmentMain,
+  ].join('\n');
+}
 
-// ==== Mode / ramp indices ====
-
-const SHADER_MODE_INDEX: Record<ShaderMode, number> = {
-  base: 0,
-  elevation: 1,
-  slope: 2,
-  aspect: 3,
-  texture: 4,
-};
-
-const COLOR_RAMP_INDEX: Record<ColorRamp, number> = {
-  hypsometric: 0,
-  viridis: 1,
-  inferno: 2,
-  grayscale: 3,
-  cyclic: 4,
-};
-
-const BLEND_MODE_INDEX: Record<BlendMode, number> = {
+const BLEND_MODE_INDEX: Record<CoatBlendMode, number> = {
   normal: 0,
-  hillshade: 1,
-  softlight: 2,
+  multiply: 1,
+  screen: 2,
+  softlight: 3,
 };
+
+/** One coat as the shader receives it. */
+export interface PackedCoat {
+  kind: number;
+  blendMode: CoatBlendMode;
+  opacity: number;
+  /** Ramp texture row, or -1 for kinds that produce a color. */
+  rampRow: number;
+  p0: Vec4;
+  p1: Vec4;
+}
 
 /** Default sun: from the north-west (cartographic convention), 45° altitude. */
 const DEFAULT_SUN = new Vector3(-0.5, 0.5, 0.7071).normalize();
@@ -81,10 +77,8 @@ export interface TerrainMaterialOptions {
   worldScale: number;
   slotSize: number;
   gridSize: number;
-  mode?: ShaderMode;
-  colorRamp?: ColorRamp;
-  minElevation?: number;
-  maxElevation?: number;
+  /** GLSL of the registered analyses (analysisShaderSource()). */
+  analysisGlsl: string;
 }
 
 /**
@@ -102,26 +96,22 @@ export function createTerrainMaterial(options: TerrainMaterialOptions): ShaderMa
     uOriginY: { value: 0.0 },
     uCameraLocal: { value: new Vector3() },
     uRefZ: { value: 0.0 },
-    // Mode/ramp
-    uMode: { value: SHADER_MODE_INDEX[options.mode ?? 'elevation'] },
-    uColorRamp: { value: COLOR_RAMP_INDEX[options.colorRamp ?? 'hypsometric'] },
-    uMinElevation: { value: options.minElevation ?? 0 },
-    uMaxElevation: { value: options.maxElevation ?? 4000 },
-    uSlopeMin: { value: 0 },
-    uSlopeMax: { value: 60 },
+    // Lighting / wireframe
     uSunDirection: { value: DEFAULT_SUN.clone() },
     uBaseWhite: { value: false },
-    // Isoline
-    uIsolineEnabled: { value: false },
-    uIsolineInterval: { value: 100 },
-    uIsolineThickness: { value: 1.5 },
-    uIsolineColor: { value: new Vector3(0.12, 0.08, 0.04) },
+    // Coat stack
+    uCoatCount: { value: 0 },
+    uCoatKind: { value: new Array<number>(MAX_COATS).fill(0) },
+    uCoatBlend: { value: new Array<number>(MAX_COATS).fill(0) },
+    uCoatOpacity: { value: new Array<number>(MAX_COATS).fill(1) },
+    uCoatRamp: { value: new Array<number>(MAX_COATS).fill(-1) },
+    uCoatP0: { value: Array.from({ length: MAX_COATS }, () => new Vector4()) },
+    uCoatP1: { value: Array.from({ length: MAX_COATS }, () => new Vector4()) },
+    uRampTex: { value: null },
+    uRampSize: { value: new Vector2(1, 1) },
     // Drape
     uDrapeAtlas: { value: null },
-    uDrapeOpacity: { value: 1.0 },
     uHasDrape: { value: 0 },
-    uDrapeBlendMode: { value: BLEND_MODE_INDEX.hillshade },
-    uHillshadeStrength: { value: 0.5 },
     uDrapePlaceholder: { value: new Vector3(1.0, 1.0, 1.0) },
     // Distance haze toward the horizon (sRGB color; camera distances)
     uFogColor: { value: new Vector3(1.0, 1.0, 1.0) },
@@ -130,55 +120,60 @@ export function createTerrainMaterial(options: TerrainMaterialOptions): ShaderMa
 
   return new ShaderMaterial({
     vertexShader,
-    fragmentShader,
+    fragmentShader: buildFragmentShader(options.analysisGlsl),
     uniforms,
     side: FrontSide,
   });
+}
+
+/** Recompile with a new set of analyses (after a registration). */
+export function setTerrainAnalysisSource(material: ShaderMaterial, analysisGlsl: string): void {
+  material.fragmentShader = buildFragmentShader(analysisGlsl);
+  material.needsUpdate = true;
 }
 
 // ==== Setter functions ====
 // Each returns true when a value actually changed, so callers can request a
 // render only when needed.
 
-export function setTerrainMode(material: ShaderMaterial, mode: ShaderMode): boolean {
-  const v = SHADER_MODE_INDEX[mode];
-  if (material.uniforms.uMode.value === v) return false;
-  material.uniforms.uMode.value = v;
-  return true;
+/** Upload the coat stack (bottom first; at most MAX_COATS). */
+export function setTerrainCoats(material: ShaderMaterial, stack: readonly PackedCoat[]): boolean {
+  const u = material.uniforms;
+  const n = Math.min(stack.length, MAX_COATS);
+  let changed = false;
+  if (u.uCoatCount.value !== n) { u.uCoatCount.value = n; changed = true; }
+  const kind = u.uCoatKind.value as number[];
+  const blend = u.uCoatBlend.value as number[];
+  const opacity = u.uCoatOpacity.value as number[];
+  const ramp = u.uCoatRamp.value as number[];
+  const p0 = u.uCoatP0.value as Vector4[];
+  const p1 = u.uCoatP1.value as Vector4[];
+  for (let i = 0; i < n; i++) {
+    const c = stack[i];
+    const b = BLEND_MODE_INDEX[c.blendMode] ?? 0;
+    const o = Math.max(0, Math.min(1, c.opacity));
+    if (kind[i] !== c.kind) { kind[i] = c.kind; changed = true; }
+    if (blend[i] !== b) { blend[i] = b; changed = true; }
+    if (opacity[i] !== o) { opacity[i] = o; changed = true; }
+    if (ramp[i] !== c.rampRow) { ramp[i] = c.rampRow; changed = true; }
+    if (!vec4Equals(p0[i], c.p0)) { p0[i].fromArray(c.p0); changed = true; }
+    if (!vec4Equals(p1[i], c.p1)) { p1[i].fromArray(c.p1); changed = true; }
+  }
+  return changed;
 }
 
-export function setTerrainColorRamp(material: ShaderMaterial, ramp: ColorRamp): boolean {
-  const v = COLOR_RAMP_INDEX[ramp] ?? 0;
-  if (material.uniforms.uColorRamp.value === v) return false;
-  material.uniforms.uColorRamp.value = v;
-  return true;
+function vec4Equals(v: Vector4, a: Vec4): boolean {
+  return v.x === a[0] && v.y === a[1] && v.z === a[2] && v.w === a[3];
 }
 
-export function setTerrainIsolineEnabled(material: ShaderMaterial, enabled: boolean): boolean {
-  if (material.uniforms.uIsolineEnabled.value === enabled) return false;
-  material.uniforms.uIsolineEnabled.value = enabled;
-  return true;
+export function setTerrainRampTexture(material: ShaderMaterial, texture: Texture | null, width: number, height: number): void {
+  material.uniforms.uRampTex.value = texture;
+  (material.uniforms.uRampSize.value as Vector2).set(width, height);
 }
 
 export function setTerrainWireframe(material: ShaderMaterial, enabled: boolean): boolean {
   if (material.wireframe === enabled) return false;
   material.wireframe = enabled;
-  return true;
-}
-
-export function setTerrainElevationRange(material: ShaderMaterial, min: number, max: number): boolean {
-  const u = material.uniforms;
-  if (u.uMinElevation.value === min && u.uMaxElevation.value === max) return false;
-  u.uMinElevation.value = min;
-  u.uMaxElevation.value = max;
-  return true;
-}
-
-export function setTerrainSlopeRange(material: ShaderMaterial, min: number, max: number): boolean {
-  const u = material.uniforms;
-  if (u.uSlopeMin.value === min && u.uSlopeMax.value === max) return false;
-  u.uSlopeMin.value = min;
-  u.uSlopeMax.value = max;
   return true;
 }
 
@@ -195,27 +190,6 @@ export function setTerrainSunDirection(material: ShaderMaterial, dir: Vector3): 
   return true;
 }
 
-export function setTerrainIsolineSettings(material: ShaderMaterial, interval: number, thickness?: number): boolean {
-  const u = material.uniforms;
-  let changed = false;
-  if (u.uIsolineInterval.value !== interval) {
-    u.uIsolineInterval.value = interval;
-    changed = true;
-  }
-  if (thickness !== undefined && u.uIsolineThickness.value !== thickness) {
-    u.uIsolineThickness.value = thickness;
-    changed = true;
-  }
-  return changed;
-}
-
-export function setTerrainIsolineColor(material: ShaderMaterial, r: number, g: number, b: number): boolean {
-  const v = material.uniforms.uIsolineColor.value as Vector3;
-  if (v.x === r && v.y === g && v.z === b) return false;
-  v.set(r, g, b);
-  return true;
-}
-
 export function setTerrainBaseWhite(material: ShaderMaterial, white: boolean): boolean {
   if (material.uniforms.uBaseWhite.value === white) return false;
   material.uniforms.uBaseWhite.value = white;
@@ -226,27 +200,12 @@ export function setTerrainAtlas(material: ShaderMaterial, texture: Texture | nul
   material.uniforms.uElevAtlas.value = texture;
 }
 
-export function setTerrainDrape(material: ShaderMaterial, texture: Texture | null, opacity: number = 1.0): boolean {
+export function setTerrainDrape(material: ShaderMaterial, texture: Texture | null): boolean {
   const u = material.uniforms;
   const has = texture ? 1 : 0;
-  if (u.uDrapeAtlas.value === texture && u.uDrapeOpacity.value === opacity && u.uHasDrape.value === has) return false;
+  if (u.uDrapeAtlas.value === texture && u.uHasDrape.value === has) return false;
   u.uDrapeAtlas.value = texture;
-  u.uDrapeOpacity.value = opacity;
   u.uHasDrape.value = has;
-  return true;
-}
-
-export function setTerrainDrapeBlendMode(material: ShaderMaterial, mode: BlendMode): boolean {
-  const v = BLEND_MODE_INDEX[mode] ?? 0;
-  if (material.uniforms.uDrapeBlendMode.value === v) return false;
-  material.uniforms.uDrapeBlendMode.value = v;
-  return true;
-}
-
-export function setTerrainHillshadeStrength(material: ShaderMaterial, strength: number): boolean {
-  const v = Math.max(0, Math.min(1, strength));
-  if (material.uniforms.uHillshadeStrength.value === v) return false;
-  material.uniforms.uHillshadeStrength.value = v;
   return true;
 }
 

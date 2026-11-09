@@ -1,75 +1,84 @@
 // ============================================================================
 // treelet.js - TreeletPanel Web Component
 //
-// <treelet-panel> - layer/overlay selection panel (slides out from layer box).
+// <treelet-panel> - layer selection panel (slides out from layer box).
 //
 // Layout:
 //   Each column: active section (name + gear → settings) + selector header
 //
-//   Terrain  - active base layer with gear → exaggeration slider
+//   Terrain  - active base layer with gear → exaggeration, light, mesh
 //              header → dropdown of other base layers (header is a
 //              plain label when there is only one)
 //
-//   Overlay  - active overlay with gear → settings:
-//                Terrain modes:
-//                  Wireframe  (gear → normals/white toggle)
-//                  separator
-//                  Elevation  (gear → color ramp picker)
-//                  Slope      (gear → color ramp picker)
-//                  Aspect     (gear → color ramp picker)
-//                  Contours   (gear → color, thickness, interval)
-//                External drape → opacity slider
+//   Overlay  - the coat stack (imagery + analyses) with gear → stack manager:
+//                one row per coat, top first: visibility, name (→ its
+//                settings), move up/down, remove
+//                coat settings: opacity, blend, the analysis' parameters
+//                (rendered from its schema) and ramp
 //              header → dropdown:
-//                Analysis group (terrain modes, always first)
-//                Layers group (external drapes, if present)
+//                Analysis group (registered analyses; adds a coat)
+//                Layers group (drapes not active; swaps the imagery)
 //
 // A dropdown opens while the mouse is over its header or list, or after a
 // tap / Enter on the header (until a tap elsewhere, Escape, or focus leaves).
 // ============================================================================
 
 import { panelStyles } from './styles';
-import { BASE_DRAPE_ID } from '../core/DisplayController';
 import { BaseElement, escapeHtml } from './dom';
 import type { Treelet } from '../core/Treelet';
-import type { BaseDrapeMode, BlendMode, ColorRamp } from '../core/types';
+import type { BlendMode } from '../core/types';
 import type { BaseLayer } from '../layers/BaseLayer';
 import type { DrapeLayer } from '../layers/DrapeLayer';
+import type { AnalysisLayer } from '../layers/AnalysisLayer';
+import type { StackLayer } from '../layers/LayerRegistry';
+import type { ParamSpec, RGB } from '../analysis/types';
+import { listAnalyses } from '../analysis/registry';
+import { BUILTIN_RAMPS, BUILTIN_RAMP_NAMES, isRampName, rampGradientCss } from '../analysis/ramps';
 
-/** Drape blend mode metadata for the toggle buttons. */
+/** Settings-row id of the coat stack (the Overlay column's active row). */
+const STACK_ID = '__stack__';
+
 const BLEND_MODES: { id: BlendMode; label: string }[] = [
-  { id: 'normal',    label: 'Flat' },
-  { id: 'hillshade', label: 'Hillshade' },
+  { id: 'normal',    label: 'Normal' },
+  { id: 'multiply',  label: 'Multiply' },
+  { id: 'screen',    label: 'Screen' },
   { id: 'softlight', label: 'Soft Light' },
 ];
-
-/** Color ramp metadata with CSS gradient for the indicator strip. */
-const RAMP_META: { id: ColorRamp; label: string; gradient: string }[] = [
-  { id: 'hypsometric', label: 'Hypsometric', gradient: 'linear-gradient(to right, #264d1e, #8fa35a, #d4b06a, #f5e6c8, #fff)' },
-  { id: 'viridis',     label: 'Viridis',     gradient: 'linear-gradient(to right, #440154, #31688e, #35b779, #fde725)' },
-  { id: 'inferno',     label: 'Inferno',     gradient: 'linear-gradient(to right, #000004, #57106e, #bc3754, #f98e09, #fcffa4)' },
-  { id: 'grayscale',   label: 'Grayscale',   gradient: 'linear-gradient(to right, #000, #fff)' },
-  { id: 'cyclic',      label: 'Cyclic',      gradient: 'linear-gradient(to right, #f26b6b, #c7c25a, #5ad16f, #5ab7c7, #8a6bf2, #f26b6b)' },
-];
-
-/** Contour color presets: label → [r, g, b] in 0–1 range. */
-const CONTOUR_COLORS: { label: string; rgb: [number, number, number]; hex: string }[] = [
-  { label: 'brown',  rgb: [0.12, 0.08, 0.04], hex: '#1f140a' },
-  { label: 'black',  rgb: [0.0,  0.0,  0.0],  hex: '#000000' },
-  { label: 'white',  rgb: [1.0,  1.0,  1.0],  hex: '#ffffff' },
-  { label: 'red',    rgb: [0.8,  0.15, 0.1],  hex: '#cc2619' },
-  { label: 'blue',   rgb: [0.1,  0.3,  0.7],  hex: '#1a4db3' },
-  { label: 'gray',   rgb: [0.45, 0.45, 0.45], hex: '#737373' },
-];
-
-/** Slider element ID prefixes - used in delegated input handler. */
-const EXAG_PREFIX = 'exag-slider-';
-const OPACITY_PREFIX = 'opacity-slider-';
 
 /** SVG gear icon (14×14). */
 const GEAR_SVG = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="2.5"/><path d="M13.3 10a1.2 1.2 0 0 0 .2 1.3l.1.1a1.4 1.4 0 1 1-2 2l-.1-.1a1.2 1.2 0 0 0-1.3-.2 1.2 1.2 0 0 0-.7 1.1v.2a1.4 1.4 0 1 1-2.9 0v-.1a1.2 1.2 0 0 0-.8-1.1 1.2 1.2 0 0 0-1.3.2l-.1.1a1.4 1.4 0 1 1-2-2l.1-.1a1.2 1.2 0 0 0 .2-1.3 1.2 1.2 0 0 0-1.1-.7h-.2a1.4 1.4 0 1 1 0-2.9h.1a1.2 1.2 0 0 0 1.1-.8 1.2 1.2 0 0 0-.2-1.3l-.1-.1a1.4 1.4 0 1 1 2-2l.1.1a1.2 1.2 0 0 0 1.3.2h.1a1.2 1.2 0 0 0 .7-1.1v-.2a1.4 1.4 0 1 1 2.9 0v.1a1.2 1.2 0 0 0 .7 1.1 1.2 1.2 0 0 0 1.3-.2l.1-.1a1.4 1.4 0 1 1 2 2l-.1.1a1.2 1.2 0 0 0-.2 1.3v.1a1.2 1.2 0 0 0 1.1.7h.2a1.4 1.4 0 1 1 0 2.9h-.1a1.2 1.2 0 0 0-1.1.7Z"/></svg>`;
 
 /** SVG chevron (10×10, pointing down; CSS turns it toward where the list opens). */
 const CHEVRON_SVG = `<svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 3.75 5 6.25 7.5 3.75"/></svg>`;
+
+/** Eye (visible) and eye-off icons (12×12). */
+const EYE_SVG = `<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 8s2.5-4.5 6.5-4.5S14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8Z"/><circle cx="8" cy="8" r="2"/></svg>`;
+const EYE_OFF_SVG = `<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 2.5l11 11"/><path d="M6.3 6.4A2 2 0 0 0 9.6 9.7"/><path d="M4.4 4.9C2.6 6.1 1.5 8 1.5 8s2.5 4.5 6.5 4.5c1.2 0 2.3-.4 3.2-1"/><path d="M7 3.6c.3 0 .7-.1 1-.1 4 0 6.5 4.5 6.5 4.5s-.7 1.3-2 2.5"/></svg>`;
+const UP_SVG = `<svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 6.25 5 3.75l2.5 2.5"/></svg>`;
+const DOWN_SVG = `<svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 3.75 5 6.25l2.5-2.5"/></svg>`;
+const CLOSE_SVG = `<svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2.5 2.5l5 5M7.5 2.5l-5 5"/></svg>`;
+
+function capitalize(s: string): string {
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+function isAnalysis(layer: StackLayer): layer is AnalysisLayer {
+  return 'descriptor' in layer;
+}
+
+function sameColor(a: RGB, b: RGB): boolean {
+  return Math.abs(a[0] - b[0]) < 0.02 && Math.abs(a[1] - b[1]) < 0.02 && Math.abs(a[2] - b[2]) < 0.02;
+}
+
+function hex(c: RGB): string {
+  const h = (v: number) => Math.round(Math.max(0, Math.min(1, v)) * 255).toString(16).padStart(2, '0');
+  return `#${h(c[0])}${h(c[1])}${h(c[2])}`;
+}
+
+function formatNumber(v: number, step: number): string {
+  const decimals = step >= 1 ? 0 : Math.min(3, Math.ceil(-Math.log10(step)));
+  return v.toFixed(decimals);
+}
 
 /**
  * <treelet-panel> - Main UI panel for treelet.js.
@@ -88,11 +97,11 @@ export class TreeletPanel extends BaseElement {
   /** Horizontal position - controls column order (from box outwards). */
   private hPos: 'left' | 'right' = 'right';
 
-  /** Which layer has its settings gear open (id or BASE_DRAPE_ID). */
+  /** Which active row has its settings gear open (base layer id or STACK_ID). */
   private settingsOpen: string | null = null;
 
-  /** Which mode entry inside Terrain overlay has its gear open. */
-  private modeSettingsOpen: BaseDrapeMode | null = null;
+  /** Which coat in the stack manager has its settings expanded. */
+  private coatOpen: string | null = null;
 
   /** Settings were just opened: the next render fades them in. */
   private settingsEntering = false;
@@ -121,6 +130,7 @@ export class TreeletPanel extends BaseElement {
     if (vPos) this.vPos = vPos;
     if (hPos) this.hPos = hPos;
     this.setAttribute('data-v', this.vPos);
+    this.setAttribute('data-h', this.hPos);
 
     // Bind delegated handlers ONCE - they survive innerHTML replacements
     if (!this.delegated) {
@@ -150,7 +160,7 @@ export class TreeletPanel extends BaseElement {
   /** Close open settings and dropdowns (called when the layer row closes). */
   resetSettings(): void {
     this.settingsOpen = null;
-    this.modeSettingsOpen = null;
+    this.coatOpen = null;
     this.hoverCol = null;
     this.pinnedCol = null;
     this.render();
@@ -172,6 +182,7 @@ export class TreeletPanel extends BaseElement {
 
   private handleClick = (e: Event): void => {
     if (!this.map) return;
+    const map = this.map;
     const target = e.target as HTMLElement;
 
     // === Sliders: just stop propagation ===
@@ -200,13 +211,12 @@ export class TreeletPanel extends BaseElement {
       const opening = this.settingsOpen !== layerId;
       this.settingsOpen = opening ? layerId : null;
       this.settingsEntering = opening;
-      this.modeSettingsOpen = null;
       this.pinnedCol = null;
       this.render();
       return;
     }
 
-    // === Dropdown layer button → activate layer ===
+    // === Dropdown entry → add an analysis, swap the imagery, or switch the base layer ===
     const layerBtn = target.closest('.layer-col-body .layer-btn[data-action="activate"]') as HTMLElement | null;
     if (layerBtn) {
       e.stopPropagation();
@@ -217,21 +227,18 @@ export class TreeletPanel extends BaseElement {
       const layerType = entry.dataset.layerType!;
       const col = (entry.closest('.has-choices') as HTMLElement | null)?.dataset.col;
 
-      this.settingsOpen = null;
-      this.modeSettingsOpen = null;
       this.pinnedCol = null;
       this.hoverCol = null;
 
       if (layerType === 'base') {
-        this.map.setActiveBaseLayer(layerId);
-      } else if (layerType === 'base-drape') {
-        this.map.activateBaseDrape();
-      } else if (layerType === 'base-drape-mode') {
-        const mode = entry.dataset.mode as BaseDrapeMode;
-        this.map.activateBaseDrape();
-        this.map.setBaseDrapeMode(mode);
+        this.settingsOpen = null;
+        map.setActiveBaseLayer(layerId);
+      } else if (layerType === 'analysis') {
+        const handle = map.addAnalysisLayer({ analysis: entry.dataset.kind! });
+        this.settingsOpen = STACK_ID;
+        this.coatOpen = handle.id;
       } else if (layerType === 'drape') {
-        this.map.activateDrapeLayer(layerId);
+        map.activateDrapeLayer(layerId);
       }
       // The map's 'layerchange' re-renders; close now in case nothing changed
       this.syncSelectors();
@@ -242,42 +249,67 @@ export class TreeletPanel extends BaseElement {
       return;
     }
 
-    // === Wireframe mode toggle ===
-    const wireBtn = target.closest('[data-action="wireframe-mode"]') as HTMLElement | null;
-    if (wireBtn) {
+    // === Stack rows ===
+    const stackRow = target.closest('.stack-row[data-layer-id]') as HTMLElement | null;
+    if (stackRow) {
       e.stopPropagation();
-      this.map.setWireframeWhite(wireBtn.dataset.value === 'white');
-      this.render();
+      const id = stackRow.dataset.layerId!;
+      const action = (target.closest('[data-action]') as HTMLElement | null)?.dataset.action;
+      if (action === 'visible') {
+        map.setLayerVisible(id, stackRow.dataset.visible !== 'true');
+      } else if (action === 'up' || action === 'down') {
+        const index = parseInt(stackRow.dataset.index!, 10);
+        map.moveLayer(id, action === 'up' ? index + 1 : index - 1);
+      } else if (action === 'remove') {
+        if (this.coatOpen === id) this.coatOpen = null;
+        if (stackRow.dataset.layerType === 'drape') map.deactivateDrapeLayer();
+        else map.removeAnalysisLayer(id);
+      } else {
+        this.coatOpen = this.coatOpen === id ? null : id;
+        this.render();
+      }
       return;
     }
 
-    // === Color ramp button ===
-    const rampBtn = target.closest('.ramp-btn') as HTMLElement | null;
-    if (rampBtn) {
+    // === Coat settings controls (inside an expanded stack row) ===
+    const control = target.closest('[data-action][data-layer-id]') as HTMLElement | null;
+    if (control) {
       e.stopPropagation();
-      this.map.setColorRamp(rampBtn.dataset.value as ColorRamp);
-      this.render();
-      return;
-    }
-
-    // === Contour color swatch ===
-    const swatch = target.closest('.color-swatch') as HTMLElement | null;
-    if (swatch) {
-      e.stopPropagation();
-      const r = parseFloat(swatch.dataset.r!);
-      const g = parseFloat(swatch.dataset.g!);
-      const b = parseFloat(swatch.dataset.b!);
-      this.map.setIsolineColor(r, g, b);
-      this.render();
-      return;
-    }
-
-    // === Blend mode toggle ===
-    const blendBtn = target.closest('[data-action="blend-mode"]') as HTMLElement | null;
-    if (blendBtn) {
-      e.stopPropagation();
-      this.map.setDrapeBlendMode(blendBtn.dataset.value as BlendMode);
-      this.render();
+      const id = control.dataset.layerId!;
+      const key = control.dataset.param ?? '';
+      const value = control.dataset.value ?? '';
+      switch (control.dataset.action) {
+        case 'blend':
+          map.setLayerBlendMode(id, value as BlendMode);
+          break;
+        case 'ramp':
+          map.setAnalysisRamp(id, value as never);
+          break;
+        case 'color':
+          map.setAnalysisParams(id, { [key]: [
+            parseFloat(control.dataset.r!), parseFloat(control.dataset.g!), parseFloat(control.dataset.b!),
+          ] });
+          break;
+        case 'select':
+          map.setAnalysisParams(id, { [key]: value });
+          break;
+        case 'toggle':
+          map.setAnalysisParams(id, { [key]: value === 'true' });
+          break;
+        case 'auto':
+          if (value === 'true') {
+            map.setAnalysisParams(id, { [key]: 'auto' });
+          } else {
+            const domain = map.getLegend(id)?.domain ?? [parseFloat(control.dataset.min!), parseFloat(control.dataset.max!)];
+            map.setAnalysisParams(id, { [key]: [domain[0], domain[1]] });
+          }
+          break;
+        case 'wireframe':
+          map.setWireframe(value !== 'solid');
+          map.setWireframeWhite(value === 'white');
+          this.render();
+          break;
+      }
       return;
     }
   };
@@ -326,7 +358,7 @@ export class TreeletPanel extends BaseElement {
     } else if (this.settingsOpen !== null) {
       const id = this.settingsOpen;
       this.settingsOpen = null;
-      this.modeSettingsOpen = null;
+      this.coatOpen = null;
       this.render();
       this.focusSelector(`.active-row[data-layer-id="${CSS.escape(id)}"]`);
       e.stopPropagation();
@@ -353,44 +385,46 @@ export class TreeletPanel extends BaseElement {
     (this.panelEl?.querySelector(selector) as HTMLElement | null)?.focus();
   }
 
+  /** Sliders: `data-layer-id` + `data-param` say what they set. */
   private handleInput = (e: Event): void => {
     if (!this.map) return;
+    const map = this.map;
     const target = e.target as HTMLInputElement;
     if (target.tagName !== 'INPUT') return;
     e.stopPropagation();
     const val = parseFloat(target.value);
-    const id = target.id;
+    const id = target.dataset.layerId ?? '';
+    const param = target.dataset.param ?? '';
+    const label = this.panelEl?.querySelector<HTMLElement>(`[data-value-for="${CSS.escape(`${id}:${param}`)}"]`);
 
-    if (id.startsWith(EXAG_PREFIX)) {
-      const layerId = id.slice(EXAG_PREFIX.length);
-      const label = this.shadow.getElementById(`exag-value-${layerId}`);
+    if (param === 'exaggeration') {
       if (label) label.textContent = `${val.toFixed(1)}x`;
-      this.map.setExaggeration(val);
-    } else if (id.startsWith(OPACITY_PREFIX)) {
-      const layerId = id.slice(OPACITY_PREFIX.length);
-      const label = this.shadow.getElementById(`opacity-value-${layerId}`);
-      if (label) label.textContent = `${Math.round(val * 100)}%`;
-      this.map.setDrapeOpacity(layerId, val);
-    } else if (id === 'thickness-slider') {
-      const label = this.shadow.getElementById('thickness-value');
-      if (label) label.textContent = val.toFixed(1);
-      this.map.setIsolineThickness(val);
-    } else if (id === 'contour-slider') {
-      const label = this.shadow.getElementById('contour-value');
-      if (label) label.textContent = `${val}m`;
-      this.map.setIsolineInterval(val);
-    } else if (id === 'strength-slider') {
-      const label = this.shadow.getElementById('strength-value');
-      if (label) label.textContent = `${Math.round(val * 100)}%`;
-      this.map.setHillshadeStrength(val);
-    } else if (id === 'azimuth-slider') {
-      const label = this.shadow.getElementById('azimuth-value');
+      map.setExaggeration(val);
+    } else if (param === 'azimuth') {
       if (label) label.textContent = `${Math.round(val)}°`;
-      this.map.setSunAzimuth(val);
-    } else if (id === 'altitude-slider') {
-      const label = this.shadow.getElementById('altitude-value');
+      map.setSunAzimuth(val);
+    } else if (param === 'altitude') {
       if (label) label.textContent = `${Math.round(val)}°`;
-      this.map.setSunAltitude(val);
+      map.setSunAltitude(val);
+    } else if (param === 'opacity') {
+      if (label) label.textContent = `${Math.round(val * 100)}%`;
+      map.setLayerOpacity(id, val);
+    } else if (target.dataset.span !== undefined) {
+      // One end of a [low, high] pair: read both sliders
+      const other = this.panelEl?.querySelector<HTMLInputElement>(
+        `input[data-layer-id="${CSS.escape(id)}"][data-param="${CSS.escape(param)}"][data-span="${target.dataset.span === '0' ? '1' : '0'}"]`,
+      );
+      const step = parseFloat(target.step) || 1;
+      const a = target.dataset.span === '0' ? val : parseFloat(other?.value ?? '0');
+      const b = target.dataset.span === '1' ? val : parseFloat(other?.value ?? '0');
+      const lo = Math.min(a, b);
+      const hi = Math.max(a, b, lo + step);
+      if (label) label.textContent = `${formatNumber(lo, step)}–${formatNumber(hi, step)}${target.dataset.unit ?? ''}`;
+      map.setAnalysisParams(id, { [param]: [lo, hi] });
+    } else if (param) {
+      const step = parseFloat(target.step) || 1;
+      if (label) label.textContent = `${formatNumber(val, step)}${target.dataset.unit ?? ''}`;
+      map.setAnalysisParams(id, { [param]: val });
     }
   };
 
@@ -403,9 +437,8 @@ export class TreeletPanel extends BaseElement {
 
     const baseLayers = this.map.getBaseLayers();
     const drapeLayers = this.map.getDrapeLayers();
-
+    const stack = this.map.getLayerStack();
     const activeDrapeId = this.map.getActiveDrapeId();
-    const isBaseDrape = this.map.isBaseDrapeActive();
     const activeBase = baseLayers.find((l) => l.visible);
 
     // Build each column: active section (button → settings) + selector (header hover → dropdown)
@@ -423,9 +456,9 @@ export class TreeletPanel extends BaseElement {
     const overlayCol = `
       <div class="layer-col" data-col="overlay">
         <div class="layer-col-active">
-          ${this.renderActiveOverlay(isBaseDrape, activeDrapeId, drapeLayers)}
+          ${this.renderActiveStack(stack)}
         </div>
-        ${this.renderSelector('overlay', 'Overlay', this.renderOverlayDropdown(isBaseDrape, activeDrapeId, drapeLayers))}
+        ${this.renderSelector('overlay', 'Overlay', this.renderOverlayDropdown(activeDrapeId, drapeLayers))}
       </div>`;
 
     // Order: from box outwards - Terrain nearest to icon
@@ -449,9 +482,9 @@ export class TreeletPanel extends BaseElement {
   }
 
   /** Class list for a settings panel: hidden, or fading in right after opening. */
-  private settingsClass(isOpen: boolean): string {
-    if (!isOpen) return 'active-settings hidden';
-    return this.settingsEntering ? 'active-settings entering' : 'active-settings';
+  private settingsClass(isOpen: boolean, extra = ''): string {
+    if (!isOpen) return `active-settings hidden${extra}`;
+    return (this.settingsEntering ? 'active-settings entering' : 'active-settings') + extra;
   }
 
   /** Column title; with alternatives it is a chevron button for their dropdown. */
@@ -476,7 +509,7 @@ export class TreeletPanel extends BaseElement {
   // Active section renderers (name + gear icon + expandable settings)
   // =========================================================================
 
-  /** Render the active base layer row with gear → exaggeration slider. */
+  /** Render the active base layer row with gear → exaggeration, light, mesh. */
   private renderActiveBaseLayer(layer: BaseLayer | undefined): string {
     if (!layer) {
       return `<div class="active-btn-wrap"><div class="active-row is-empty"><span class="active-name">None</span></div></div>`;
@@ -493,94 +526,183 @@ export class TreeletPanel extends BaseElement {
           <span class="gear-icon" aria-hidden="true">${GEAR_SVG}</span>
         </button>
         <div class="${this.settingsClass(isOpen)}" data-layer-id="${escapeHtml(layer.id)}">
-          <div class="control-row">
-            <span class="control-label">Exaggeration</span>
-            <span class="control-value" id="exag-value-${layer.id}">${exag.toFixed(1)}x</span>
-          </div>
-          <input type="range" id="exag-slider-${layer.id}" min="0.5" max="5.0" step="0.1"
-            value="${exag}">
+          ${this.renderSlider(layer.id, 'exaggeration', 'Exaggeration', exag, 0.5, 5, 0.1, `${exag.toFixed(1)}x`)}
           ${this.renderLightSettings()}
+          ${this.renderMeshSettings()}
         </div>
       </div>
     `;
   }
 
-  /** Delegate to the appropriate active overlay renderer. */
-  private renderActiveOverlay(
-    isBaseDrape: boolean,
-    activeDrapeId: string | null,
-    drapeLayers: DrapeLayer[],
-  ): string {
-    if (isBaseDrape) {
-      return this.renderActiveBaseDrape();
-    }
-    if (activeDrapeId) {
-      const drape = drapeLayers.find((l: DrapeLayer) => l.id === activeDrapeId);
-      if (drape) return this.renderActiveExternalDrape(drape);
-    }
-    return `<div class="active-btn-wrap"><div class="active-row is-empty"><span class="active-name">None</span></div></div>`;
-  }
-
-  /** Render the active Terrain mode: mode name + gear → mode-specific settings. */
-  private renderActiveBaseDrape(): string {
-    const mode = this.map!.getBaseDrapeMode();
-    const isOpen = this.settingsOpen === BASE_DRAPE_ID;
-    const label = mode.charAt(0).toUpperCase() + mode.slice(1);
+  /** The Overlay column's active row: the visible coats, and the stack manager behind the gear. */
+  private renderActiveStack(stack: StackLayer[]): string {
+    const isOpen = this.settingsOpen === STACK_ID;
+    const names = stack.filter((l) => l.visible).map((l) => escapeHtml(l.layerName));
+    const label = names.length ? names.join(' · ') : 'None';
 
     return `
       <div class="active-btn-wrap">
-        <button type="button" class="active-row" data-layer-id="${BASE_DRAPE_ID}" data-layer-type="base-drape"
-          data-focus-key="active-overlay" aria-expanded="${isOpen}" title="${label} settings">
+        <button type="button" class="active-row" data-layer-id="${STACK_ID}" data-layer-type="stack"
+          data-focus-key="active-overlay" aria-expanded="${isOpen}" title="Overlay stack">
           <span class="active-name">${label}</span>
           <span class="gear-icon" aria-hidden="true">${GEAR_SVG}</span>
         </button>
-        <div class="${this.settingsClass(isOpen)}" data-layer-id="${BASE_DRAPE_ID}">
-          ${this.renderModeSettings(mode)}
+        <div class="${this.settingsClass(isOpen, ' stack-settings')}" data-layer-id="${STACK_ID}">
+          ${stack.length ? this.renderStackRows(stack) : '<div class="stack-empty">No overlays. Add one from the list.</div>'}
         </div>
       </div>
     `;
   }
 
-  /** Render the active external drape: name + gear → opacity, blend mode, strength. */
-  private renderActiveExternalDrape(drape: DrapeLayer): string {
-    const isOpen = this.settingsOpen === drape.id;
-    const opacity = this.map!.getDrapeOpacity(drape.id);
-    const blendMode = this.map!.getDrapeBlendMode();
-    const strength = this.map!.getHillshadeStrength();
-    const showStrength = blendMode !== 'normal';
-
-    return `
-      <div class="active-btn-wrap">
-        <button type="button" class="active-row" data-layer-id="${escapeHtml(drape.id)}" data-layer-type="drape"
-          data-focus-key="active-overlay" aria-expanded="${isOpen}" title="${escapeHtml(drape.layerName)} settings">
-          <span class="active-name">${escapeHtml(drape.layerName)}</span>
-          <span class="gear-icon" aria-hidden="true">${GEAR_SVG}</span>
-        </button>
-        <div class="${this.settingsClass(isOpen)}" data-layer-id="${escapeHtml(drape.id)}">
-          <div class="control-row">
-            <span class="control-label">Opacity</span>
-            <span class="control-value" id="opacity-value-${drape.id}">${Math.round(opacity * 100)}%</span>
-          </div>
-          <input type="range" id="opacity-slider-${drape.id}" min="0" max="1" step="0.05"
-            value="${opacity}">
-
-          <div class="setting-label">Terrain Blend</div>
-          <div class="toggle-row" data-action-type="blend-mode">
-            ${BLEND_MODES.map((m) =>
-              `<button type="button" class="toggle-btn${blendMode === m.id ? ' active' : ''}" data-action="blend-mode" data-value="${m.id}"
-                data-focus-key="blend-${m.id}" aria-pressed="${blendMode === m.id}">${m.label}</button>`
-            ).join('')}
-          </div>
-
-          <div class="control-row${showStrength ? '' : ' hidden'}" id="strength-row">
-            <span class="control-label">Strength</span>
-            <span class="control-value" id="strength-value">${Math.round(strength * 100)}%</span>
-          </div>
-          <input type="range" id="strength-slider" class="${showStrength ? '' : 'hidden'}" min="0" max="1" step="0.05"
-            value="${strength}">
+  /** One row per coat, top of the stack first. */
+  private renderStackRows(stack: StackLayer[]): string {
+    const parts: string[] = [];
+    for (let index = stack.length - 1; index >= 0; index--) {
+      const layer = stack[index];
+      const id = escapeHtml(layer.id);
+      const open = this.coatOpen === layer.id;
+      const type = isAnalysis(layer) ? 'analysis' : 'drape';
+      parts.push(`
+        <div class="stack-row${open ? ' open' : ''}${layer.visible ? '' : ' is-hidden'}" data-layer-id="${id}" data-layer-type="${type}"
+          data-index="${index}" data-visible="${layer.visible}">
+          <button type="button" class="stack-btn stack-eye" data-action="visible" data-focus-key="eye-${id}"
+            aria-pressed="${layer.visible}" title="${layer.visible ? 'Hide' : 'Show'}">${layer.visible ? EYE_SVG : EYE_OFF_SVG}</button>
+          <button type="button" class="stack-name" data-action="open" data-focus-key="coat-${id}" aria-expanded="${open}"
+            title="${escapeHtml(layer.layerName)} settings">${escapeHtml(layer.layerName)}</button>
+          <button type="button" class="stack-btn" data-action="up" data-focus-key="up-${id}" title="Move up"
+            ${index === stack.length - 1 ? 'disabled' : ''}>${UP_SVG}</button>
+          <button type="button" class="stack-btn" data-action="down" data-focus-key="down-${id}" title="Move down"
+            ${index === 0 ? 'disabled' : ''}>${DOWN_SVG}</button>
+          <button type="button" class="stack-btn stack-remove" data-action="remove" data-focus-key="remove-${id}"
+            title="${type === 'drape' ? 'Remove imagery' : 'Remove'}">${CLOSE_SVG}</button>
         </div>
+        ${open ? `<div class="coat-settings" data-layer-id="${id}">${this.renderCoatSettings(layer)}</div>` : ''}
+      `);
+    }
+    return parts.join('');
+  }
+
+  /** Opacity, blend mode, then the analysis' parameters and ramp. */
+  private renderCoatSettings(layer: StackLayer): string {
+    const id = layer.id;
+    const opacity = layer.display.opacity;
+    const blend = layer.display.blendMode;
+    const parts: string[] = [
+      this.renderSlider(id, 'opacity', 'Opacity', opacity, 0, 1, 0.05, `${Math.round(opacity * 100)}%`),
+      `<div class="setting-label">Blend</div>
+      <div class="toggle-row wrap">
+        ${BLEND_MODES.map((m) =>
+          `<button type="button" class="toggle-btn${blend === m.id ? ' active' : ''}" data-action="blend" data-layer-id="${escapeHtml(id)}"
+            data-value="${m.id}" data-focus-key="blend-${escapeHtml(id)}-${m.id}" aria-pressed="${blend === m.id}">${m.label}</button>`,
+        ).join('')}
+      </div>`,
+    ];
+    if (isAnalysis(layer)) {
+      for (const spec of layer.descriptor.params) parts.push(this.renderParam(layer, spec));
+      if (layer.isValueKind) parts.push(this.renderRampList(layer));
+    }
+    return parts.join('');
+  }
+
+  /** A labelled slider; `param` and the layer id ride on the input for the delegated handler. */
+  private renderSlider(
+    id: string, param: string, label: string, value: number, min: number, max: number, step: number, text: string, unit = '',
+  ): string {
+    const key = escapeHtml(`${id}:${param}`);
+    return `
+      <div class="control-row">
+        <span class="control-label">${escapeHtml(label)}</span>
+        <span class="control-value" data-value-for="${key}">${escapeHtml(text)}</span>
       </div>
-    `;
+      <input type="range" data-layer-id="${escapeHtml(id)}" data-param="${escapeHtml(param)}" data-unit="${escapeHtml(unit)}"
+        min="${min}" max="${max}" step="${step}" value="${value}" aria-label="${escapeHtml(label)}">`;
+  }
+
+  /** One parameter control from the analysis' schema. */
+  private renderParam(layer: AnalysisLayer, spec: ParamSpec): string {
+    const id = layer.id;
+    const eid = escapeHtml(id);
+    const value = layer.params[spec.key];
+    const unit = 'unit' in spec ? spec.unit ?? '' : '';
+    switch (spec.type) {
+      case 'range': {
+        const v = typeof value === 'number' ? value : spec.min;
+        return this.renderSlider(id, spec.key, spec.label, v, spec.min, spec.max, spec.step, `${formatNumber(v, spec.step)}${unit}`, unit);
+      }
+      case 'span': {
+        const auto = value === 'auto';
+        const parts: string[] = [];
+        if (spec.auto) {
+          parts.push(`
+            <div class="toggle-row">
+              <span class="toggle-label">${escapeHtml(spec.label)}</span>
+              <span class="toggle-group">
+                <button type="button" class="toggle-btn${auto ? ' active' : ''}" data-action="auto" data-layer-id="${eid}" data-param="${spec.key}"
+                  data-value="true" data-focus-key="auto-${eid}-${spec.key}" aria-pressed="${auto}">Auto</button>
+                <button type="button" class="toggle-btn${auto ? '' : ' active'}" data-action="auto" data-layer-id="${eid}" data-param="${spec.key}"
+                  data-value="false" data-min="${spec.min}" data-max="${spec.max}" data-focus-key="manual-${eid}-${spec.key}" aria-pressed="${!auto}">Manual</button>
+              </span>
+            </div>`);
+        }
+        if (auto) {
+          const d = this.map!.getLegend(id)?.domain;
+          if (d) parts.push(`<div class="control-row"><span class="control-label">Visible</span><span class="control-value">${formatNumber(d[0], spec.step)}–${formatNumber(d[1], spec.step)}${unit}</span></div>`);
+        } else {
+          const [lo, hi] = Array.isArray(value) ? value as [number, number] : [spec.min, spec.max];
+          const key = escapeHtml(`${id}:${spec.key}`);
+          parts.push(`
+            <div class="control-row">
+              <span class="control-label">${spec.auto ? 'Range' : escapeHtml(spec.label)}</span>
+              <span class="control-value" data-value-for="${key}">${formatNumber(lo, spec.step)}–${formatNumber(hi, spec.step)}${unit}</span>
+            </div>
+            <input type="range" data-layer-id="${eid}" data-param="${spec.key}" data-span="0" data-unit="${escapeHtml(unit)}"
+              min="${spec.min}" max="${spec.max}" step="${spec.step}" value="${lo}" aria-label="${escapeHtml(spec.label)} low">
+            <input type="range" data-layer-id="${eid}" data-param="${spec.key}" data-span="1" data-unit="${escapeHtml(unit)}"
+              min="${spec.min}" max="${spec.max}" step="${spec.step}" value="${hi}" aria-label="${escapeHtml(spec.label)} high">`);
+        }
+        return parts.join('');
+      }
+      case 'select':
+        return `
+          <div class="toggle-row">
+            <span class="toggle-label">${escapeHtml(spec.label)}</span>
+            <span class="toggle-group">
+              ${spec.options.map((o) => {
+                const active = String(value) === o.value;
+                return `<button type="button" class="toggle-btn${active ? ' active' : ''}" data-action="select" data-layer-id="${eid}"
+                  data-param="${spec.key}" data-value="${escapeHtml(o.value)}" data-focus-key="sel-${eid}-${spec.key}-${escapeHtml(o.value)}"
+                  aria-pressed="${active}">${escapeHtml(o.label)}</button>`;
+              }).join('')}
+            </span>
+          </div>`;
+      case 'color': {
+        const current = Array.isArray(value) ? value as RGB : [0, 0, 0] as RGB;
+        const presets = spec.presets ?? [];
+        return `
+          <div class="setting-label">${escapeHtml(spec.label)}</div>
+          <div class="swatch-row">
+            ${presets.map((p) => {
+              const active = sameColor(p.color, current);
+              return `<button type="button" class="color-swatch${active ? ' active' : ''}" data-action="color" data-layer-id="${eid}"
+                data-param="${spec.key}" style="background:${hex(p.color)}" data-r="${p.color[0]}" data-g="${p.color[1]}" data-b="${p.color[2]}"
+                data-focus-key="swatch-${eid}-${spec.key}-${escapeHtml(p.label)}" title="${escapeHtml(p.label)}" aria-label="${escapeHtml(p.label)}" aria-pressed="${active}"></button>`;
+            }).join('')}
+          </div>`;
+      }
+      case 'boolean': {
+        const on = value === true;
+        return `
+          <div class="toggle-row">
+            <span class="toggle-label">${escapeHtml(spec.label)}</span>
+            <span class="toggle-group">
+              <button type="button" class="toggle-btn${on ? ' active' : ''}" data-action="toggle" data-layer-id="${eid}" data-param="${spec.key}"
+                data-value="true" data-focus-key="on-${eid}-${spec.key}" aria-pressed="${on}">On</button>
+              <button type="button" class="toggle-btn${on ? '' : ' active'}" data-action="toggle" data-layer-id="${eid}" data-param="${spec.key}"
+                data-value="false" data-focus-key="off-${eid}-${spec.key}" aria-pressed="${!on}">Off</button>
+            </span>
+          </div>`;
+      }
+    }
   }
 
   // =========================================================================
@@ -596,33 +718,19 @@ export class TreeletPanel extends BaseElement {
     `;
   }
 
-  /** Build the overlay dropdown: Analysis group (terrain modes) then Layers group (external drapes). */
-  private renderOverlayDropdown(
-    isBaseDrape: boolean,
-    activeDrapeId: string | null,
-    drapeLayers: DrapeLayer[],
-  ): string {
+  /** Build the overlay dropdown: Analysis group (adds a coat) then Layers group (drapes not active). */
+  private renderOverlayDropdown(activeDrapeId: string | null, drapeLayers: DrapeLayer[]): string {
     const parts: string[] = [];
-    const activeMode = isBaseDrape ? this.map!.getBaseDrapeMode() : null;
 
-    // Wireframe mode available programmatically but hidden from the dropdown
-    const visibleModes: BaseDrapeMode[] = ['elevation', 'slope', 'aspect', 'contours'];
-
-    // Always show the Analysis group
     parts.push('<div class="dropdown-group-label">Analysis</div>');
-
-    // Mode buttons (exclude active mode when base drape is active)
-    for (const m of visibleModes) {
-      if (m === activeMode) continue;
-      const label = m.charAt(0).toUpperCase() + m.slice(1);
+    for (const d of listAnalyses()) {
       parts.push(`
-        <div class="layer-entry" data-layer-id="${BASE_DRAPE_ID}" data-layer-type="base-drape-mode" data-mode="${m}">
-          <button type="button" class="layer-btn" data-action="activate">${label}</button>
+        <div class="layer-entry" data-layer-id="${escapeHtml(d.id)}" data-layer-type="analysis" data-kind="${escapeHtml(d.id)}">
+          <button type="button" class="layer-btn" data-action="activate">${escapeHtml(d.label)}</button>
         </div>
       `);
     }
 
-    // External drape layers (excluding the active one)
     const inactiveDrapes = drapeLayers.filter((l: DrapeLayer) => l.id !== activeDrapeId);
     if (inactiveDrapes.length > 0) {
       parts.push('<div class="overlay-separator"></div>');
@@ -640,110 +748,55 @@ export class TreeletPanel extends BaseElement {
   }
 
   // =========================================================================
-  // Mode-specific settings (used within active-settings for Terrain overlay)
+  // Settings pieces
   // =========================================================================
 
-  /**
-   * Render the settings panel for a specific mode.
-   */
-  private renderModeSettings(mode: BaseDrapeMode): string {
-    if (mode === 'wireframe') {
-      return this.renderWireframeSettings();
-    } else if (mode === 'contours') {
-      return this.renderContourSettings();
-    } else {
-      // elevation, slope, aspect - color ramp picker
-      return this.renderColorRampSettings();
-    }
-  }
-
-  private renderWireframeSettings(): string {
-    const isWhite = this.map!.getWireframeWhite();
-    return `
-      <div class="toggle-row">
-        <span class="toggle-label">Coloring</span>
-        <button type="button" class="toggle-btn${!isWhite ? ' active' : ''}" data-action="wireframe-mode" data-value="normals"
-          data-focus-key="wire-normals" aria-pressed="${!isWhite}">Normals</button>
-        <button type="button" class="toggle-btn${isWhite ? ' active' : ''}" data-action="wireframe-mode" data-value="white"
-          data-focus-key="wire-white" aria-pressed="${isWhite}">White</button>
-      </div>
-    `;
-  }
-
-  private renderRampList(): string {
-    const ramp = this.map!.getColorRamp();
-    return `
-      <div class="ramp-list" data-action-type="ramp">
-        ${RAMP_META.map((r) =>
-          `<button type="button" class="ramp-btn${ramp === r.id ? ' active' : ''}" data-value="${r.id}"
-            data-focus-key="ramp-${r.id}" aria-pressed="${ramp === r.id}">
-            <span>${r.label}</span>
-            <span class="ramp-indicator" style="background:${r.gradient}"></span>
-          </button>`
-        ).join('')}
-      </div>
-    `;
-  }
-
-  private renderColorRampSettings(): string {
+  private renderRampList(layer: AnalysisLayer): string {
+    const eid = escapeHtml(layer.id);
+    const current = layer.ramp ?? layer.descriptor.ramp;
+    const custom = current !== undefined && !isRampName(current);
     return `
       <div class="setting-label">Color Ramp</div>
-      ${this.renderRampList()}
+      <div class="ramp-list">
+        ${BUILTIN_RAMP_NAMES.map((name) => {
+          const active = current === name;
+          return `<button type="button" class="ramp-btn${active ? ' active' : ''}" data-action="ramp" data-layer-id="${eid}" data-value="${name}"
+            data-focus-key="ramp-${eid}-${name}" aria-pressed="${active}">
+            <span>${capitalize(name)}</span>
+            <span class="ramp-indicator" style="background:${rampGradientCss(BUILTIN_RAMPS[name], [0, 1])}"></span>
+          </button>`;
+        }).join('')}
+        ${custom ? `<div class="ramp-btn active" aria-current="true"><span>Custom</span>
+          <span class="ramp-indicator" style="background:${rampGradientCss(current, this.map!.getLegend(layer.id)?.domain ?? [0, 1])}"></span></div>` : ''}
+      </div>
     `;
   }
 
   private renderLightSettings(): string {
     const azimuth = this.map!.getSunAzimuth();
     const altitude = this.map!.getSunAltitude();
-
     return `
       <div class="setting-label">Light Direction</div>
-      <div class="control-row">
-        <span class="control-label">Direction</span>
-        <span class="control-value" id="azimuth-value">${Math.round(azimuth)}°</span>
-      </div>
-      <input type="range" id="azimuth-slider" min="0" max="360" step="1" value="${azimuth}">
-      <div class="control-row">
-        <span class="control-label">Altitude</span>
-        <span class="control-value" id="altitude-value">${Math.round(altitude)}°</span>
-      </div>
-      <input type="range" id="altitude-slider" min="5" max="90" step="1" value="${altitude}">
+      ${this.renderSlider('sun', 'azimuth', 'Direction', azimuth, 0, 360, 1, `${Math.round(azimuth)}°`)}
+      ${this.renderSlider('sun', 'altitude', 'Altitude', altitude, 5, 90, 1, `${Math.round(altitude)}°`)}
     `;
   }
 
-  private renderContourSettings(): string {
-    const interval = this.map!.getIsolineInterval();
-    const thickness = this.map!.getIsolineThickness();
-    const currentColor = this.map!.getIsolineColor();
-
+  private renderMeshSettings(): string {
+    const wire = this.map!.getWireframe();
+    const white = this.map!.getWireframeWhite();
+    const mode = !wire ? 'solid' : white ? 'white' : 'wire';
+    const options: Array<[string, string]> = [['solid', 'Solid'], ['wire', 'Wireframe'], ['white', 'White']];
     return `
-      <div class="setting-label">Color Ramp</div>
-      ${this.renderRampList()}
-
-      <div class="setting-label">Line Color</div>
-      <div class="swatch-row" data-action-type="contour-color">
-        ${CONTOUR_COLORS.map((c) => {
-          const active = Math.abs(c.rgb[0] - currentColor[0]) < 0.02
-            && Math.abs(c.rgb[1] - currentColor[1]) < 0.02
-            && Math.abs(c.rgb[2] - currentColor[2]) < 0.02;
-          return `<button type="button" class="color-swatch${active ? ' active' : ''}"
-            style="background:${c.hex}" data-r="${c.rgb[0]}" data-g="${c.rgb[1]}" data-b="${c.rgb[2]}"
-            data-focus-key="swatch-${c.label}" title="${c.label}" aria-label="${c.label} lines" aria-pressed="${active}"></button>`;
-        }).join('')}
+      <div class="toggle-row">
+        <span class="toggle-label">Mesh</span>
+        <span class="toggle-group">
+          ${options.map(([v, label]) =>
+            `<button type="button" class="toggle-btn${mode === v ? ' active' : ''}" data-action="wireframe" data-layer-id="mesh"
+              data-value="${v}" data-focus-key="mesh-${v}" aria-pressed="${mode === v}">${label}</button>`,
+          ).join('')}
+        </span>
       </div>
-
-      <div class="control-row">
-        <span class="control-label">Thickness</span>
-        <span class="control-value" id="thickness-value">${thickness.toFixed(1)}</span>
-      </div>
-      <input type="range" id="thickness-slider" min="0.5" max="4.0" step="0.1" value="${thickness}">
-
-      <div class="control-row">
-        <span class="control-label">Interval</span>
-        <span class="control-value" id="contour-value">${interval}m</span>
-      </div>
-      <input type="range" id="contour-slider" min="10" max="500" step="10" value="${interval}">
     `;
   }
 }
-

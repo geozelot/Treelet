@@ -29,7 +29,7 @@ import {
   type WebGLRenderer,
   type Vector3,
 } from 'three';
-import type { TileCoord, ShaderMode, BlendMode, ColorRamp, TreeletStats } from '../core/types';
+import type { TileCoord, TreeletStats } from '../core/types';
 import type { TileGrid } from '../tiles/TileGrid';
 import type { WorkerPool } from '../workers/WorkerPool';
 import type { LayerRegistry } from '../layers/LayerRegistry';
@@ -46,25 +46,21 @@ import { TilePool, type SelectedTile, type CullRegion, type HeightBounds } from 
 import { FetchChannel } from './FetchChannel';
 import {
   createTerrainMaterial,
-  setTerrainMode,
-  setTerrainColorRamp,
+  setTerrainAnalysisSource,
+  setTerrainCoats,
+  setTerrainRampTexture,
   setTerrainWireframe,
-  setTerrainIsolineEnabled,
-  setTerrainIsolineSettings,
-  setTerrainIsolineColor,
   setTerrainBaseWhite,
-  setTerrainElevationRange,
-  setTerrainSlopeRange,
   setTerrainExaggeration,
   setTerrainSunDirection,
   setTerrainAtlas,
   setTerrainDrape,
-  setTerrainDrapeBlendMode,
-  setTerrainHillshadeStrength,
   setTerrainDrapePlaceholder,
   setTerrainView,
   setTerrainFog,
 } from '../shaders/TerrainMaterial';
+import { CoatStack, type CoatInput } from './CoatStack';
+import { analysisShaderSource, onAnalysisRegistered } from '../analysis/registry';
 
 /** Floats per instance: world(2) size(1) elev(4) parent(4) drape(4) morph(2). */
 export const INSTANCE_STRIDE = 17;
@@ -115,6 +111,8 @@ export interface TerrainRendererOptions {
   onTileLoad?: (coord: TileCoord) => void;
   onTileUnload?: (coord: TileCoord) => void;
   onTileError?: (coord: TileCoord, layer: 'elevation' | 'drape', error: string) => void;
+  /** The visible elevation range (for 'auto' ramp domains) changed. */
+  onRangeChange?: (min: number, max: number) => void;
 }
 
 /** Camera state for one frame (world units). */
@@ -181,8 +179,9 @@ export class TerrainRenderer {
   private drapeEpoch = 0;
 
   private activeDrapeLayer: DrapeLayer | null = null;
-  private drapeOpacity = 1;
   private drapeVisible = false;
+  private readonly coatStack = new CoatStack();
+  private readonly unsubscribeAnalyses: () => void;
 
   /** Floating render origin (world units, float64). */
   private originX = 0;
@@ -300,8 +299,16 @@ export class TerrainRenderer {
       worldScale: this.tileGrid.worldScale,
       slotSize: options.slotSize,
       gridSize: options.segments,
+      analysisGlsl: analysisShaderSource(),
     });
     setTerrainAtlas(this.material, this.atlas.texture);
+    setTerrainRampTexture(this.material, this.coatStack.texture, this.coatStack.width, this.coatStack.height);
+    // A newly registered analysis needs its function compiled in.
+    this.unsubscribeAnalyses = onAnalysisRegistered(() => {
+      if (this.disposed) return;
+      setTerrainAnalysisSource(this.material, analysisShaderSource());
+      this.markRender();
+    });
 
     // Theme-aware drape placeholder: white (light) / dark grey (dark)
     const darkMq = typeof window !== 'undefined' && window.matchMedia
@@ -470,7 +477,7 @@ export class TerrainRenderer {
     const visible = d !== null && this.drapeAtlas !== null && zoom >= d.minZoom && zoom <= d.maxZoom;
     if (visible !== this.drapeVisible) {
       this.drapeVisible = visible;
-      if (setTerrainDrape(this.material, visible ? this.drapeAtlas!.texture : null, this.drapeOpacity)) {
+      if (setTerrainDrape(this.material, visible ? this.drapeAtlas!.texture : null)) {
         this.renderDirty = true;
       }
     }
@@ -738,7 +745,11 @@ export class TerrainRenderer {
     if (min !== this.lastAutoMin || max !== this.lastAutoMax) {
       this.lastAutoMin = min;
       this.lastAutoMax = max;
-      if (setTerrainElevationRange(this.material, min, max)) this.renderDirty = true;
+      if (this.coatStack.setAutoRange(min, max)) {
+        setTerrainCoats(this.material, this.coatStack.packed);
+        this.renderDirty = true;
+      }
+      this.opts.onRangeChange?.(min, max);
     }
   }
 
@@ -920,14 +931,13 @@ export class TerrainRenderer {
     this.markDirty();
   }
 
-  setActiveDrape(drapeLayer: DrapeLayer | null, opacity: number = 1.0): void {
+  setActiveDrape(drapeLayer: DrapeLayer | null): void {
     if (this.disposed) return;
     if (!drapeLayer) {
       this.clearDrapes();
       return;
     }
     this.activeDrapeLayer = drapeLayer;
-    this.drapeOpacity = opacity;
     if (!this.drapeAtlas) {
       // Anisotropic filtering keeps imagery sharp on ground seen at a low angle.
       const anisotropy = Math.min(16, this.renderer.capabilities.getMaxAnisotropy());
@@ -941,14 +951,6 @@ export class TerrainRenderer {
     this.drapeVisible = false;
     setTerrainDrape(this.material, null);
     this.markDirty();
-  }
-
-  setDrapeOpacity(opacity: number): void {
-    this.drapeOpacity = opacity;
-    if (this.drapeVisible && this.drapeAtlas &&
-        setTerrainDrape(this.material, this.drapeAtlas.texture, opacity)) {
-      this.markRender();
-    }
   }
 
   clearDrapes(): void {
@@ -988,33 +990,31 @@ export class TerrainRenderer {
     if (changed) this.markRender();
   }
 
-  setMode(mode: ShaderMode): void { this.apply(setTerrainMode(this.material, mode)); }
-  setColorRamp(ramp: ColorRamp): void { this.apply(setTerrainColorRamp(this.material, ramp)); }
-  setWireframe(enabled: boolean): void { this.apply(setTerrainWireframe(this.material, enabled)); }
-  setIsolineEnabled(enabled: boolean): void { this.apply(setTerrainIsolineEnabled(this.material, enabled)); }
-  setIsolineSettings(interval: number, thickness?: number): void {
-    this.apply(setTerrainIsolineSettings(this.material, interval, thickness));
+  /**
+   * Replace the coat stack (visible coats, bottom first). Coats whose ramp
+   * domain is 'auto' follow the visible elevation range from the next frame.
+   */
+  setCoats(coats: readonly CoatInput[]): void {
+    if (this.disposed) return;
+    this.coatStack.set(coats);
+    this.autoRange = this.coatStack.needsAutoRange;
+    if (this.autoRange) {
+      this.lastAutoMin = NaN;
+      this.lastAutoMax = NaN;
+      this.prevInstanceCount = -1; // refresh the range on the next frame
+    }
+    setTerrainCoats(this.material, this.coatStack.packed);
+    this.markRender(); // ramp rows may have changed without a uniform change
   }
-  setIsolineColor(r: number, g: number, b: number): void { this.apply(setTerrainIsolineColor(this.material, r, g, b)); }
+
+  /** The visible elevation range, as used by 'auto' ramp domains. */
+  get autoElevationRange(): [number, number] {
+    return this.coatStack.autoDomain;
+  }
+
+  setWireframe(enabled: boolean): void { this.apply(setTerrainWireframe(this.material, enabled)); }
   setBaseWhite(enabled: boolean): void { this.apply(setTerrainBaseWhite(this.material, enabled)); }
   setSunDirection(dir: Vector3): void { this.apply(setTerrainSunDirection(this.material, dir)); }
-  setDrapeBlendMode(mode: BlendMode): void { this.apply(setTerrainDrapeBlendMode(this.material, mode)); }
-  setHillshadeStrength(strength: number): void { this.apply(setTerrainHillshadeStrength(this.material, strength)); }
-  setSlopeRange(min: number, max: number): void { this.apply(setTerrainSlopeRange(this.material, min, max)); }
-
-  setElevationRange(min: number, max: number): void {
-    this.autoRange = false;
-    this.apply(setTerrainElevationRange(this.material, min, max));
-  }
-
-  /** Derive the color-ramp range from the visible tiles' data. */
-  setAutoElevationRange(): void {
-    this.autoRange = true;
-    this.lastAutoMin = NaN;
-    this.lastAutoMax = NaN;
-    this.prevInstanceCount = -1; // force a refresh on the next frame
-    this.markRender();
-  }
 
   setMorphWidth(width: number): void {
     this.morphWidth = Math.max(0.05, Math.min(0.5, width));
@@ -1090,6 +1090,8 @@ export class TerrainRenderer {
     if (this.wakeTimer !== null) clearTimeout(this.wakeTimer);
     this.wakeTimer = null;
     this.themeCleanup();
+    this.unsubscribeAnalyses();
+    this.coatStack.dispose();
     this.atlas.dispose();
     this.drapeAtlas?.dispose();
     this.drapeAtlas = null;

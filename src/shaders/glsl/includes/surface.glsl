@@ -6,7 +6,19 @@
 // derivatives) bilinearly. This gives smooth, continuous shading under
 // magnification instead of per-texel facets, and an elevation that matches
 // the DEM (not the coarser vertex mesh) for color ramps and isolines.
+// Taps one texel past a slot border read the neighbouring tile's texels
+// from the halo texture, so slopes at tile edges are central differences
+// too and the shading has no step along tile edges.
 // The CPU sampler (src/analysis/surface.ts) mirrors this exactly.
+
+// Halo: per slot, the same-level neighbours' texels one step past each
+// border (S wide, one row per edge; nodata where no neighbour is loaded).
+uniform highp sampler2DArray uElevHalo;
+
+#define HALO_TOP 0
+#define HALO_BOTTOM 1
+#define HALO_LEFT 2
+#define HALO_RIGHT 3
 
 struct Surface {
   float h;      // elevation in meters
@@ -17,16 +29,30 @@ struct Surface {
   bool valid;
 };
 
-float surfTap(int layer, ivec2 p, int imax, float fallback) {
-  float v = elevTexel(layer, clamp(p, ivec2(0), ivec2(imax)));
-  return v > NODATA_THRESHOLD ? v : fallback;
+// Elevation one step from an inner texel. Inside the slot: that texel. Past
+// a border: the neighbouring tile's texel from the halo. `reach` is 1 when
+// the tap is a real neighbour and 0 when there is none: the tap is then
+// `fallback` (the inner texel itself) and a difference using it one-sided.
+float surfTap(int layer, ivec2 p, int imax, float fallback, out float reach) {
+  reach = 1.0;
+  float v;
+  if (p.x < 0) v = texelFetch(uElevHalo, ivec3(p.y, HALO_LEFT, layer), 0).r;
+  else if (p.x > imax) v = texelFetch(uElevHalo, ivec3(p.y, HALO_RIGHT, layer), 0).r;
+  else if (p.y < 0) v = texelFetch(uElevHalo, ivec3(p.x, HALO_TOP, layer), 0).r;
+  else if (p.y > imax) v = texelFetch(uElevHalo, ivec3(p.x, HALO_BOTTOM, layer), 0).r;
+  else {
+    v = elevTexel(layer, p);
+    return v > NODATA_THRESHOLD ? v : fallback;
+  }
+  if (v > NODATA_THRESHOLD) return v;
+  reach = 0.0;
+  return fallback;
 }
 
 // Gradient (dh/dtexel, x east, y south) at an inner texel from its
-// neighbours, using the true index span when clamped at slot borders.
-vec2 surfGradient(ivec2 p, int imax, float hL, float hR, float hU, float hD) {
-  float spanX = float(min(p.x + 1, imax) - max(p.x - 1, 0));
-  float spanY = float(min(p.y + 1, imax) - max(p.y - 1, 0));
+// neighbours, over the span in texels they actually lie apart (2 for a
+// central difference, 1 where one side has no neighbour).
+vec2 surfGradient(float hL, float hR, float hU, float hD, float spanX, float spanY) {
   return vec2((hR - hL) / max(spanX, 1.0), (hD - hU) / max(spanY, 1.0));
 }
 
@@ -62,19 +88,22 @@ Surface sampleSurface(vec4 ref, vec2 tileUV, float tileWorldSize, float mercScal
   inner = mix(vec4(mean), inner, valid);
   h00 = inner.x; h10 = inner.y; h01 = inner.z; h11 = inner.w;
 
-  float hm0 = surfTap(layer, p + ivec2(-1, 0), imax, h00);
-  float hm1 = surfTap(layer, p + ivec2(-1, 1), imax, h01);
-  float h20 = surfTap(layer, p + ivec2(2, 0), imax, h10);
-  float h21 = surfTap(layer, p + ivec2(2, 1), imax, h11);
-  float h0m = surfTap(layer, p + ivec2(0, -1), imax, h00);
-  float h1m = surfTap(layer, p + ivec2(1, -1), imax, h10);
-  float h02 = surfTap(layer, p + ivec2(0, 2), imax, h01);
-  float h12 = surfTap(layer, p + ivec2(1, 2), imax, h11);
+  float rm0, rm1, r20, r21, r0m, r1m, r02, r12;
+  float hm0 = surfTap(layer, p + ivec2(-1, 0), imax, h00, rm0);
+  float hm1 = surfTap(layer, p + ivec2(-1, 1), imax, h01, rm1);
+  float h20 = surfTap(layer, p + ivec2(2, 0), imax, h10, r20);
+  float h21 = surfTap(layer, p + ivec2(2, 1), imax, h11, r21);
+  float h0m = surfTap(layer, p + ivec2(0, -1), imax, h00, r0m);
+  float h1m = surfTap(layer, p + ivec2(1, -1), imax, h10, r1m);
+  float h02 = surfTap(layer, p + ivec2(0, 2), imax, h01, r02);
+  float h12 = surfTap(layer, p + ivec2(1, 2), imax, h11, r12);
 
-  vec2 g00 = surfGradient(p, imax, hm0, h10, h0m, h01);
-  vec2 g10 = surfGradient(p + ivec2(1, 0), imax, h00, h20, h1m, h11);
-  vec2 g01 = surfGradient(p + ivec2(0, 1), imax, hm1, h11, h00, h02);
-  vec2 g11 = surfGradient(p + ivec2(1, 1), imax, h01, h21, h10, h12);
+  // The inner texels are one step apart (unless the slot is a single texel)
+  float one = imax > 0 ? 1.0 : 0.0;
+  vec2 g00 = surfGradient(hm0, h10, h0m, h01, rm0 + one, r0m + one);
+  vec2 g10 = surfGradient(h00, h20, h1m, h11, one + r20, r1m + one);
+  vec2 g01 = surfGradient(hm1, h11, h00, h02, rm1 + one, one + r02);
+  vec2 g11 = surfGradient(h01, h21, h10, h12, one + r21, one + r12);
   vec2 g = mix(mix(g00, g10, f.x), mix(g01, g11, f.x), f.y);
 
   // Second derivatives (per texel²) from the change of the inner gradients.

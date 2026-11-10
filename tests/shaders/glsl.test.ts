@@ -12,7 +12,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { parser } from '@shaderfrog/glsl-parser';
 import preprocess from '@shaderfrog/glsl-parser/preprocessor';
-import { createTerrainMaterial, buildFragmentShader } from '../../src/shaders/TerrainMaterial';
+import { createTerrainMaterial, buildFragmentShader, setTerrainAtlas, setTerrainSkirtRelief } from '../../src/shaders/TerrainMaterial';
 import { registerBuiltinAnalyses } from '../../src/analysis/builtins';
 import { analysisShaderSource, registerAnalysis } from '../../src/analysis/registry';
 import { createPointMaterial } from '../../src/overlays/materials';
@@ -94,5 +94,24 @@ describe('GLSL check', () => {
       pack: () => ({ p0: [1, 0, 0, 0], p1: [0, 0, 0, 0] }),
     });
     expect(() => check(buildFragmentShader(analysisShaderSource()), 'fragment')).not.toThrow();
+  });
+
+  it('skirts reach the relief of the data in view; the surface reads the neighbours\' texels', () => {
+    const m = createTerrainMaterial({ metersToScene: 1, worldScale: 40075, slotSize: 256, gridSize: 64, analysisGlsl: analysisShaderSource() });
+    // Skirt depth: the tile-sized minimum, or the relief (meters → scene height like the surface itself)
+    expect(m.vertexShader).toContain('z -= max(sized, uSkirtRelief * uElevationScale * k * uExaggeration);');
+    expect(m.uniforms.uSkirtRelief.value).toBe(0);
+    expect(setTerrainSkirtRelief(m, 800)).toBe(true);
+    expect(setTerrainSkirtRelief(m, 800)).toBe(false);
+    expect(m.uniforms.uSkirtRelief.value).toBe(800);
+    // Taps past a slot border come from the halo texture, bound with the atlas
+    const fs = buildFragmentShader(analysisShaderSource());
+    expect(fs).toContain('uniform highp sampler2DArray uElevHalo;');
+    expect(fs).toContain('texelFetch(uElevHalo, ivec3(p.y, HALO_LEFT, layer), 0).r');
+    const atlas = {} as never;
+    const halo = {} as never;
+    setTerrainAtlas(m, atlas, halo);
+    expect(m.uniforms.uElevAtlas.value).toBe(atlas);
+    expect(m.uniforms.uElevHalo.value).toBe(halo);
   });
 });

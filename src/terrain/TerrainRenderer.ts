@@ -54,6 +54,7 @@ import {
   setTerrainExaggeration,
   setTerrainSunDirection,
   setTerrainAtlas,
+  setTerrainSkirtRelief,
   setTerrainDrape,
   setTerrainDrapePlaceholder,
   setTerrainView,
@@ -168,6 +169,7 @@ export class TerrainRenderer {
 
   private readonly atlas: ElevationAtlas;
   private readonly elevWriter: ArrayTextureWriter;
+  private readonly haloWriter: ArrayTextureWriter;
   private drapeAtlas: DrapeAtlas | null = null;
   private drapeWriter: ArrayTextureWriter | null = null;
   private readonly slotSize: number;
@@ -206,6 +208,11 @@ export class TerrainRenderer {
   private drapeShown = true;
   /** Finest tile level among the tiles drawn in the last frame. */
   private lastViewLevel = 0;
+  /**
+   * Elevation range (m) of the data drawn while any tile uses stand-in data
+   * (see buildInstances); 0 once every tile has its own data and parent.
+   */
+  private skirtRelief = 0;
   /** A frame requested for terrain detail the shadow map is waiting to draw. */
   private shadowWake: ReturnType<typeof setTimeout> | null = null;
 
@@ -270,6 +277,7 @@ export class TerrainRenderer {
     }
     this.atlas = new ElevationAtlas(options.slotSize, capacity);
     this.elevWriter = new ArrayTextureWriter(this.renderer, this.atlas.texture);
+    this.haloWriter = new ArrayTextureWriter(this.renderer, this.atlas.haloTexture);
     this.atlas.onEvict = (slot) => {
       this.drapeAtlas?.evict(slot.key);
       // Never call user code from inside an allocation: a handler that
@@ -318,7 +326,7 @@ export class TerrainRenderer {
       gridSize: options.segments,
       analysisGlsl: analysisShaderSource(),
     });
-    setTerrainAtlas(this.material, this.atlas.texture);
+    setTerrainAtlas(this.material, this.atlas.texture, this.atlas.haloTexture);
     setTerrainRampTexture(this.material, this.coatStack.texture, this.coatStack.width, this.coatStack.height);
     // A newly registered analysis needs its function compiled in.
     this.unsubscribeAnalyses = onAnalysisRegistered(() => {
@@ -377,7 +385,7 @@ export class TerrainRenderer {
     const now = performance.now();
 
     // ==== GPU uploads (data that arrived since the last frame) ====
-    if (this.atlas.flush(this.elevWriter)) this.renderDirty = true;
+    if (this.atlas.flush(this.elevWriter, this.haloWriter)) this.renderDirty = true;
     if (this.drapeAtlas && this.drapeWriter &&
         this.drapeAtlas.flush(this.drapeWriter, this.drapeUploadsPerFrame, (key, gen) => this.atlas.gen(key) === gen)) {
       this.renderDirty = true;
@@ -449,6 +457,7 @@ export class TerrainRenderer {
 
     // ==== Instances ====
     this.buildInstances(tiles, base);
+    if (setTerrainSkirtRelief(this.material, this.skirtRelief)) this.renderDirty = true;
     if (this.uploadInstances()) {
       this.renderDirty = true;
       this.updateAutoRange(tiles);
@@ -602,6 +611,15 @@ export class TerrainRenderer {
     const buf = this.instanceData;
     const minLevel = Math.max(0, base.source.minZoom);
     let n = 0;
+    // Elevation range of the data the instances draw, and whether any of it
+    // is a stand-in (an ancestor's data, or a morph without its parent)
+    let low = Infinity;
+    let high = -Infinity;
+    let inexact = false;
+    const span = (slot: SlotInfo) => {
+      if (slot.low < low) low = slot.low;
+      if (slot.high > high) high = slot.high;
+    };
 
     for (const t of tiles) {
       this.neededElev.add(t.key);
@@ -612,20 +630,29 @@ export class TerrainRenderer {
       if (own) {
         atlas.pin(t.key);
         atlas.touch(t.key);
+        span(own);
         eLayer = own.layer; eOx = 0; eOy = 0; eScale = 1;
       } else {
         const anc = this.findAncestor(t.z, t.x, t.y, minLevel);
-        if (!anc) {
-          this.missingElev.push(t);
-          const fz = Math.max(minLevel, t.z - COARSE_FALLBACK_LEVELS);
-          if (fz < t.z) {
-            const fallback = packTileKey(fz, t.x >> (t.z - fz), t.y >> (t.z - fz));
+        // Nothing loaded within COARSE_FALLBACK_LEVELS: one coarser tile fills
+        // the region first (a much coarser ancestor is a poor stand-in: blurry,
+        // and far off the neighbouring tiles' heights). A level the source is
+        // known not to have is skipped while an ancestor has real data.
+        const fz = Math.max(minLevel, t.z - COARSE_FALLBACK_LEVELS);
+        if (fz < t.z && (!anc || anc.z < fz)) {
+          const fallback = packTileKey(fz, t.x >> (t.z - fz), t.y >> (t.z - fz));
+          if (!anc || !this.elevChannel.failures.isEmpty(fallback)) {
             this.missingFallback.add(fallback);
             this.neededElev.add(fallback);
           }
+        }
+        if (!anc) {
+          this.missingElev.push(t);
           continue; // nothing to draw yet
         }
         this.missingElevCovered.push(t);
+        inexact = true;
+        span(anc);
         const div = 2 ** (t.z - anc.z);
         eLayer = anc.layer;
         eOx = (t.x % div) / div;
@@ -634,6 +661,10 @@ export class TerrainRenderer {
       }
 
       // ---- Geomorph parent ----
+      // Only the parent itself is a morph target. Until it has loaded the tile
+      // keeps its own heights (a coarser ancestor standing in would pull the
+      // morph zone far off the neighbouring tiles and blur it); the edge to a
+      // coarser neighbour then differs by a little, which the skirts cover.
       let pLayer = 0, pOx = 0, pOy = 0, pScale = 0;
       if (t.needsParent && t.parentKey !== NO_TILE_KEY) {
         this.neededElev.add(t.parentKey);
@@ -641,20 +672,14 @@ export class TerrainRenderer {
         if (parent) {
           atlas.pin(t.parentKey);
           atlas.touch(t.parentKey);
+          span(parent);
           pLayer = parent.layer;
           pOx = (t.x & 1) * 0.5;
           pOy = (t.y & 1) * 0.5;
           pScale = 0.5;
         } else {
           this.missingParents.push(t.parentKey);
-          const anc = this.findAncestor(t.z - 1, t.x >> 1, t.y >> 1, minLevel);
-          if (anc) {
-            const div = 2 ** (t.z - anc.z);
-            pLayer = anc.layer;
-            pOx = (t.x % div) / div;
-            pOy = (t.y % div) / div;
-            pScale = 1 / div;
-          }
+          inexact = true;
         }
       }
 
@@ -694,6 +719,7 @@ export class TerrainRenderer {
       n++;
     }
     this.instanceCount = n;
+    this.skirtRelief = inexact && high > low ? high - low : 0;
     // Fetch order: uncovered first, then covered (each list is nearest first).
     for (const t of this.missingElevCovered) this.missingElev.push(t);
     for (const d of this.missingDrapeCovered) this.missingDrape.push(d);

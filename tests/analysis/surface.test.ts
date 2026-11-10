@@ -175,3 +175,46 @@ describe('descriptor CPU formulas', () => {
     }
   });
 });
+
+describe('sampleSurfaceGrid across a tile border', () => {
+  // A curved surface cut into two corner-aligned grids that share their edge texels
+  const tm = 10;
+  const h = (d: number) => 0.002 * d * d + 3 * Math.sin(d / 40); // d in meters along the cut direction
+  const west = (i: number) => h(i * tm);                 // texels 0…IMAX at 0…150 m
+  const east = (i: number) => h((i + IMAX) * tm);        // texel 0 at 150 m
+  const none = NODATA - 1;
+
+  it('without the neighbour the slope steps at the border (one-sided differences)', () => {
+    const a = sampleSurfaceGrid((i) => west(i), IMAX, IMAX, 7.5, tm, NODATA)!;
+    const b = sampleSurfaceGrid((i) => east(i), IMAX, 0, 7.5, tm, NODATA)!;
+    expect(a.h).toBeCloseTo(b.h, 9); // the shared edge
+    expect(Math.abs(a.g![0] - b.g![0])).toBeGreaterThan(0.02);
+  });
+
+  it("with the neighbour's texels the slope is the central difference from both sides", () => {
+    const a = sampleSurfaceGrid((i) => west(i), IMAX, IMAX, 7.5, tm, NODATA, (i) => (i > IMAX ? east(1) : none))!;
+    const b = sampleSurfaceGrid((i) => east(i), IMAX, 0, 7.5, tm, NODATA, (i) => (i < 0 ? west(IMAX - 1) : none))!;
+    const central = (h((IMAX + 1) * tm) - h((IMAX - 1) * tm)) / (2 * tm);
+    expect(a.g![0]).toBeCloseTo(central, 12);
+    expect(b.g![0]).toBeCloseTo(central, 12);
+    for (let k = 0; k < 3; k++) expect(a.n[k]).toBeCloseTo(b.n[k], 12);
+  });
+
+  it('works the same across a north–south border', () => {
+    const north = (_i: number, j: number) => h(j * tm);
+    const south = (_i: number, j: number) => h((j + IMAX) * tm);
+    const a = sampleSurfaceGrid(north, IMAX, 7.5, IMAX, tm, NODATA, (i, j) => (j > IMAX ? south(i, 1) : none))!;
+    const b = sampleSurfaceGrid(south, IMAX, 7.5, 0, tm, NODATA, (i, j) => (j < 0 ? north(i, IMAX - 1) : none))!;
+    const central = (h((IMAX + 1) * tm) - h((IMAX - 1) * tm)) / (2 * tm);
+    // Texel j runs south, world y north: the northward slope is the negative
+    expect(a.g![1]).toBeCloseTo(-central, 12);
+    expect(b.g![1]).toBeCloseTo(-central, 12);
+  });
+
+  it('a neighbour without data there leaves the border one-sided', () => {
+    const lone = sampleSurfaceGrid((i) => west(i), IMAX, IMAX, 7.5, tm, NODATA)!;
+    const gap = sampleSurfaceGrid((i) => west(i), IMAX, IMAX, 7.5, tm, NODATA, () => none)!;
+    expect(gap.g![0]).toBe(lone.g![0]);
+    expect(gap.g![0]).toBeCloseTo((h(IMAX * tm) - h((IMAX - 1) * tm)) / tm, 12);
+  });
+});

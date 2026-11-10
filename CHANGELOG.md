@@ -53,6 +53,14 @@ The API is frozen for 1.x: methods, options, events and types reachable from the
 - `getStats()` reports `coats`, `rasters`, `overlays` and `shadows` as well.
 - API reference generated with TypeDoc (`npm run docs:api`), published with the demo; CI checks that every type the public API references is exported and that the library's GLSL parses (with undeclared names as errors).
 
+### Fixed
+
+- Gaps between tiles while terrain loads, most visible in tilted views. A tile without its own data is drawn from the nearest loaded ancestor, and neighbours drawn from different data could disagree by hundreds of meters, more than the skirts covered (1.5 % of a tile's width). Now:
+  - while any tile is drawn from stand-in data, the skirts reach down by the elevation range of the data in view, which bounds any such mismatch (once every tile has its own data and parent they follow the tile size again);
+  - a tile only morphs toward its loaded parent. Before, a coarser ancestor stood in until the parent arrived, which pulled the far part of loaded tiles down to very coarse heights and blurred it;
+  - when the nearest loaded ancestor is more than three levels coarser, a tile three levels up is requested first (one request fills up to 64 tiles), so new terrain no longer starts from very coarse data.
+- Shading seams along tile edges. Slopes were one-sided at a tile's border (it had only its own texels there), so the shading stepped along every tile edge. Each tile now also keeps its neighbours' texels one step past each border (a small second texture), and slopes at tile edges are central differences like everywhere else. `sampleTerrain`, `pick` and the readout use the same.
+
 ### Migrating from 0.3
 
 Most 0.3 code needs a few renames. The ground used to show one *mode* of a virtual "base drape" (or a drape blended with hillshade); in 1.0 it shows a stack of coats, so modes become analysis layers you add, combine and remove.

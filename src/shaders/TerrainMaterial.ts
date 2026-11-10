@@ -155,6 +155,7 @@ export function createTerrainMaterial(options: TerrainMaterialOptions): ShaderMa
   const uniforms: Record<string, IUniform> = {
     // Elevation atlas + geometry
     uElevAtlas: { value: null },
+    uElevHalo: { value: null },
     uSlotSize: { value: options.slotSize },
     uGridSize: { value: options.gridSize },
     uElevationScale: { value: options.metersToScene },
@@ -163,6 +164,7 @@ export function createTerrainMaterial(options: TerrainMaterialOptions): ShaderMa
     uOriginY: { value: 0.0 },
     uCameraLocal: { value: new Vector3() },
     uRefZ: { value: 0.0 },
+    uSkirtRelief: { value: 0.0 },
     // Lighting / wireframe
     uSunDirection: { value: DEFAULT_SUN.clone() },
     uBaseWhite: { value: false },
@@ -324,8 +326,21 @@ export function setTerrainBaseWhite(material: ShaderMaterial, white: boolean): b
   return true;
 }
 
-export function setTerrainAtlas(material: ShaderMaterial, texture: Texture | null): void {
+/** The elevation atlas and its halo (the neighbours' texels past each slot border). */
+export function setTerrainAtlas(material: ShaderMaterial, texture: Texture | null, halo: Texture | null): void {
   material.uniforms.uElevAtlas.value = texture;
+  material.uniforms.uElevHalo.value = halo;
+}
+
+/**
+ * Elevation range in meters that the skirts must cover: the range of the
+ * data in view while some tile is drawn from stand-in data, 0 when every
+ * tile has exact data (skirts then only follow the tile size).
+ */
+export function setTerrainSkirtRelief(material: ShaderMaterial, meters: number): boolean {
+  if (material.uniforms.uSkirtRelief.value === meters) return false;
+  material.uniforms.uSkirtRelief.value = meters;
+  return true;
 }
 
 export function setTerrainDrape(material: ShaderMaterial, texture: Texture | null): boolean {

@@ -41,7 +41,7 @@ export {
   cssColor,
   legendFor,
 } from './ramps';
-export { sampleSurfaceGrid, type GridReader } from './surface';
+export { sampleSurfaceGrid, type GridReader, type OutsideReader } from './surface';
 export * from './builtins';
 export { sunPosition, sunPathOfDay, type SunPosition } from './solar';
 export { planRegion, type RegionPlan, type RegionPlanOptions, type RegionWindow } from './region';

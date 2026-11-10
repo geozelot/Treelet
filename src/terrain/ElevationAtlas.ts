@@ -17,6 +17,16 @@
 //
 // Layers have no shared borders, so sampling can never bleed into another
 // tile — no half-texel insets or sentinel-guarded filtering is needed.
+//
+// Slopes need one texel beyond a tile's border, though: a slope at the edge
+// computed from the tile's own texels alone is one-sided, and differs from
+// the neighbour's (the other side), which shows as a step in the shading
+// along every tile edge. So each layer has a *halo*: for each of its four
+// edges, the same-level neighbour's first interior row or column (the
+// texels one step past the shared edge), kept in a small second texture
+// (S × 4 per layer). The surface shader and its CPU twin read it for taps
+// past the border; where no neighbour is loaded the halo holds nodata and
+// the slope stays one-sided.
 // ============================================================================
 
 import {
@@ -93,6 +103,15 @@ export class ElevationAtlas {
   readonly data: Float32Array<ArrayBuffer>;
   readonly texture: DataArrayTexture;
 
+  /**
+   * Halo per layer: 4 edges × S values (TOP, BOTTOM, LEFT, RIGHT), the
+   * same-level neighbour's texels one step past that edge; nodata where no
+   * neighbour is loaded.
+   */
+  readonly halo: Float32Array<ArrayBuffer>;
+  /** The halo as a texture: S wide, 4 rows (one per edge), one layer per slot. */
+  readonly haloTexture: DataArrayTexture;
+
   /** Original (unstitched) edge texels per layer: 4 edges × S values. */
   private readonly rawEdges: Float32Array;
   private readonly slotMap = new Map<number, SlotInfo>();
@@ -112,6 +131,7 @@ export class ElevationAtlas {
   private lruTail = -1;
 
   private readonly dirtyLayers = new Set<number>();
+  private readonly dirtyHalos = new Set<number>();
   private readonly dirtyStrips: Strip[] = [];
   private readonly stripBuffer: Float32Array;
 
@@ -123,6 +143,7 @@ export class ElevationAtlas {
     this.capacity = capacity;
     this.data = new Float32Array(slotSize * slotSize * capacity);
     this.rawEdges = new Float32Array(capacity * 4 * slotSize);
+    this.halo = new Float32Array(capacity * 4 * slotSize).fill(ELEVATION_NODATA);
     this.stripBuffer = new Float32Array(slotSize * MAX_STITCH_BAND);
     this.pinLimit = capacity - Math.floor(capacity * 0.1);
 
@@ -139,6 +160,19 @@ export class ElevationAtlas {
     this.texture.unpackAlignment = 1;
     this.texture.source.dataReady = false;
     this.texture.needsUpdate = true;
+
+    // Same pattern for the halo: a layer's halo is uploaded with its data
+    this.haloTexture = new DataArrayTexture(this.halo, slotSize, 4, capacity);
+    this.haloTexture.format = RedFormat;
+    this.haloTexture.type = FloatType;
+    this.haloTexture.minFilter = NearestFilter;
+    this.haloTexture.magFilter = NearestFilter;
+    this.haloTexture.wrapS = ClampToEdgeWrapping;
+    this.haloTexture.wrapT = ClampToEdgeWrapping;
+    this.haloTexture.generateMipmaps = false;
+    this.haloTexture.unpackAlignment = 1;
+    this.haloTexture.source.dataReady = false;
+    this.haloTexture.needsUpdate = true;
 
     for (let i = capacity - 1; i >= 0; i--) this.freeLayers.push(i);
   }
@@ -163,7 +197,6 @@ export class ElevationAtlas {
     return this.slotMap.get(key)?.gen ?? 0;
   }
 
-  /** Changes whenever the stored elevations change (sampled results may differ). */
   /**
    * Keys of the tiles whose elevations changed after `version` (written or
    * evicted; a key may repeat), or null when that is no longer known (a
@@ -183,6 +216,7 @@ export class ElevationAtlas {
     if (this.changeLog.length > CHANGE_LOG_SIZE) this.changeLog.splice(0, this.changeLog.length - CHANGE_LOG_SIZE / 2);
   }
 
+  /** Changes whenever the stored elevations change (sampled results may differ). */
   get version(): number {
     return this._version;
   }
@@ -249,10 +283,14 @@ export class ElevationAtlas {
     const smax = S - 1;
     const base = slot.layer * S * S;
     const d = this.data;
+    const halo = this.halo;
+    const hb = slot.layer * 4 * S;
     return sampleSurfaceGrid(
       (i, j) => d[base + j * S + i], smax,
       Math.min(Math.max(u, 0), 1) * smax, Math.min(Math.max(v, 0), 1) * smax,
       texelMeters, ELEVATION_NODATA + 1,
+      // One step past a border: the neighbouring tile's texel, as in the shader
+      (i, j) => (i < 0 ? halo[hb + LEFT * S + j] : i > smax ? halo[hb + RIGHT * S + j] : j < 0 ? halo[hb + TOP * S + i] : halo[hb + BOTTOM * S + i]),
     );
   }
 
@@ -317,6 +355,7 @@ export class ElevationAtlas {
     this.captureRawEdges(slot.layer);
     this.dirtyLayers.add(slot.layer);
     this.stitch(slot);
+    this.refreshHalos(slot);
     return slot;
   }
 
@@ -351,26 +390,44 @@ export class ElevationAtlas {
     this.lruHead = -1;
     this.lruTail = -1;
     this.dirtyLayers.clear();
+    this.dirtyHalos.clear();
     this.dirtyStrips.length = 0;
   }
 
   /** Re-upload every occupied layer (after a WebGL context restore). */
   markAllDirty(): void {
     this.dirtyStrips.length = 0;
-    for (const slot of this.slotMap.values()) this.dirtyLayers.add(slot.layer);
+    for (const slot of this.slotMap.values()) {
+      this.dirtyLayers.add(slot.layer);
+      this.dirtyHalos.add(slot.layer);
+    }
   }
 
   /** Whether flush() has work to do. */
   get hasPendingUploads(): boolean {
-    return this.dirtyLayers.size > 0 || this.dirtyStrips.length > 0;
+    return this.dirtyLayers.size > 0 || this.dirtyStrips.length > 0 || this.dirtyHalos.size > 0;
   }
 
-  /** Upload dirty layers and stitched edge strips. Returns true if anything was uploaded. */
-  flush(writer: ArrayTextureWriter): boolean {
+  /**
+   * Upload dirty layers, stitched edge strips and halos (`haloWriter` writes
+   * the halo texture). Returns true if anything was uploaded.
+   */
+  flush(writer: ArrayTextureWriter, haloWriter: ArrayTextureWriter): boolean {
     if (!this.hasPendingUploads) return false;
-    if (!writer.begin()) return false;
-    const gl = writer.context!;
+    let uploaded = false;
     const S = this.slotSize;
+    if (this.dirtyHalos.size > 0 && haloWriter.begin()) {
+      const gl = haloWriter.context!;
+      for (const layer of this.dirtyHalos) {
+        haloWriter.write(0, 0, 0, layer, S, 4, gl.RED, gl.FLOAT, this.halo.subarray(layer * 4 * S, (layer + 1) * 4 * S));
+      }
+      haloWriter.end();
+      this.dirtyHalos.clear();
+      uploaded = true;
+    }
+    if (this.dirtyLayers.size === 0 && this.dirtyStrips.length === 0) return uploaded;
+    if (!writer.begin()) return uploaded;
+    const gl = writer.context!;
     for (const layer of this.dirtyLayers) {
       writer.write(0, 0, 0, layer, S, S, gl.RED, gl.FLOAT, this.data.subarray(layer * S * S, (layer + 1) * S * S));
     }
@@ -392,6 +449,7 @@ export class ElevationAtlas {
 
   dispose(): void {
     this.texture.dispose();
+    this.haloTexture.dispose();
     this.clear();
   }
 
@@ -429,6 +487,9 @@ export class ElevationAtlas {
     this.slotMap.set(key, slot);
     this.lruAppend(slot);
     if (this.pinned.has(key)) this.pinnedOccupied++;
+    // The layer's previous tile had other neighbours
+    this.halo.fill(ELEVATION_NODATA, layer * 4 * this.slotSize, (layer + 1) * 4 * this.slotSize);
+    this.dirtyHalos.add(layer);
     return slot;
   }
 
@@ -481,6 +542,49 @@ export class ElevationAtlas {
       r[e + LEFT * S + i] = d[base + i * S];
       r[e + RIGHT * S + i] = d[base + i * S + S - 1];
     }
+  }
+
+  /**
+   * Bring the halos up to date after `slot` was written and stitched. That
+   * changed texels of the slot and (within their stitch bands) of its four
+   * edge neighbours, and every tile beside one of those five reads a row or
+   * column of it.
+   */
+  private refreshHalos(slot: SlotInfo): void {
+    const { z, x, y } = slot;
+    const changed = [
+      slot,
+      this.neighbour(z, x - 1, y), this.neighbour(z, x + 1, y),
+      this.neighbour(z, x, y - 1), this.neighbour(z, x, y + 1),
+    ];
+    for (const m of changed) {
+      if (!m) continue;
+      this.copyHalo(this.neighbour(m.z, m.x + 1, m.y), LEFT, m);   // m lies to the left of that tile
+      this.copyHalo(this.neighbour(m.z, m.x - 1, m.y), RIGHT, m);
+      this.copyHalo(this.neighbour(m.z, m.x, m.y + 1), TOP, m);
+      this.copyHalo(this.neighbour(m.z, m.x, m.y - 1), BOTTOM, m);
+    }
+  }
+
+  /**
+   * Fill `target`'s halo along `edge` from `source`, the tile beyond that
+   * edge: its row or column one step in from the shared edge.
+   */
+  private copyHalo(target: SlotInfo | null, edge: number, source: SlotInfo): void {
+    if (!target || target === source) return;
+    const S = this.slotSize;
+    const last = S - 1;
+    const d = this.data;
+    const from = source.layer * S * S;
+    const to = target.layer * 4 * S + edge * S;
+    const h = this.halo;
+    switch (edge) {
+      case TOP: for (let i = 0; i < S; i++) h[to + i] = d[from + (last - 1) * S + i]; break;
+      case BOTTOM: for (let i = 0; i < S; i++) h[to + i] = d[from + S + i]; break;
+      case LEFT: for (let i = 0; i < S; i++) h[to + i] = d[from + i * S + last - 1]; break;
+      default: for (let i = 0; i < S; i++) h[to + i] = d[from + i * S + 1]; break;
+    }
+    this.dirtyHalos.add(target.layer);
   }
 
   private neighbour(z: number, x: number, y: number): SlotInfo | null {

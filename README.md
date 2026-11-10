@@ -17,8 +17,8 @@ The library is designed to be easily extendable - via registry or plugin package
 #### Rendering & Performance:
 
 - **Single draw call rendering** - All visible tiles in one instanced GPU call from texture-array atlases
-- **Screen-space LOD with CDLOD geomorphing** - Tile detail follows on-screen size at any zoom, tilt or viewport; vertices morph continuously into the coarser level, so LOD boundaries are watertight and never pop
-- **Seamless, true-to-scale relief** - Shared tile edges are stitched on load; heights are Mercator-corrected so slope, aspect and hillshade are accurate at every latitude
+- **Screen-space LOD with CDLOD geomorphing** - Tile detail follows on-screen size at any zoom, tilt or viewport; vertices morph continuously into the coarser level, so LOD boundaries are watertight and never pop; while tiles load, skirts as deep as the relief in view close the gaps between tiles drawn from different data
+- **Seamless, true-to-scale relief** - Shared tile edges are stitched on load and slopes at tile edges use the neighbouring tile's heights, so shading is continuous across tiles; heights are Mercator-corrected so slope, aspect and hillshade are accurate at every latitude
 - **High-precision rendering** - Floating render origin and adaptive clip planes keep street-level zooms stable anywhere on the globe
 - **Off-main-thread data pipeline** - Fetch, decode, resampling and mipmapping run in workers; failed tiles back off instead of retrying in a loop
 - **Render on demand** - No GPU work while the view and data are idle

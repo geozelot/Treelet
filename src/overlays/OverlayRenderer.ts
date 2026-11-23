@@ -152,6 +152,14 @@ interface Entry {
   labels: LabelSite[];
   group: Group;
   lineGroups: LineGroup[];
+  /**
+   * Line materials by width and style opacity, kept across rebuilds (a new
+   * material per rebuild would compile its program again: the tools'
+   * rubber band is rebuilt on every pointer move).
+   */
+  lineMaterials: Map<string, LineMaterial>;
+  /** Length of the lines in world units (sets the densifying step). */
+  lineLength: number;
   pointObject: Points | null;
   pointMaterial: ShaderMaterial | null;
   /** Whether the line and point geometry exist for the current data and style. */
@@ -181,6 +189,13 @@ function ringCenter(ring: LngLat[]): LngLat {
   for (const p of ring) { lng += p.lng; lat += p.lat; }
   return { lng: lng / ring.length, lat: lat / ring.length };
 }
+
+/**
+ * A redrape samples again only the vertices in the changed tiles; past this
+ * many changed tiles it samples every vertex (testing each against every
+ * tile would cost more).
+ */
+const MAX_REDRAPE_RECTS = 64;
 
 function inRects(x: number, y: number, rects: readonly WorldRect[]): boolean {
   for (const r of rects) if (x >= r.west && x <= r.east && y >= r.south && y <= r.north) return true;
@@ -220,6 +235,9 @@ export class OverlayRenderer {
     group.matrixAutoUpdate = false;
     group.updateMatrix();
     if (!old) this.deps.scene.add(group);
+    const lines = data.lines.map((l) => ({ pts: l.coords.map((c) => { const w = toWorld(c); return [w.x, w.y] as [number, number]; }), feature: l.feature }));
+    let lineLength = 0;
+    for (const l of lines) for (let i = 1; i < l.pts.length; i++) lineLength += Math.hypot(l.pts[i][0] - l.pts[i - 1][0], l.pts[i][1] - l.pts[i - 1][1]);
     const entry: Entry = {
       id,
       input: {
@@ -238,10 +256,12 @@ export class OverlayRenderer {
       anchorX: anchor.x,
       anchorY: anchor.y,
       points: data.points.map((p) => ({ ...toWorld(p.lngLat), feature: p.feature })),
-      lines: data.lines.map((l) => ({ pts: l.coords.map((c) => { const w = toWorld(c); return [w.x, w.y] as [number, number]; }), feature: l.feature })),
+      lines,
       labels: [],
       group,
       lineGroups: [],
+      lineMaterials: old?.lineMaterials ?? new Map(),
+      lineLength,
       pointObject: null,
       pointMaterial: old?.pointMaterial ?? null,
       built: false,
@@ -348,7 +368,8 @@ export class OverlayRenderer {
       if (!e.built) {
         this.build(e, version, now);
         changed = true;
-      } else if (e.drapedVersion !== version && now - e.lastDrape >= DRAPE_INTERVAL_MS) {
+      } else if (now - e.lastDrape >= DRAPE_INTERVAL_MS && (e.drapedVersion !== version || !this.stepFits(e))) {
+        // New terrain, or the terrain in view got much finer or coarser (zooming over loaded tiles)
         this.redrape(e, version, now);
         changed = true;
       }
@@ -434,12 +455,11 @@ export class OverlayRenderer {
     e.fillCoat = fills.add(e.input.name, raster, e.id);
   }
 
-  /** Remove the line and point geometry (data or style changed). */
+  /** Remove the line and point geometry (data or style changed); the line materials are kept for the rebuild. */
   private teardownGeometry(e: Entry): void {
     for (const g of e.lineGroups) {
       e.group.remove(g.object);
       g.geometry.dispose();
-      g.material.dispose();
     }
     e.lineGroups = [];
     if (e.pointObject) {
@@ -453,6 +473,8 @@ export class OverlayRenderer {
   /** Remove everything of an overlay: geometry, materials, group and fill coat. */
   private teardown(e: Entry): void {
     this.teardownGeometry(e);
+    for (const m of e.lineMaterials.values()) m.dispose();
+    e.lineMaterials.clear();
     e.pointMaterial?.dispose();
     e.pointMaterial = null;
     if (e.fillCoat) {
@@ -471,10 +493,15 @@ export class OverlayRenderer {
   /** The densifying step for the terrain in view (bounded by the vertex budget). */
   private stepFor(e: Entry): number {
     let step = Math.max(this.deps.texelWorld() * 2, 1e-9);
-    let total = 0;
-    for (const l of e.lines) for (let i = 1; i < l.pts.length; i++) total += Math.hypot(l.pts[i][0] - l.pts[i - 1][0], l.pts[i][1] - l.pts[i - 1][1]);
-    if (total / step > MAX_LINE_VERTICES) step = total / MAX_LINE_VERTICES;
+    if (e.lineLength / step > MAX_LINE_VERTICES) step = e.lineLength / MAX_LINE_VERTICES;
     return step;
+  }
+
+  /** Whether the lines' step still suits the terrain in view (else they are densified again). */
+  private stepFits(e: Entry): boolean {
+    if (e.lines.length === 0) return true;
+    const step = this.stepFor(e);
+    return step >= e.step / 2 && step <= e.step * 4;
   }
 
   /** Build line and point geometry on the current terrain. */
@@ -489,6 +516,7 @@ export class OverlayRenderer {
 
     // ==== Lines: grouped by width and style opacity ====
     const groups = new Map<string, { width: number; opacity: number; pos: number[]; col: number[] }>();
+    const used = new Set<string>();
     for (const l of e.lines) {
       const st = e.styles[l.feature];
       if (!st || st.lineOpacity <= 0) continue;
@@ -513,7 +541,11 @@ export class OverlayRenderer {
       const geometry = new LineSegmentsGeometry();
       geometry.setPositions(pos); // keeps `pos` as its buffer: heights are updated in place
       geometry.setColors(new Float32Array(g.col));
-      const material = createLineMaterial(g.width, g.opacity, this.resolution);
+      const key = `${g.width}|${g.opacity}`;
+      let material = e.lineMaterials.get(key);
+      if (material) material.resolution.copy(this.resolution);
+      else e.lineMaterials.set(key, (material = createLineMaterial(g.width, g.opacity, this.resolution)));
+      used.add(key);
       const object = new LineSegments2(geometry, material);
       object.renderOrder = order;
       object.frustumCulled = false; // heights change in place; the bounds would go stale
@@ -521,6 +553,13 @@ export class OverlayRenderer {
       const group: LineGroup = { width: g.width, baseOpacity: g.opacity, material, object, geometry, pos, chunks: chunkBounds(pos) };
       this.applyGroupOpacity(e, group);
       e.lineGroups.push(group);
+    }
+
+    // Materials of groups the style no longer has
+    for (const [key, m] of e.lineMaterials) {
+      if (used.has(key)) continue;
+      m.dispose();
+      e.lineMaterials.delete(key);
     }
 
     // ==== Points ====
@@ -574,12 +613,12 @@ export class OverlayRenderer {
    * finer (detail to follow) or coarser (vertices to spare).
    */
   private redrape(e: Entry, version: number, now: number): void {
-    const step = this.stepFor(e);
-    if (step < e.step / 2 || step > e.step * 4) {
+    if (!this.stepFits(e)) {
       this.build(e, version, now);
       return;
     }
-    const rects = this.deps.changesSince(e.drapedVersion);
+    const changes = this.deps.changesSince(e.drapedVersion);
+    const rects = changes && changes.length <= MAX_REDRAPE_RECTS ? changes : null;
     const { groundHeight } = this.deps;
     const ax = e.anchorX;
     const ay = e.anchorY;
@@ -729,14 +768,17 @@ function updateLineHeights(g: LineGroup, rects: readonly WorldRect[] | null, hei
   const segments = pos.length / 6;
   let any = false;
   for (let c = 0; c * CHUNK < segments; c++) {
+    // The changed areas this chunk touches (its ends are tested against those only)
+    let near: WorldRect[] | null = null;
     if (rects) {
       const w = g.chunks[c * 4], s = g.chunks[c * 4 + 1], e = g.chunks[c * 4 + 2], n = g.chunks[c * 4 + 3];
-      if (!rects.some((r) => r.west <= e && w <= r.east && r.south <= n && s <= r.north)) continue;
+      near = rects.filter((r) => r.west <= e && w <= r.east && r.south <= n && s <= r.north);
+      if (near.length === 0) continue;
     }
     const end = Math.min(segments, (c + 1) * CHUNK);
     for (let i = c * CHUNK; i < end; i++) {
       for (let k = i * 6; k <= i * 6 + 3; k += 3) {
-        if (rects && !inRects(pos[k], pos[k + 1], rects)) continue;
+        if (near && !inRects(pos[k], pos[k + 1], near)) continue;
         pos[k + 2] = height(pos[k], pos[k + 1]);
         any = true;
       }

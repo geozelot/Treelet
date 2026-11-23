@@ -2,6 +2,9 @@
 // treelet.js - Measurement formatting
 // ============================================================================
 
+import type { PathMeasure } from './measure';
+import type { LineOfSightResult } from '../core/types';
+
 const thin = ' ';
 
 function group(n: number): string {
@@ -28,4 +31,29 @@ export function formatArea(m2: number): string {
 /** 1 234 m. */
 export function formatElevation(m: number | null): string {
   return m === null || !Number.isFinite(m) ? '–' : `${group(m)} m`;
+}
+
+/** A measured path as label / value pairs (the Measure page and the profile show the same ones). */
+export function pathStats(p: PathMeasure): Array<[label: string, value: string]> {
+  const pairs: Array<[string, string]> = [
+    ['Length', formatDistance(p.distance)],
+    ['Terrain', formatDistance(p.surfaceDistance)],
+    ['Ascent', formatElevation(p.gain)],
+    ['Descent', formatElevation(p.loss)],
+  ];
+  if (p.minElevation !== null) pairs.push(['Lowest', formatElevation(p.minElevation)], ['Highest', formatElevation(p.maxElevation)]);
+  return pairs;
+}
+
+/** A line of sight as label / value pairs, the result first (the Measure page shows the first three). */
+export function sightStats(s: LineOfSightResult): Array<[label: string, value: string]> {
+  const pairs: Array<[string, string]> = [['Result', s.visible ? 'Visible' : 'Hidden']];
+  if (!s.visible && s.obstruction) pairs.push(['Blocked at', formatDistance(s.obstruction.distance)]);
+  pairs.push(
+    ['Distance', formatDistance(s.distance)],
+    ['Clearance', formatElevation(s.clearance)],
+    ['Eye', formatElevation(s.eyeElevation)],
+    ['Target', formatElevation(s.targetElevation)],
+  );
+  return pairs;
 }

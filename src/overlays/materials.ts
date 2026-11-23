@@ -20,8 +20,25 @@ export function srgbToLinear(c: number): number {
   return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
 }
 
-/** Stencil values of translucent line objects (1–255, cycling). */
-let nextStencilRef = 0;
+/** Stencil values held by translucent line materials (1–255; freed when a material is disposed). */
+const stencilRefs = new Set<number>();
+let sharedStencilRef = 0;
+
+/**
+ * A stencil value no other live translucent line uses (two lines with the
+ * same value would hide each other where they overlap). Only with 255 in
+ * use at once do values repeat.
+ */
+function takeStencilRef(material: LineMaterial): number {
+  for (let ref = 1; ref <= 255; ref++) {
+    if (stencilRefs.has(ref)) continue;
+    stencilRefs.add(ref);
+    material.addEventListener('dispose', () => stencilRefs.delete(ref));
+    return ref;
+  }
+  sharedStencilRef = (sharedStencilRef % 255) + 1;
+  return sharedStencilRef;
+}
 
 /**
  * Opacity of a line material. A translucent line is drawn without depth
@@ -39,7 +56,7 @@ export function setLineOpacity(material: LineMaterial, opacity: number): void {
   material.opacity = opacity;
   material.stencilWrite = translucent;
   if (translucent) {
-    if (material.stencilRef === 0) material.stencilRef = (nextStencilRef = (nextStencilRef % 255) + 1);
+    if (material.stencilRef === 0) material.stencilRef = takeStencilRef(material);
     material.stencilFunc = NotEqualStencilFunc;
     material.stencilZPass = ReplaceStencilOp;
     material.stencilFail = KeepStencilOp;

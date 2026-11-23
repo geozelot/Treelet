@@ -4,8 +4,8 @@
 // <treelet-panel> - the layers, as the hub's Layers page: rows of 24 that
 // drill into sub-pages (one level deep, with a back row on top).
 //
-//   Overlay  - running region analyses (progress, cancel), a pending pick,
-//              failures; then the coat stack, top first: eye, name → the
+//   Overlay  - running region analyses, a pending pick and failures
+//              (<treelet-jobs>); then the coat stack, top first: eye, name → the
 //              coat's page; then Add layer → Analysis kinds and Imagery
 //   Terrain  - Source → the base layers (a plain row with only one),
 //              Exaggeration (scrub), Light → sun settings, Mesh (segments)
@@ -21,8 +21,9 @@
 // ============================================================================
 
 import { BaseElement, escapeHtml } from './dom';
-import { kitStyles, scrubHtml, progressHtml, bindScrubs, setScrub } from './kit';
-import { EYE_SVG, EYE_OFF_SVG, CHEV_RIGHT_SVG, CHEV_LEFT_SVG, PLUS_SVG, CLOSE_SVG } from './icons';
+import { kitStyles, scrubHtml, bindScrubs, setScrub } from './kit';
+import { EYE_SVG, EYE_OFF_SVG, CHEV_RIGHT_SVG, CHEV_LEFT_SVG, PLUS_SVG } from './icons';
+import type { TreeletJobs } from './TreeletJobs';
 import type { Treelet } from '../core/Treelet';
 import type { BlendMode } from '../core/types';
 import type { BaseLayer } from '../layers/BaseLayer';
@@ -43,14 +44,10 @@ const BLEND_MODES: { id: BlendMode; label: string }[] = [
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
-/** How long a failed analysis stays listed (ms). */
-const ERROR_MS = 8000;
-
 const panelStyles = /* css */ `
   ${kitStyles}
   :host { display: flex; flex-direction: column; gap: 2px; }
-  .panel, .jobs { display: flex; flex-direction: column; gap: 2px; }
-  .jobs:empty { display: none; }
+  .panel { display: flex; flex-direction: column; gap: 2px; }
   .row > .ramp { margin-left: auto; }
 `;
 
@@ -87,10 +84,6 @@ function formatHour(h: number): string {
 
 function sunText(azimuth: number, altitude: number): string {
   return altitude < 0 ? `${Math.round(azimuth)}° · below the horizon` : `${Math.round(azimuth)}° · ${Math.round(altitude)}° up`;
-}
-
-function stageText(stage: 'loading' | 'computing', progress: number): string {
-  return `${stage === 'loading' ? 'Loading' : 'Computing'} ${Math.round(progress * 100)}%`;
 }
 
 const MINUTES_PER_DAY = 24 * 60;
@@ -140,6 +133,12 @@ function choices(label: string, options: readonly Segment[]): string {
     return `<button type="button" class="row${o.active ? ' sel' : ''}" data-action="${o.action}" data-layer-id="${escapeHtml(o.layerId)}"${param}`
       + ` data-value="${escapeHtml(o.value)}" data-focus-key="${escapeHtml(o.focusKey)}" aria-pressed="${o.active}"><span class="t">${escapeHtml(o.label)}</span></button>`;
   }).join('');
+}
+
+/** A date as the value of a date input (yyyy-mm-dd, local time). */
+function dayValue(time: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${time.getFullYear()}-${pad(time.getMonth() + 1)}-${pad(time.getDate())}`;
 }
 
 /** The focused element of a shadow root (null when focus is elsewhere or gone). */
@@ -207,13 +206,13 @@ export class TreeletPanel extends BaseElement {
   private readonly pendingUpdates = new Set<string>();
   private updateFrame = 0;
   private sunPending = false;
+  /** The layers changed while a pointer was down: the page is rebuilt once it is up. */
+  private layoutPending = false;
 
   /** Persistent containers: only the page's markup is replaced on re-render. */
   private panelEl: HTMLDivElement | null = null;
-  /** Running jobs, a pending pick and failures (rebuilt only when one starts or ends). */
-  private jobsEl: HTMLDivElement | null = null;
-  private pickPrompt: string | null = null;
-  private readonly errors = new Map<string, { label: string; message: string; timer: ReturnType<typeof setTimeout> }>();
+  /** Running jobs, a pending pick and failures, placed in the Overlay group on every rebuild. */
+  private jobsEl: TreeletJobs | null = null;
   private subscribed = false;
 
   constructor() {
@@ -221,10 +220,6 @@ export class TreeletPanel extends BaseElement {
     this.shadow = this.attachShadow({ mode: 'open' });
     this.shadow.innerHTML = `<style>${panelStyles}</style><div class="panel"></div>`;
     this.panelEl = this.shadow.querySelector('.panel') as HTMLDivElement;
-    this.jobsEl = document.createElement('div');
-    this.jobsEl.className = 'jobs';
-    this.jobsEl.setAttribute('role', 'list');
-    this.jobsEl.setAttribute('aria-label', 'Running analyses');
     this.shadow.addEventListener('click', this.handleClick);
     this.shadow.addEventListener('change', this.handleChange);
     this.shadow.addEventListener('pointerdown', this.handlePointerDown, true);
@@ -237,23 +232,21 @@ export class TreeletPanel extends BaseElement {
     if (this.map !== map) this.unsubscribe();
     this.map = map;
     this.toggleAttribute('glass', options.glass === true);
+    this.jobsEl ??= document.createElement('treelet-jobs') as TreeletJobs;
+    this.jobsEl.attach(map, options);
     if (this.isConnected) this.subscribe();
-    this.renderJobs();
     this.render();
   }
 
   connectedCallback(): void {
     if (this.map) {
       this.subscribe();
-      this.renderJobs();
       this.render();
     }
   }
 
   disconnectedCallback(): void {
     this.unsubscribe();
-    for (const e of this.errors.values()) clearTimeout(e.timer);
-    this.errors.clear();
   }
 
   private subscribe(): void {
@@ -263,11 +256,6 @@ export class TreeletPanel extends BaseElement {
     map.on('layerchange', this.onLayerChange);
     map.on('layerupdate', this.onLayerUpdate);
     map.on('sunchange', this.onSunChange);
-    map.on('analysisstart', this.onJobsChange);
-    map.on('analysisprogress', this.onProgress);
-    map.on('analysisend', this.onEnd);
-    map.on('pickstart', this.onPickStart);
-    map.on('pickend', this.onPickEnd);
   }
 
   private unsubscribe(): void {
@@ -277,11 +265,6 @@ export class TreeletPanel extends BaseElement {
     map.off('layerchange', this.onLayerChange);
     map.off('layerupdate', this.onLayerUpdate);
     map.off('sunchange', this.onSunChange);
-    map.off('analysisstart', this.onJobsChange);
-    map.off('analysisprogress', this.onProgress);
-    map.off('analysisend', this.onEnd);
-    map.off('pickstart', this.onPickStart);
-    map.off('pickend', this.onPickEnd);
     if (this.updateFrame) cancelAnimationFrame(this.updateFrame);
     this.updateFrame = 0;
   }
@@ -289,31 +272,20 @@ export class TreeletPanel extends BaseElement {
   private readonly onLayerChange = (): void => this.refresh();
   private readonly onLayerUpdate = (e: { id: string }): void => this.layerUpdated(e.id);
   private readonly onSunChange = (): void => this.sunChanged();
-  private readonly onJobsChange = (): void => this.renderJobs();
-  private readonly onPickStart = (e: { prompt: string }): void => { this.pickPrompt = e.prompt; this.renderJobs(); };
-  private readonly onPickEnd = (): void => { this.pickPrompt = null; this.renderJobs(); };
 
-  private readonly onProgress = (e: { id: string; stage: 'loading' | 'computing'; progress: number }): void => {
-    const row = this.jobsEl?.querySelector<HTMLElement>(`[data-job="${CSS.escape(e.id)}"] .scrub`);
-    if (!row) { this.renderJobs(); return; }
-    const fill = row.querySelector<HTMLElement>('.fl');
-    const text = row.querySelector<HTMLElement>('.v');
-    if (fill) fill.style.width = `${Math.round(e.progress * 100)}%`;
-    if (text) text.textContent = stageText(e.stage, e.progress);
-    row.setAttribute('aria-valuenow', String(Math.round(e.progress * 100)));
-  };
-
-  private readonly onEnd = (e: { id: string; label: string; status: string; error?: string }): void => {
-    if (e.status === 'error') {
-      const timer = setTimeout(() => { this.errors.delete(e.id); this.renderJobs(); }, ERROR_MS);
-      this.errors.set(e.id, { label: e.label, message: e.error ?? 'failed', timer });
-    }
-    this.renderJobs();
-  };
-
-  /** Show the map's layers again (after layers were added, removed or reordered). */
+  /**
+   * Show the map's layers again (after layers were added, removed or
+   * reordered). While a pointer is down in the panel the page is rebuilt
+   * after it is released: rebuilding would end a scrub's drag or drop the
+   * click of the pressed row.
+   */
   refresh(): void {
-    if (this.map) this.render();
+    if (!this.map) return;
+    if (this.pointerHeld) {
+      this.layoutPending = true;
+      return;
+    }
+    this.render();
   }
 
   /**
@@ -350,13 +322,57 @@ export class TreeletPanel extends BaseElement {
   }
 
   private flushUpdates(): void {
-    if (!this.map || !this.panelEl) return;
+    // A press began after the frame was scheduled: wait for its release (which schedules again)
+    if (!this.map || !this.panelEl || this.pointerHeld) return;
     const v = this.view;
+    const layout = this.layoutPending;
     const coat = v.kind === 'coat' && this.pendingUpdates.has(v.id);
-    const sun = this.sunPending && (v.kind === 'light' || v.kind === 'main');
+    const sun = this.sunPending;
+    this.layoutPending = false;
     this.pendingUpdates.clear();
     this.sunPending = false;
-    if (coat || sun) this.render();
+    if (layout || coat) this.render();
+    else if (sun) this.showSun();
+  }
+
+  /**
+   * Show where the sun is now, in place: the Light row's summary on the
+   * layers, the scrubs, day and position on the Light page (rebuilt only
+   * when it switched between a manual sun and a date). An animated sun
+   * (a sun time set every frame) leaves the rows, and the day being typed,
+   * as they are.
+   */
+  private showSun(): void {
+    const map = this.map!;
+    const panel = this.panelEl!;
+    if (this.view.kind === 'main') {
+      const row = panel.querySelector<HTMLElement>('[data-view="light"]');
+      const summary = this.lightSummary();
+      row?.setAttribute('aria-label', `Light: ${summary}`);
+      const v = row?.querySelector<HTMLElement>('.v');
+      if (v) v.textContent = summary;
+      return;
+    }
+    if (this.view.kind !== 'light') return;
+    const time = map.getSunTime?.() ?? null;
+    const day = panel.querySelector<HTMLInputElement>('input[data-action="sunday"]');
+    if ((time !== null) !== (day !== null)) {
+      this.render();
+      return;
+    }
+    const scrub = (action: string) => panel.querySelector<HTMLElement>(`.scrub[data-action="${action}"]`);
+    if (!time) {
+      const azimuth = scrub('azimuth');
+      const altitude = scrub('altitude');
+      if (azimuth) setScrub(azimuth, map.getSunAzimuth(), `${Math.round(map.getSunAzimuth())}°`);
+      if (altitude) setScrub(altitude, map.getSunAltitude(), `${Math.round(map.getSunAltitude())}°`);
+      return;
+    }
+    if (day && activeIn(this.shadow) !== day) day.value = dayValue(time);
+    const hour = scrub('sunhour');
+    const h = time.getHours() + time.getMinutes() / 60;
+    if (hour) setScrub(hour, h, formatHour(h));
+    this.showSunPosition();
   }
 
   /** Run a change of the map made by the panel (its events then don't re-render the panel). */
@@ -397,23 +413,6 @@ export class TreeletPanel extends BaseElement {
       e.stopPropagation();
       const kind = nav.dataset.view as View['kind'];
       this.go(kind === 'coat' ? { kind, id: nav.dataset.layerId! } : { kind } as View);
-      return;
-    }
-
-    // === Jobs: cancel a run or a pick, dismiss a failure ===
-    const cancel = target.closest<HTMLElement>('[data-job-cancel]');
-    if (cancel) {
-      e.stopPropagation();
-      const id = cancel.dataset.jobCancel!;
-      if (id === 'pick') {
-        map.cancelPick();
-      } else if (this.errors.has(id)) {
-        clearTimeout(this.errors.get(id)!.timer);
-        this.errors.delete(id);
-        this.renderJobs();
-      } else {
-        map.cancelAnalysis(id);
-      }
       return;
     }
 
@@ -554,7 +553,8 @@ export class TreeletPanel extends BaseElement {
       window.removeEventListener('pointerup', release, true);
       window.removeEventListener('pointercancel', release, true);
       this.pointerHeld = false;
-      if (this.pendingUpdates.size > 0 || this.sunPending) this.scheduleUpdate();
+      // On the next frame, after the click the release may still make
+      if (this.layoutPending || this.pendingUpdates.size > 0 || this.sunPending) this.scheduleUpdate();
     };
     window.addEventListener('pointerup', release, true);
     window.addEventListener('pointercancel', release, true);
@@ -688,24 +688,6 @@ export class TreeletPanel extends BaseElement {
     return this.view;
   }
 
-  /** Running jobs, failures and a pending pick (rebuilt only when one starts or ends). */
-  private renderJobs(): void {
-    if (!this.map || !this.jobsEl) return;
-    const rows: string[] = [];
-    const cancel = (id: string, label: string, verb = 'Cancel') =>
-      `<button type="button" class="ib" data-job-cancel="${escapeHtml(id)}" aria-label="${verb} ${escapeHtml(label)}" title="${verb}">${CLOSE_SVG}</button>`;
-    if (this.pickPrompt) {
-      rows.push(`<div class="row wrap tight" data-job="pick" role="listitem"><span class="t dim" style="flex: 1; padding: 0 6px">${escapeHtml(this.pickPrompt)} · Esc</span>${cancel('pick', 'the pick')}</div>`);
-    }
-    for (const j of this.map.getAnalysisJobs?.() ?? []) {
-      rows.push(`<div class="duo" data-job="${escapeHtml(j.id)}" role="listitem">${progressHtml(j.label, stageText(j.stage, j.progress), j.progress)}${cancel(j.id, j.label)}</div>`);
-    }
-    for (const [id, e] of this.errors) {
-      rows.push(`<div class="row wrap tight" data-job="${escapeHtml(id)}" role="listitem"><span class="t" style="flex: 1; padding: 0 6px">${escapeHtml(e.label)} <span class="err">${escapeHtml(e.message)}</span></span>${cancel(id, e.label, 'Dismiss')}</div>`);
-    }
-    this.jobsEl.innerHTML = rows.join('');
-  }
-
   // =========================================================================
   // The layers
   // =========================================================================
@@ -835,8 +817,7 @@ export class TreeletPanel extends BaseElement {
       return parts.join('');
     }
     // Date mode: the sun stands where it does at that local time over the map center
-    const pad = (n: number) => String(n).padStart(2, '0');
-    const day = `${time.getFullYear()}-${pad(time.getMonth() + 1)}-${pad(time.getDate())}`;
+    const day = dayValue(time);
     const hour = time.getHours() + time.getMinutes() / 60;
     parts.push(`<div class="row fill"><span class="k">Day</span>
       <input type="date" class="date" data-action="sunday" data-layer-id="sun" data-focus-key="sun:day" value="${day}" aria-label="Day"></div>`);

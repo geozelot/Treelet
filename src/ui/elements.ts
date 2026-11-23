@@ -15,10 +15,13 @@ import { TreeletProfile } from './TreeletProfile';
 import { TreeletToolbar } from './TreeletToolbar';
 import { TreeletInfo } from './TreeletInfo';
 import { TreeletHub } from './TreeletHub';
+import { TreeletJobs } from './TreeletJobs';
 
 /** Register the treelet-* custom elements (once). */
 export function defineTreeletElements(): void {
   if (typeof customElements === 'undefined') return;
+  // Parts first: the elements that hold them create them in their constructors and attach()
+  if (!customElements.get('treelet-jobs')) customElements.define('treelet-jobs', TreeletJobs);
   if (!customElements.get('treelet-panel')) customElements.define('treelet-panel', TreeletPanel);
   if (!customElements.get('treelet-compass')) customElements.define('treelet-compass', TreeletCompass);
   if (!customElements.get('treelet-attribution')) customElements.define('treelet-attribution', TreeletAttribution);

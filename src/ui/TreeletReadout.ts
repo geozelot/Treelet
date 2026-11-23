@@ -139,13 +139,14 @@ export class TreeletReadout extends BaseElement {
   }
 
   /**
-   * Whether the event comes from the map itself (its canvas or container),
-   * not from a control over it (columns, compass, profile…).
+   * Whether the event comes from the map itself (its canvas, a child of the
+   * container, or the container), not from a control over it (columns,
+   * compass, profile…). The container may itself be in a shadow root.
    */
   private onMapSurface(e: PointerEvent): boolean {
     const origin = e.composedPath()[0] ?? e.target;
     if (origin === this.target) return true;
-    return origin instanceof HTMLCanvasElement && !(origin.getRootNode() instanceof ShadowRoot);
+    return origin instanceof HTMLCanvasElement && origin.parentNode === this.target;
   }
 
   private position(e: PointerEvent): { x: number; y: number } {
@@ -209,11 +210,11 @@ export class TreeletReadout extends BaseElement {
     const rows: Array<[string, string]> = pick
       ? formatReadout(pick)
       : [['Elevation', EMPTY], ['Slope', EMPTY], ['Aspect', EMPTY]];
-    const layer = this.extraLayer();
-    if (layer) {
-      const v = pick ? this.map!.getAnalysisValue(layer.id, pick.lngLat) : null;
+    const extra = this.extraRow(pick);
+    if (extra) {
+      const { layer, value } = extra;
       const unit = 'unit' in layer && layer.unit ? ` ${layer.unit}` : '';
-      rows.push([layer.layerName, v === null ? EMPTY : `${formatValue(v)}${unit}`]);
+      rows.push([layer.layerName, value === null ? EMPTY : `${formatValue(value)}${unit}`]);
     }
     // Touch screens sample where they are tapped
     const touchOnly = typeof matchMedia === 'function' && matchMedia('(hover: none)').matches;
@@ -224,16 +225,24 @@ export class TreeletReadout extends BaseElement {
       ).join('');
   }
 
-  /** The topmost visible analysis coat the three lines don't already show. */
-  private extraLayer(): StackLayer | null {
+  /**
+   * The extra row: the topmost visible analysis coat the three lines don't
+   * already show that has a value at the pick (a raster covers only its
+   * region); the topmost such coat, without a value, when none has one.
+   */
+  private extraRow(pick: TerrainPick | null): { layer: StackLayer; value: number | null } | null {
     const map = this.map;
     if (!map) return null;
     const stack = map.getLayerStack();
+    let topmost: StackLayer | null = null;
     for (let i = stack.length - 1; i >= 0; i--) {
       const layer = stack[i];
       if (!layer.visible || !('descriptor' in layer) || !layer.isValueKind || SHOWN_KINDS.has(layer.descriptor.id)) continue;
-      return layer;
+      if (!pick) return { layer, value: null };
+      const value = map.getAnalysisValue(layer.id, pick.lngLat);
+      if (value !== null) return { layer, value };
+      topmost ??= layer;
     }
-    return null;
+    return topmost ? { layer: topmost, value: null } : null;
   }
 }

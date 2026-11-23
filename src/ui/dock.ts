@@ -38,7 +38,7 @@ export interface DockSpec {
   railIcon: string;
   /** Pages in rail order, outer end first (the last one sits by the corner and opens first). */
   pages: DockPageSpec[];
-  /** A footer under the pages (the info column's credits). */
+  /** A footer under the pages (the info column's credits, the hub's jobs). */
   footer?: boolean;
 }
 
@@ -214,7 +214,11 @@ export class DockFrame {
     this.pane.hidden = false;
     this.box.setAttribute('aria-expanded', 'true');
     this.syncPage();
-    if (focus) (this.tabs.get(this.current) ?? this.home).focus();
+    if (focus) {
+      // The page's button, or the close button when the rail shows no page buttons
+      const tab = this.tabs.get(this.current);
+      (tab && !this.tablist?.hidden ? tab : this.home).focus();
+    }
     if (!was || page) this.onChange(true, this.current);
   }
 

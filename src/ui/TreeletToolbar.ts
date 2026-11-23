@@ -15,7 +15,7 @@ import { TOOL_ICONS } from './icons';
 import type { Treelet } from '../core/Treelet';
 import type { ToolMode, ToolResult } from '../tools/ToolController';
 import { TOOL_HINTS } from '../tools/ToolController';
-import { formatArea, formatDistance, formatElevation } from '../tools/format';
+import { formatArea, formatDistance, pathStats, sightStats } from '../tools/format';
 
 const TOOLS: Array<{ id: ToolMode | 'viewshed'; label: string; title: string }> = [
   { id: 'distance', label: 'Measure distance', title: 'Distance' },
@@ -24,8 +24,6 @@ const TOOLS: Array<{ id: ToolMode | 'viewshed'; label: string; title: string }> 
   { id: 'sight', label: 'Line of sight', title: 'Line of sight' },
   { id: 'viewshed', label: 'Viewshed from a point', title: 'Viewshed' },
 ];
-
-const PICK_HINT = 'Click the terrain to place the observer · Esc to cancel';
 
 const toolbarStyles = /* css */ `
   ${kitStyles}
@@ -37,17 +35,7 @@ const toolbarStyles = /* css */ `
 /** A tool result as label / value pairs (two to a row). */
 export function resultPairs(r: ToolResult | null): Array<[label: string, value: string]> {
   if (!r) return [];
-  if (r.mode === 'distance' || r.mode === 'profile') {
-    const p = r.path;
-    const pairs: Array<[string, string]> = [
-      ['Length', formatDistance(p.distance)],
-      ['Terrain', formatDistance(p.surfaceDistance)],
-      ['Ascent', formatElevation(p.gain)],
-      ['Descent', formatElevation(p.loss)],
-    ];
-    if (p.minElevation !== null) pairs.push(['Lowest', formatElevation(p.minElevation)], ['Highest', formatElevation(p.maxElevation)]);
-    return pairs;
-  }
+  if (r.mode === 'distance' || r.mode === 'profile') return pathStats(r.path);
   if (r.mode === 'area') {
     return [
       ['Area', formatArea(r.area.area)],
@@ -56,11 +44,8 @@ export function resultPairs(r: ToolResult | null): Array<[label: string, value: 
     ];
   }
   if (r.mode !== 'sight') return [];
-  const s = r.sight;
-  if (!s) return [['Result', 'No data']];
-  return s.visible
-    ? [['Result', 'Visible'], ['Distance', formatDistance(s.distance)], ['Clearance', formatElevation(s.clearance)]]
-    : [['Result', 'Hidden'], ['Blocked at', formatDistance(s.obstruction!.distance)], ['Distance', formatDistance(s.distance)]];
+  if (!r.sight) return [['Result', 'No data']];
+  return sightStats(r.sight).slice(0, 3);
 }
 
 /** Label / value pairs as `.pair` rows. */
@@ -190,16 +175,8 @@ export class TreeletToolbar extends BaseElement {
       b.setAttribute('aria-pressed', String(on));
     });
     if (!t.mode) {
+      // (A pending pick's prompt shows with the running jobs, at the page's foot)
       this.result = null;
-      if (picking) {
-        // Waiting for the viewshed's observer
-        if (this.statusKey !== 'pick') {
-          this.statusKey = 'pick';
-          this.statusEl.innerHTML = `<div class="hint">${escapeHtml(PICK_HINT)}</div>`;
-        }
-        this.statusEl.hidden = false;
-        return;
-      }
       this.statusEl.hidden = true;
       this.statusEl.innerHTML = '';
       this.statusKey = '';

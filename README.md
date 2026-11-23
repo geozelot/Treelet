@@ -228,7 +228,7 @@ Every control is built from the same parts: rows 24 px high and 2 apart, a colum
 - **Narrow maps** (under 600 px): the columns span the map's width, one is open at a time (the other box steps aside), and the compass has no wings.
 - Two controls asking for the same corner: the later one takes the next free corner (with a warning).
 
-The elements (`<treelet-compass>`, `<treelet-hub>`, `<treelet-info>` and the pages' `<treelet-panel>`, `<treelet-toolbar>`, `<treelet-profile>`, `<treelet-legend>`, `<treelet-readout>`, `<treelet-attribution>`) are exported; `TreeletHub` and `TreeletInfo` have `open(page?)`, `close()`, `isOpen` and `page`.
+The elements (`<treelet-compass>`, `<treelet-hub>`, `<treelet-info>` and the pages' `<treelet-panel>`, `<treelet-jobs>`, `<treelet-toolbar>`, `<treelet-profile>`, `<treelet-legend>`, `<treelet-readout>`, `<treelet-attribution>`) are exported; `TreeletHub` and `TreeletInfo` have `open(page?)`, `close()`, `isOpen` and `page`.
 
 #### View
 
@@ -689,7 +689,7 @@ Options of every region analysis (`RegionOptions`, `ResultLayerOptions`):
 | Sky view | `radius` (whole region), `directions` (16) | `data` (0–1) |
 | TPI | `radius` (500 m), `innerRadius` (0: a box; > 0: a ring) | `data` (m) |
 
-Every result carries `bounds`, `width`, `height`, `zoom`, `cellSize` (meters) and `missingTiles`. A job that would have no raster slot for its coat fails before loading anything; `'done'` is reported once the result is shown (a failure to show it ends the job with `'error'`). A region whose tiles failed to load is loaded again by the next analysis (the failed tiles are retried). The viewshed casts rays from the observer to every cell on the edge of the search square and drops distant ground by the Earth's curvature less refraction (`d² (1 − k) / 2R`). Sun hours sweep the terrain's shadow along the sun's azimuth for every sun position of the day; terrain outside the region casts no shadow. Without a radius the sky view searches the whole region exactly (one sweep per direction); with one it samples up to 128 cells per direction, which is slower. While an analysis runs, the hub's Layers page shows its progress and a cancel button (and the tree box at rest a progress line); *Add layer* runs them over the view (the viewshed asks for a click on the observer first).
+Every result carries `bounds`, `width`, `height`, `zoom`, `cellSize` (meters) and `missingTiles`. A job that would have no raster slot for its coat fails before loading anything; `'done'` is reported once the result is shown (a failure to show it ends the job with `'error'`). A region whose tiles failed to load is loaded again by the next analysis (the failed tiles are retried). The viewshed casts rays from the observer to every cell on the edge of the search square and drops distant ground by the Earth's curvature less refraction (`d² (1 − k) / 2R`). Sun hours sweep the terrain's shadow along the sun's azimuth for every sun position of the day; terrain outside the region casts no shadow. Without a radius the sky view searches the whole region exactly (one sweep per direction); with one it samples up to 128 cells per direction, which is slower. While an analysis runs, the hub's column shows its progress and a cancel button (in the Layers page's Overlay group, at the foot of the other pages; the tree box at rest shows a progress line); *Add layer* runs them over the view (the viewshed asks for a click on the observer first), and a new run of a kind takes the place of one still going.
 
 ```ts
 const summit = { lng: 11.3853, lat: 47.3122 };
@@ -788,11 +788,11 @@ map.addOverlayLayer({
 | `getElevationProfile(from, to, samples?)` | `ProfileSample[]` | `{ lngLat, distance, elevation }` samples along a line (distance in meters) |
 | `getVisibleElevationRange()` | `[number, number]` | Min and max elevation of the tiles on screen |
 | `getElevationGrid(options?)` | `Promise<ElevationGrid>` | Elevations of a region as one grid (see [Region analyses](#region-analyses)) |
-| `pickLocation(options?)` | `Promise<TerrainPick \| null>` | Wait for a click on the terrain (crosshair cursor; `prompt` shown on the hub's Layers page); `null` after Escape or `cancelPick()` |
+| `pickLocation(options?)` | `Promise<TerrainPick \| null>` | Wait for a click on the terrain (crosshair cursor; `prompt` shown with the running analyses in the hub's column); `null` after Escape or `cancelPick()` |
 | `project(lngLat)` | `{ x, y } \| null` | Screen position (container pixels) of the terrain at a position |
 | `measureDistance(points)` | `PathMeasure` | `{ distance, surfaceDistance, gain, loss, minElevation, maxElevation, profile }` of a path |
 | `measureArea(ring)` | `AreaMeasure` | `{ area, surfaceArea, perimeter, minElevation, maxElevation }` of a polygon |
-| `lineOfSight(from, to, options?)` | `LineOfSightResult \| null` | `{ visible, obstruction, clearance, distance, profile }`; options `fromHeight` (1.7 m), `toHeight` (0), `curvature`, `refraction` |
+| `lineOfSight(from, to, options?)` | `LineOfSightResult \| null` | `{ visible, obstruction, clearance, distance, profile }`, sampled at the loaded terrain's spacing and at least 64 times; options `fromHeight` (1.7 m), `toHeight` (0), `curvature`, `refraction` |
 | `showProfile(path \| lineOfSight, options?)` | `this` | Show the elevation profile of a path or a line-of-sight result (on the hub's Measure page) |
 | `hideProfile()` | `this` | Close it |
 

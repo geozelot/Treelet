@@ -165,14 +165,15 @@ describe('<treelet-toolbar>', () => {
     expect((root.querySelector('.status') as HTMLElement).hidden).toBe(true);
   });
 
-  it('the viewshed button asks for the observer, with a hint while it waits', () => {
+  it('the viewshed button asks for the observer and stays pressed while it waits', () => {
     const { map, root } = mount();
     (root.querySelector('[data-tool="viewshed"]') as HTMLElement).click();
     expect(map.pickLocation).toHaveBeenCalledWith({ prompt: 'Click the terrain to place the observer' });
     (map as { isPicking: () => boolean }).isPicking = () => true;
-    map.emit('pickstart', {});
+    map.emit('pickstart', { prompt: 'Click the terrain to place the observer' });
     expect(root.querySelector('[data-tool="viewshed"]')!.getAttribute('aria-pressed')).toBe('true');
-    expect(root.querySelector('.status .hint')!.textContent).toMatch(/place the observer/);
+    // The prompt shows with the running jobs (<treelet-jobs>), not twice
+    expect((root.querySelector('.status') as HTMLElement).hidden).toBe(true);
   });
 
   it('gives the results of every tool as pairs', () => {

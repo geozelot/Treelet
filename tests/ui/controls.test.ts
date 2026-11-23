@@ -16,6 +16,7 @@ import type { TreeletLegend } from '../../src/ui/TreeletLegend';
 import type { TreeletHub } from '../../src/ui/TreeletHub';
 import type { TreeletInfo } from '../../src/ui/TreeletInfo';
 import { type TreeletReadout, compassPoint, formatReadout } from '../../src/ui/TreeletReadout';
+import { runRegionAnalysis } from '../../src/ui/regionAnalysis';
 import type { Treelet } from '../../src/core/Treelet';
 
 /** A stack member as the panel reads it. */
@@ -481,41 +482,118 @@ describe('region analyses in the panel', () => {
   });
 });
 
-describe('jobs in the panel', () => {
+describe('jobs', () => {
+  /** The rows of the panel's jobs element (null while the page has none). */
+  const jobsIn = (proot: ShadowRoot) => proot.querySelector('treelet-jobs')?.shadowRoot ?? null;
+
   it('shows running jobs with progress, updates them in place and cancels them', () => {
     const jobs = [{ id: 'job-1', kind: 'skyview', label: 'Sky view', stage: 'loading', progress: 0.25 }];
     const map = fakeMap();
     map.getAnalysisJobs.mockImplementation(() => jobs);
     const { proot } = mountPanel(map);
-    const row = proot.querySelector('[data-job="job-1"]')!;
+    const jroot = jobsIn(proot)!;
+    const row = jroot.querySelector('[data-job="job-1"]')!;
     expect(row.querySelector('.v')!.textContent).toBe('Loading 25%');
     map.emit('analysisprogress', { id: 'job-1', stage: 'computing', progress: 0.6 });
-    expect(proot.querySelector('[data-job="job-1"]')).toBe(row); // same element: clicks keep working
+    expect(jroot.querySelector('[data-job="job-1"]')).toBe(row); // same element: clicks keep working
     expect(row.querySelector('.v')!.textContent).toBe('Computing 60%');
     expect((row.querySelector('.fl') as HTMLElement).style.width).toBe('60%');
     (row.querySelector('[data-job-cancel]') as HTMLElement).click();
     expect(map.cancelAnalysis).toHaveBeenCalledWith('job-1');
     jobs.length = 0;
     map.emit('analysisend', { id: 'job-1', label: 'Sky view', status: 'cancelled' });
-    expect(proot.querySelector('[data-job]')).toBeNull();
+    expect(jroot.querySelector('[data-job]')).toBeNull();
+    expect(jroot.host.hasAttribute('busy')).toBe(false); // hidden with nothing to show
   });
 
-  it('shows a pick prompt and a failed job until dismissed, across page changes', () => {
+  it('shows the pick prompt it is given and a failed job until dismissed, across page changes', () => {
     const map = fakeMap();
     const { proot } = mountPanel(map);
-    map.emit('pickstart', { prompt: 'Click the terrain to place the observer' });
-    expect(proot.querySelector('[data-job="pick"]')!.textContent).toContain('Click the terrain to place the observer');
-    click(proot, '[data-job-cancel="pick"]');
+    map.emit('pickstart', { prompt: 'Place a marker' });
+    expect(jobsIn(proot)!.querySelector('[data-job="pick"]')!.textContent).toContain('Place a marker');
+    click(jobsIn(proot)!, '[data-job-cancel="pick"]');
     expect(map.cancelPick).toHaveBeenCalled();
     map.emit('pickend');
     map.emit('analysisend', { id: 'job-2', label: 'Viewshed', status: 'error', error: 'no elevation data at the viewshed observer' });
     click(proot, '[data-view="light"]');
-    expect(proot.querySelector('[data-job="job-2"]')).toBeNull(); // only on the layers
+    expect(jobsIn(proot)).toBeNull(); // in the Overlay group of the layers only
     click(proot, '.row.back');
-    const err = proot.querySelector('[data-job="job-2"]')!;
+    const err = jobsIn(proot)!.querySelector('[data-job="job-2"]')!;
     expect(err.querySelector('.err')!.textContent).toBe('no elevation data at the viewshed observer');
     (err.querySelector('[data-job-cancel]') as HTMLElement).click();
-    expect(proot.querySelector('[data-job]')).toBeNull();
+    expect(jobsIn(proot)!.querySelector('[data-job]')).toBeNull();
+  });
+
+  it('the hub shows them at the foot of its other pages', () => {
+    const map = fakeMap();
+    const jobs = [{ id: 'job-3', kind: 'viewshed', label: 'Viewshed', stage: 'computing', progress: 0.5 }];
+    map.getAnalysisJobs.mockImplementation(() => jobs);
+    const { hub, root } = mountHub(map);
+    const foot = root.querySelector('.foot') as HTMLElement;
+    hub.open('layers');
+    expect(foot.hidden).toBe(true); // the Layers page has its own
+    click(root, '#tab-measure');
+    expect(foot.hidden).toBe(false);
+    const row = foot.querySelector('treelet-jobs')!.shadowRoot!.querySelector('[data-job="job-3"]')!;
+    (row.querySelector('[data-job-cancel]') as HTMLElement).click();
+    expect(map.cancelAnalysis).toHaveBeenCalledWith('job-3');
+  });
+
+  it('a new run of a kind takes the place of one still going', () => {
+    const map = fakeMap({ stack: [fakeAnalysis('analysis-0', 'hillshade'), fakeAnalysis('analysis-4', 'skyview')] });
+    map.getAnalysisJobs.mockImplementation(() => [
+      { id: 'job-4', kind: 'skyview', label: 'Sky view', stage: 'computing', progress: 0.4 },
+      { id: 'job-5', kind: 'tpi', label: 'TPI', stage: 'computing', progress: 0.1 },
+    ]);
+    runRegionAnalysis(asMap(map), 'skyview');
+    expect(map.cancelAnalysis.mock.calls).toEqual([['job-4']]);
+    expect(map.computeAnalysis).toHaveBeenCalledWith('skyview', { replaceLayer: 'analysis-4' });
+  });
+});
+
+describe('panel updates from elsewhere', () => {
+  it('a moving sun updates the rows in place (the Light row, the time, the day being edited)', async () => {
+    const map = fakeMap();
+    map.sunTime = new Date(2024, 11, 21, 9, 0);
+    const { proot } = mountPanel(map);
+    const lightRow = proot.querySelector('[data-view="light"]')!;
+    map.sunTime = new Date(2024, 11, 21, 10, 30);
+    map.emit('sunchange', {});
+    await frame();
+    expect(proot.querySelector('[data-view="light"]')).toBe(lightRow);
+    expect(lightRow.querySelector('.v')!.textContent).toBe('21 Dec · 10:30');
+    click(proot, '[data-view="light"]');
+    const hour = proot.querySelector<HTMLElement>('.scrub[data-action="sunhour"]')!;
+    const day = proot.querySelector<HTMLInputElement>('input[data-action="sunday"]')!;
+    map.sunTime = new Date(2024, 11, 22, 11, 15);
+    map.emit('sunchange', {});
+    await frame();
+    expect(proot.querySelector('.scrub[data-action="sunhour"]')).toBe(hour);
+    expect(hour.dataset.value).toBe('11.25');
+    expect(proot.querySelector('input[data-action="sunday"]')).toBe(day);
+    expect(day.value).toBe('2024-12-22');
+    // Back to a manual sun: the page changes
+    map.sunTime = null;
+    map.emit('sunchange', {});
+    await frame();
+    expect(proot.querySelector('.scrub[data-action="azimuth"]')).not.toBeNull();
+  });
+
+  it('nothing is rebuilt under a press: changes wait until the pointer is up', async () => {
+    const map = fakeMap();
+    const { proot } = mountPanel(map);
+    openCoat(proot, 'analysis-1');
+    const opacity = proot.querySelector<HTMLElement>('.scrub[data-action="opacity"]')!;
+    map.emit('layerupdate', { id: 'analysis-1' }); // a frame is scheduled…
+    opacity.dispatchEvent(new PointerEvent('pointerdown', { pointerType: 'mouse', pointerId: 1, bubbles: true, composed: true }));
+    map.emit('layerchange', {}); // …and the layers change during the press
+    await frame();
+    expect(opacity.isConnected).toBe(true);
+    window.dispatchEvent(new PointerEvent('pointerup', { pointerType: 'mouse', pointerId: 1 }));
+    expect(opacity.isConnected).toBe(true); // not before the click
+    await frame();
+    expect(opacity.isConnected).toBe(false); // then the page is rebuilt
+    expect(proot.querySelector('.scrub[data-action="opacity"]')).not.toBeNull();
   });
 });
 
@@ -687,6 +765,26 @@ describe('hub', () => {
     expect(profile.shadowRoot!.querySelector('.title')!.textContent).toBe('Elevation profile');
     (profile.shadowRoot!.querySelector('[data-action="close"]') as HTMLElement).click();
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it("leaves out of the tool's own profile what the tool shows above it", () => {
+    const map = fakeMap();
+    const path = { distance: 1900, surfaceDistance: 1950, gain: 19, loss: 0, minElevation: 1000, maxElevation: 1019, vertexDistances: [], profile: [] };
+    (map as { getTool: () => unknown }).getTool = () => ({ mode: 'distance', drawing: false, result: { mode: 'distance', points: [], path } });
+    const { hub, root } = mountHub(map);
+    const points = Array.from({ length: 20 }, (_, i) => ({ distance: i * 100, elevation: 1000 + i, lngLat: { lng: 11, lat: 47 } }));
+    const stats = [['Length', '1.90 km'], ['Terrain', '1.95 km'], ['Lowest', '1 000 m']] as Array<[string, string]>;
+    const labels = () => [...root.querySelector('treelet-profile')!.shadowRoot!.querySelectorAll('.stats .k')].map((k) => k.textContent);
+    hub.showProfile({ title: 'Elevation profile', points, stats }, { onHover: vi.fn(), onClose: vi.fn() });
+    expect(labels()).toEqual(['Length', 'Terrain', 'Lowest']); // another path: every statistic
+    hub.showProfile({ title: 'Elevation profile', points, stats }, { ofTool: true, onHover: vi.fn(), onClose: vi.fn() });
+    expect(labels()).toEqual([]);
+  });
+
+  it('opened from the keyboard with one page, focus goes to the close button', () => {
+    const { root } = mountHub(fakeMap(), { tools: false });
+    (root.querySelector('.box') as HTMLElement).click(); // a keyboard click (detail 0)
+    expect(root.activeElement).toBe(root.querySelector('.rb.home'));
   });
 
   it('marks the host for the glass style only when asked', () => {
@@ -866,6 +964,35 @@ describe('readout', () => {
     expect(map.pick).toHaveBeenCalledTimes(1);
   });
 
+  it('the extra row shows the topmost coat with a value at the pointer', () => {
+    const map = fakeMap({ stack: [fakeAnalysis('analysis-2', 'curvature'), fakeAnalysis('analysis-3', 'skyview')] });
+    map.getAnalysisValue.mockImplementation(((id: string) => (id === 'analysis-2' ? 0.5 : null)) as never);
+    const el = document.createElement('treelet-readout') as TreeletReadout;
+    document.body.appendChild(el);
+    el.attach(asMap(map));
+    const rows = () => [...el.shadowRoot!.querySelectorAll('.row')].map((r) => r.querySelector('.k')!.textContent);
+    expect(rows()[3]).toBe(getAnalysis('skyview')!.label); // no pick: the topmost
+    el.showAt(10, 10);
+    expect(rows()[3]).toBe(getAnalysis('curvature')!.label); // outside the sky view's region: the coat below
+  });
+
+  it('samples a map whose container is inside a shadow root', async () => {
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const container = document.createElement('div');
+    const canvas = document.createElement('canvas');
+    container.appendChild(canvas);
+    host.attachShadow({ mode: 'open' }).appendChild(container);
+    const map = fakeMap();
+    (map as { getContainer: () => HTMLElement }).getContainer = () => container;
+    const readout = document.createElement('treelet-readout') as TreeletReadout;
+    container.appendChild(readout);
+    readout.attach(asMap(map));
+    canvas.dispatchEvent(new PointerEvent('pointermove', { pointerType: 'mouse', bubbles: true, composed: true }));
+    await frame();
+    expect(map.pick).toHaveBeenCalled();
+  });
+
   it('ignores pointers over the controls', async () => {
     const container = document.createElement('div');
     const canvas = document.createElement('canvas');
@@ -887,6 +1014,15 @@ describe('readout', () => {
     await frame();
     expect(map.pick).toHaveBeenCalled();
     expect(values()[0]).toBe('1 235 m');
+  });
+});
+
+describe('custom elements', () => {
+  it('have no attributes when created (browsers reject a constructor that adds one)', () => {
+    for (const tag of ['treelet-jobs', 'treelet-panel', 'treelet-hub', 'treelet-info', 'treelet-compass', 'treelet-legend',
+      'treelet-readout', 'treelet-toolbar', 'treelet-profile', 'treelet-attribution', 'treelet-labels']) {
+      expect(document.createElement(tag).attributes.length, tag).toBe(0);
+    }
   });
 });
 

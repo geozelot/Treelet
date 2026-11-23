@@ -11,6 +11,7 @@ import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
 import { OverlayRenderer, type OverlayRendererDeps, type WorldRect } from '../../src/overlays/OverlayRenderer';
 import type { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import type { FeatureCollection } from '../../src/overlays/types';
+import { createLineMaterial } from '../../src/overlays/materials';
 
 function setup(overrides: Partial<OverlayRendererDeps> = {}) {
   const scene = new Scene();
@@ -218,6 +219,64 @@ describe('OverlayRenderer', () => {
     r.update(true, 1000);
     const placed = labels.show.mock.calls.at(-1)![0] as Array<{ text: string }>;
     expect(placed.map((l) => l.text)).toEqual(['One']);
+  });
+
+  it('many changed tiles: every vertex is sampled again, without testing each against each tile', () => {
+    const { r, deps, terrainChanged } = setup();
+    const height = deps.groundHeight as ReturnType<typeof vi.fn>;
+    r.set('o1', { name: 'T', data });
+    r.update(false, 0);
+    // 100 tiles far from the overlay (testing them one by one would skip every vertex)
+    terrainChanged(Array.from({ length: 100 }, (_, i) => ({ west: 5000 + i * 10, south: 5000, east: 5005 + i * 10, north: 5005 })));
+    height.mockClear();
+    r.update(false, 250);
+    expect(height.mock.calls.length).toBeGreaterThan(300);
+  });
+
+  it('densifies the lines again when the terrain in view gets finer without new tiles (zooming over loaded ones)', () => {
+    let texel = 16;
+    const { r, scene } = setup({ texelWorld: () => texel });
+    r.set('o1', { name: 'T', data: { type: 'FeatureCollection', features: [data.features[2]] } });
+    r.update(false, 0);
+    const segments = () => objects(scene).lines[0].geometry.getAttribute('instanceStart').count;
+    const coarse = segments();
+    texel = 1; // same terrain version
+    r.update(false, 100);
+    expect(segments()).toBe(coarse); // at most every 200 ms
+    r.update(false, 300);
+    expect(segments()).toBeGreaterThan(coarse * 4);
+  });
+
+  it('keeps line materials across rebuilds (the rubber band is rebuilt on every move)', () => {
+    const { r, scene } = setup();
+    const band = { type: 'FeatureCollection' as const, features: [data.features[2]] };
+    r.set('band', { name: 'Band', data: band, style: { opacity: 0.55 } });
+    r.update(false, 0);
+    const material = objects(scene).lines[0].material as LineMaterial;
+    const dispose = vi.spyOn(material, 'dispose');
+    const ref = material.stencilRef;
+    expect(ref).toBeGreaterThan(0); // translucent: drawn with a stencil value
+    for (let i = 1; i <= 300; i++) {
+      r.set('band', { name: 'Band', data: band, style: { opacity: 0.55 } });
+      r.update(false, i * 1000);
+    }
+    expect(objects(scene).lines[0].material).toBe(material);
+    expect(material.stencilRef).toBe(ref);
+    expect(dispose).not.toHaveBeenCalled();
+    r.remove('band');
+    expect(dispose).toHaveBeenCalled();
+  });
+
+  it('translucent lines get stencil values no live line has (freed when a material goes)', () => {
+    const res = new Vector2(800, 600);
+    const kept = createLineMaterial(2, 0.5, res);
+    for (let i = 0; i < 600; i++) createLineMaterial(2, 0.5, res).dispose();
+    const other = createLineMaterial(3, 0.4, res);
+    expect(other.stencilRef).not.toBe(kept.stencilRef);
+    expect(other.stencilRef).toBeGreaterThan(0);
+    const ref = kept.stencilRef;
+    kept.dispose();
+    expect(createLineMaterial(2, 0.5, res).stencilRef).toBe(ref);
   });
 
   it('dispose removes everything', () => {

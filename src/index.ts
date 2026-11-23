@@ -125,6 +125,7 @@ export { TreeletCompass } from './ui/TreeletCompass';
 export { TreeletAttribution } from './ui/TreeletAttribution';
 export { TreeletInfo, type InfoPage } from './ui/TreeletInfo';
 export { TreeletHub, type HubPage } from './ui/TreeletHub';
+export { TreeletJobs } from './ui/TreeletJobs';
 export { TreeletLegend } from './ui/TreeletLegend';
 export { TreeletReadout } from './ui/TreeletReadout';
 export { TreeletLabels, type PlacedLabel } from './ui/TreeletLabels';

@@ -9,6 +9,9 @@
 //   Measure - the measuring tools and their results (<treelet-toolbar>),
 //             and the elevation profile (<treelet-profile>)
 //
+// Running analyses, a pending pick and failures (<treelet-jobs>) show in
+// the Layers page's Overlay group, and at the foot of the other pages.
+//
 // The page buttons sit on the rail by the box's corner (Measure, Themes,
 // then Layers by the corner); the tree at the rail's far end closes the
 // column. While region analyses run, the box at rest shows their progress
@@ -20,6 +23,7 @@ import { DockFrame } from './dock';
 import { TREE_SVG } from './treeSvg';
 import { LAYERS_SVG, MEASURE_SVG, THEMES_SVG } from './icons';
 import type { TreeletPanel } from './TreeletPanel';
+import type { TreeletJobs } from './TreeletJobs';
 import { resultPairs, type TreeletToolbar } from './TreeletToolbar';
 import type { TreeletProfile, ProfileData } from './TreeletProfile';
 import type { ProfilePoint } from './profileChart';
@@ -33,6 +37,9 @@ const hubStyles = /* css */ `
   .box > svg { width: 34px; height: 28px; }
   .rb.home > svg { width: 24px; height: 20px; }
   .tool-on { fill: transparent; transition: fill .15s; }
+  /* The jobs at the foot of a page (hidden with nothing to show) */
+  .foot { padding-top: 0; }
+  .foot > treelet-jobs { margin-top: 4px; }
   :host([tool-active]) .tool-on { fill: var(--accent); }
 `;
 
@@ -43,6 +50,8 @@ export class TreeletHub extends BaseElement {
   private panel: TreeletPanel | null = null;
   private toolbar: TreeletToolbar | null = null;
   private profile: TreeletProfile | null = null;
+  /** The jobs at the foot of the pages other than Layers (which has its own). */
+  private jobs: TreeletJobs | null = null;
   private subscribed = false;
   private wasOpen = false;
   private profileHover: ((p: ProfilePoint | null) => void) | null = null;
@@ -81,7 +90,11 @@ export class TreeletHub extends BaseElement {
           { id: 'themes', label: 'Themes', icon: THEMES_SVG, hidden: true },
           { id: 'layers', label: 'Layers', icon: LAYERS_SVG },
         ],
+        footer: true,
       }, (open, page) => this.onDockChange(open, page), hubStyles);
+      this.jobs = document.createElement('treelet-jobs') as TreeletJobs;
+      this.dock.foot!.appendChild(this.jobs);
+      this.dock.foot!.hidden = this.dock.page === 'layers';
 
       this.dock.pageEl('themes').addEventListener('click', (e) => {
         const row = (e.target as Element).closest<HTMLElement>('[data-theme]');
@@ -106,6 +119,7 @@ export class TreeletHub extends BaseElement {
     }
     this.dock.place(options.corner ?? 'bottom-right');
     this.panel!.attach(map, glass);
+    this.jobs!.attach(map, glass);
     this.toolbar?.attach(map, glass);
     if (this.isConnected) this.subscribe();
     this.showJobs();
@@ -153,17 +167,17 @@ export class TreeletHub extends BaseElement {
   /**
    * Show a profile on the Measure page (opening it). The map calls this from
    * `showProfile`; `onHover` / `onClose` let it mark the hovered sample.
+   * A profile of the tool's own result (`ofTool`; the map closes it when
+   * that result changes) leaves out the statistics the tool shows above it.
    * @internal
    */
-  showProfile(data: ProfileData, hooks: { onHover: (p: ProfilePoint | null) => void; onClose: () => void }): boolean {
+  showProfile(data: ProfileData, hooks: { ofTool?: boolean; onHover: (p: ProfilePoint | null) => void; onClose: () => void }): boolean {
     if (!this.profile || !this.dock) return false;
     this.profileHover = hooks.onHover;
     this.profileClose = hooks.onClose;
     this.dock.open('measure');
-    // The tool's result above already shows some of the statistics
-    const shown = resultPairs(this.map?.getTool().result ?? null);
-    const stats = data.stats.filter(([k, v]) => !shown.some(([sk, sv]) => sk === k && sv === v));
-    this.profile.show({ ...data, stats });
+    const shown = hooks.ofTool ? new Set(resultPairs(this.map?.getTool().result ?? null).map(([label]) => label)) : null;
+    this.profile.show(shown ? { ...data, stats: data.stats.filter(([label]) => !shown.has(label)) } : data);
     return true;
   }
 
@@ -172,8 +186,9 @@ export class TreeletHub extends BaseElement {
     this.profile?.hide();
   }
 
-  private onDockChange(open: boolean, _page: string): void {
+  private onDockChange(open: boolean, page: string): void {
     if (!open) this.panel?.resetSettings();
+    if (this.dock?.foot) this.dock.foot.hidden = page === 'layers';
     if (open !== this.wasOpen) {
       this.wasOpen = open;
       this.dispatchEvent(new Event(open ? 'open' : 'close'));

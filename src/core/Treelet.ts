@@ -80,8 +80,9 @@ import type { TreeletLabels } from '../ui/TreeletLabels';
 import type { TreeletProfile, ProfileData } from '../ui/TreeletProfile';
 import type { ProfilePoint } from '../ui/profileChart';
 import { ToolController, type ToolMode, type ToolResult } from '../tools/ToolController';
-import { formatDistance, formatElevation } from '../tools/format';
+import { pathStats, sightStats } from '../tools/format';
 import { measurePath, measureSurfaceArea, geodesicAreaOf, type PathMeasure, type AreaMeasure } from '../tools/measure';
+import { geodesicDistance } from '../analysis/geodesy';
 import { lineOfSightProfile, type LineOfSightOptions } from '../analysis/lineOfSight';
 import { boundsAround } from '../analysis/region';
 import { resampleRowsToMercator } from '../analysis/grid';
@@ -106,6 +107,15 @@ const HORIZON_EASE_S = 0.4;
 
 /** The visible range never ends closer than this many orbit distances (low-pitch views). */
 const MIN_HORIZON_ORBITS = 3;
+
+/** A line of sight is sampled at least this often (64 as in 0.3), and at most this many times. */
+const MIN_SIGHT_SAMPLES = 64;
+const MAX_SIGHT_SAMPLES = 8000;
+
+/** Whether two paths have the same positions. */
+function samePath(a: readonly LngLat[], b: readonly LngLat[]): boolean {
+  return a.length === b.length && a.every((p, i) => p.lng === b[i].lng && p.lat === b[i].lat);
+}
 
 /** Where haze starts, as a fraction of the visible range (fog on / off). */
 const FOG_START = 0.35;
@@ -290,6 +300,8 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
   private readonly tools: ToolController;
   /** The profile card on its own (when there is no hub with a Measure page). */
   private profile: TreeletProfile | null = null;
+  /** The profile shown is of the measuring tool's result (and closes when that changes). */
+  private toolProfile = false;
   private readonly scratch = new Vector3();
   private readonly scratchDir = new Vector3();
 
@@ -426,11 +438,7 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
       measureDistance: (points) => this.measureDistance(points),
       measureArea: (ring, cells) => this.measureArea(ring, { cells }),
       lineOfSight: (from, to) => this.lineOfSight(from, to),
-      report: (result, final) => {
-        this.emit('measure', { mode: this.tools.mode, final, result });
-        if (final && result?.mode === 'profile') this.showProfile(result.points);
-        if (final && result?.mode === 'sight' && result.sight) this.showProfile(result.sight);
-      },
+      report: (result, final) => this.onToolReport(result, final),
       changed: () => this.emit('toolchange', { mode: this.tools.mode, drawing: this.tools.active }),
     });
     // A bare map shows shaded relief; imagery and analyses stack over it.
@@ -501,13 +509,9 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
         this.info.updateCamera(this.sceneManager.cameraController.getState());
       }
       // On a narrow map one column is open at a time; the other box steps aside
-      for (const [dock, other] of [[this.hub, this.info], [this.info, this.hub]] as const) {
-        dock?.addEventListener('open', () => {
-          if (!this.compact || !other) return;
-          other.close();
-          other.hidden = true;
-        });
-        dock?.addEventListener('close', () => { if (other) other.hidden = false; });
+      for (const dock of [this.hub, this.info]) {
+        dock?.addEventListener('open', () => this.stepAside(dock));
+        dock?.addEventListener('close', () => this.stepAside(null));
       }
     }
 
@@ -521,6 +525,20 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
   }
 
   /**
+   * One column at a time on a narrow map: with `open` open, the other dock
+   * closes and its box steps aside (hidden); otherwise both boxes show.
+   */
+  private stepAside(open: TreeletHub | TreeletInfo | null): void {
+    for (const dock of [this.hub, this.info]) {
+      if (!dock || dock === open) continue;
+      const aside = !!this.compact && open !== null && open.isOpen;
+      if (aside) dock.close();
+      dock.hidden = aside;
+    }
+    if (open) open.hidden = false;
+  }
+
+  /**
    * Fit the controls to the map's size: below 600 px wide the map is
    * compact (columns span its width, no navigation wings); a column is at
    * most as tall as the map leaves it beside the compass.
@@ -531,12 +549,8 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
     if (compact !== this.compact) {
       this.compact = compact;
       for (const el of [this.compass, this.hub, this.info]) el?.toggleAttribute('compact', compact);
-      if (!compact) {
-        if (this.hub) this.hub.hidden = false;
-        if (this.info) this.info.hidden = false;
-      } else if (this.hub?.isOpen && this.info?.isOpen) {
-        this.info.close();
-      }
+      // Turning narrow with a column open: the hub's column stays, the other box steps aside
+      this.stepAside(this.hub?.isOpen ? this.hub : this.info?.isOpen ? this.info : null);
     }
     if (!(height > 0)) return;
     const gd = this.options.guiDisplay;
@@ -928,8 +942,11 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
    * profile. Null when the ends have no elevation data.
    */
   lineOfSight(from: LngLat, to: LngLat, options: LineOfSightOptions = {}): LineOfSightResult | null {
-    // Sampled like a measured path: the loaded terrain's spacing, distances on the ellipsoid
-    const { distance, profile } = measurePath([from, to], (p) => this.getElevation(p), this.sampleSpacing((from.lat + to.lat) / 2), 8000);
+    // Sampled like a measured path (the loaded terrain's spacing, distances on
+    // the ellipsoid), but at least MIN_SIGHT_SAMPLES apart: a line shorter than
+    // the spacing still has ground between its ends to block it
+    const spacing = Math.min(this.sampleSpacing((from.lat + to.lat) / 2), geodesicDistance(from, to) / MIN_SIGHT_SAMPLES);
+    const { distance, profile } = measurePath([from, to], (p) => this.getElevation(p), spacing, MAX_SIGHT_SAMPLES);
     if (profile[0].elevation === null || profile[profile.length - 1].elevation === null) return null;
     const r = lineOfSightProfile(profile, options);
     const o = r.obstructionIndex >= 0 ? profile[r.obstructionIndex] : null;
@@ -976,38 +993,35 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
    */
   showProfile(input: readonly LngLat[] | LineOfSightResult, options: { title?: string } = {}): this {
     let data: ProfileData;
+    const tool = this.tools.result;
+    let ofTool: boolean;
     if (Array.isArray(input)) {
       if (input.length < 2) throw new Error('treelet: a profile needs at least two positions');
       const m = this.measureDistance(input);
-      const stats: Array<[string, string]> = [
-        ['Length', formatDistance(m.distance)],
-        ['Terrain', formatDistance(m.surfaceDistance)],
-        ['Ascent', formatElevation(m.gain)],
-        ['Descent', formatElevation(m.loss)],
-      ];
-      if (m.minElevation !== null) stats.push(['Lowest', formatElevation(m.minElevation)], ['Highest', formatElevation(m.maxElevation)]);
-      data = { title: options.title ?? 'Elevation profile', points: m.profile, stats };
+      data = { title: options.title ?? 'Elevation profile', points: m.profile, stats: pathStats(m) };
+      ofTool = tool !== null && tool.mode !== 'sight' && samePath(input, tool.points);
     } else {
       const r = input as LineOfSightResult;
       data = {
         title: options.title ?? 'Line of sight',
         points: r.profile,
         obstructionIndex: r.obstruction ? r.profile.findIndex((p) => p.distance >= r.obstruction!.distance) : -1,
-        stats: [
-          ['Distance', formatDistance(r.distance)],
-          ['Result', r.visible ? 'Visible' : `Blocked at ${formatDistance(r.obstruction!.distance)}`],
-          ['Clearance', formatElevation(r.clearance)],
-          ['Eye', formatElevation(r.eyeElevation)],
-          ['Target', formatElevation(r.targetElevation)],
-        ],
+        stats: sightStats(r),
       };
+      ofTool = tool?.mode === 'sight' && tool.sight === r;
     }
+    // The profile of the tool's own result closes when that result changes
+    this.toolProfile = ofTool;
     // Hovering the chart marks the sample on the terrain
     const hooks = {
+      ofTool,
       onHover: (p: ProfilePoint | null) => this.setInternalOverlay('__profile_marker__',
         p ? { type: 'Point', coordinates: [p.lngLat.lng, p.lngLat.lat] } : null,
         { color: '#1c7ed6', pointRadius: 6, pointStrokeWidth: 2 }),
-      onClose: () => this.setInternalOverlay('__profile_marker__', null, {}),
+      onClose: () => {
+        this.toolProfile = false;
+        this.setInternalOverlay('__profile_marker__', null, {});
+      },
     };
     // On the hub's Measure page; without one, a card at the bottom of the map
     if (this.hub?.hasTools && this.hub.showProfile(data, hooks)) return this;
@@ -1021,8 +1035,21 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
     return this;
   }
 
+  /**
+   * A tool's result changed: tell, and open the profile of a finished
+   * profile path or line of sight. The profile of the tool's result goes
+   * with it (cleared, drawn anew, another tool).
+   */
+  private onToolReport(result: ToolResult | null, final: boolean): void {
+    this.emit('measure', { mode: this.tools.mode, final, result });
+    if (final && result?.mode === 'profile') this.showProfile(result.points);
+    else if (final && result?.mode === 'sight' && result.sight) this.showProfile(result.sight);
+    else if (this.toolProfile) this.hideProfile();
+  }
+
   /** Close the profile. */
   hideProfile(): this {
+    this.toolProfile = false;
     this.hub?.hideProfile();
     this.profile?.hide();
     this.setInternalOverlay('__profile_marker__', null, {});
@@ -1313,7 +1340,7 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
    * Wait for a click on the terrain (a press without dragging); resolves
    * with the terrain under it, or null after Escape, cancelPick() or another
    * pickLocation(). The cursor shows a crosshair meanwhile; `prompt` is
-   * shown in the legend.
+   * shown with the running analyses in the hub's column.
    */
   pickLocation(options: { prompt?: string } = {}): Promise<TerrainPick | null> {
     this.cancelPick();
@@ -1336,7 +1363,12 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
         const pick = this.pick(e.clientX - rect.left, e.clientY - rect.top);
         if (pick) finish(pick);
       };
-      const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') finish(null); };
+      // Escape cancels the pick and nothing else (a column it was pressed in stays open)
+      const onKey = (e: KeyboardEvent) => {
+        if (e.key !== 'Escape') return;
+        e.preventDefault();
+        finish(null);
+      };
       const finish = (pick: TerrainPick | null) => {
         if (this.picking !== state) return;
         this.picking = null;

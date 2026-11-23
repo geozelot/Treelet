@@ -13,6 +13,8 @@ import { TreeletReadout } from './TreeletReadout';
 import { TreeletLabels } from './TreeletLabels';
 import { TreeletProfile } from './TreeletProfile';
 import { TreeletToolbar } from './TreeletToolbar';
+import { TreeletInfo } from './TreeletInfo';
+import { TreeletHub } from './TreeletHub';
 
 /** Register the treelet-* custom elements (once). */
 export function defineTreeletElements(): void {
@@ -25,4 +27,6 @@ export function defineTreeletElements(): void {
   if (!customElements.get('treelet-labels')) customElements.define('treelet-labels', TreeletLabels);
   if (!customElements.get('treelet-profile')) customElements.define('treelet-profile', TreeletProfile);
   if (!customElements.get('treelet-toolbar')) customElements.define('treelet-toolbar', TreeletToolbar);
+  if (!customElements.get('treelet-info')) customElements.define('treelet-info', TreeletInfo);
+  if (!customElements.get('treelet-hub')) customElements.define('treelet-hub', TreeletHub);
 }

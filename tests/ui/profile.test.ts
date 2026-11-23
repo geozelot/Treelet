@@ -89,7 +89,7 @@ describe('<treelet-profile> drawing', () => {
     const f = frames();
     const points = longProfile();
     const { root, onHover } = mount(points);
-    const svg = root.querySelector('svg')!;
+    const svg = root.querySelector('.chart svg')!;
     const line = svg.querySelector('path[fill="none"]')!;
     expect(vertices(line.getAttribute('d')!).length).toBeLessThan(1300);
     const marker = svg.querySelector('g.hover')!;
@@ -103,7 +103,7 @@ describe('<treelet-profile> drawing', () => {
     const s = chartScales(points, 600, 150); // the panel's width falls back to 600 here
     expect(Math.abs(s.x(p.distance) - 346)).toBeLessThan(0.1);
     // Not drawn again: the same chart, the marker moved
-    expect(root.querySelector('svg')).toBe(svg);
+    expect(root.querySelector('.chart svg')).toBe(svg);
     expect(svg.querySelector('path[fill="none"]')).toBe(line);
     expect(marker.getAttribute('display')).toBe('inline');
     expect(Number(marker.querySelector('line')!.getAttribute('x1'))).toBeCloseTo(s.x(p.distance), 1);

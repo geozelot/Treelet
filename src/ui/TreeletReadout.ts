@@ -1,37 +1,29 @@
 // ============================================================================
 // treelet.js - TreeletReadout Web Component
 //
-// <treelet-readout> - the terrain under the pointer: elevation, slope and
-// aspect, and the value of the topmost other analysis coat (water depth,
-// curvature, a raster…). Follows the mouse over the map itself (sampled at
-// most once per animation frame) and hides over the map's controls and
-// when it leaves the map; on touch screens a tap on the terrain samples that
-// point and the readout stays until the next tap. Sits in a corner
-// container the map provides (stacked with the legend when they share a
-// corner).
+// <treelet-readout> - the terrain under the pointer, as rows of the info
+// column's Legend page: elevation, slope and aspect, and the value of the
+// topmost other analysis coat (water depth, curvature, a raster…). Follows
+// the mouse over the map itself (sampled at most once per animation frame,
+// only while the readout is shown); over the map's controls and off the map
+// the values show "–" (the rows stay, so the column doesn't jump). On touch
+// screens a tap on the terrain samples that point ("Tapped point").
 // ============================================================================
 
 import { BaseElement, escapeHtml } from './dom';
-import { cornerCardStyles } from './cornerStyles';
+import { kitStyles } from './kit';
 import type { Treelet } from '../core/Treelet';
 import type { TerrainPick } from '../core/types';
+import type { StackLayer } from '../layers/LayerRegistry';
 import { formatValue } from '../analysis/ramps';
 
 /** Kinds the three readout lines already show. */
 const SHOWN_KINDS = new Set(['elevation', 'slope', 'aspect']);
 
 const readoutStyles = /* css */ `
-  ${cornerCardStyles}
-
-  .card { gap: 2px; min-width: 118px; }
-
-  .readout-row {
-    display: flex;
-    justify-content: space-between;
-    gap: 12px;
-    font-variant-numeric: tabular-nums;
-  }
-  .readout-label { color: var(--text-dim); }
+  ${kitStyles}
+  :host { display: flex; flex-direction: column; gap: 2px; }
+  .rows { display: flex; flex-direction: column; gap: 2px; }
 `;
 
 const COMPASS_POINTS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
@@ -44,7 +36,7 @@ export function compassPoint(bearing: number): string {
 
 /** The lines a readout shows for a terrain sample. */
 export function formatReadout(pick: TerrainPick): Array<[label: string, value: string]> {
-  const elevation = `${Math.round(pick.elevation).toLocaleString('en-US').replace(/,/g, ' ')} m`;
+  const elevation = `${Math.round(pick.elevation).toLocaleString('en-US').replace(/,/g, '\u2009')} m`;
   const slope = `${pick.slope.toFixed(1)}°`;
   const aspect = pick.aspect === null ? 'flat' : `${Math.round(pick.aspect)}° ${compassPoint(pick.aspect)}`;
   return [['Elevation', elevation], ['Slope', slope], ['Aspect', aspect]];
@@ -53,16 +45,21 @@ export function formatReadout(pick: TerrainPick): Array<[label: string, value: s
 /** How far a touch may move (CSS px) and still count as a tap. */
 const TAP_SLOP = 8;
 
+const EMPTY = '–';
+
 export class TreeletReadout extends BaseElement {
   private shadow: ShadowRoot;
   private map: Treelet | null = null;
   private target: HTMLElement | null = null;
-  private bodyEl: HTMLDivElement | null = null;
+  private rowsEl: HTMLDivElement | null = null;
   private frame: number | null = null;
   private pending: { x: number; y: number } | null = null;
   private touchStart: { x: number; y: number; id: number } | null = null;
-  /** The readout stays until the next tap (touch). */
+  /** The values stay until the next tap (touch). */
   private pinned = false;
+  /** Sampling only while the readout is shown (its page is open). */
+  private shown = true;
+  private lastPick: TerrainPick | null = null;
 
   constructor() {
     super();
@@ -73,14 +70,32 @@ export class TreeletReadout extends BaseElement {
   attach(map: Treelet, options: { glass?: boolean } = {}): void {
     this.detach();
     this.map = map;
-    if (options.glass) this.setAttribute('glass', '');
-    else this.removeAttribute('glass');
-    if (!this.bodyEl) {
-      this.shadow.innerHTML = `<style>${readoutStyles}</style><div class="card" role="status" aria-live="off" aria-label="Terrain under the pointer"></div>`;
-      this.bodyEl = this.shadow.querySelector('.card') as HTMLDivElement;
+    this.toggleAttribute('glass', options.glass === true);
+    if (!this.rowsEl) {
+      this.shadow.innerHTML = `<style>${readoutStyles}</style><div class="rows" role="group" aria-label="Terrain under the pointer"></div>`;
+      this.rowsEl = this.shadow.querySelector('.rows') as HTMLDivElement;
     }
-    this.hidden = true;
+    this.render(null);
     if (this.isConnected) this.listen();
+  }
+
+  /**
+   * Whether the readout is on screen. While it is not, pointer moves are not
+   * sampled (the info column sets this as it opens, closes and turns pages).
+   */
+  set active(on: boolean) {
+    if (on === this.shown) return;
+    this.shown = on;
+    if (!on && this.frame !== null) {
+      cancelAnimationFrame(this.frame);
+      this.frame = null;
+      this.pending = null;
+    }
+    if (on) this.render(this.pinned ? this.lastPick : null);
+  }
+
+  get active(): boolean {
+    return this.shown;
   }
 
   connectedCallback(): void {
@@ -125,7 +140,7 @@ export class TreeletReadout extends BaseElement {
 
   /**
    * Whether the event comes from the map itself (its canvas or container),
-   * not from a control over it (panel, toolbar, legend, profile…).
+   * not from a control over it (columns, compass, profile…).
    */
   private onMapSurface(e: PointerEvent): boolean {
     const origin = e.composedPath()[0] ?? e.target;
@@ -139,7 +154,7 @@ export class TreeletReadout extends BaseElement {
   }
 
   private onPointerMove = (e: PointerEvent): void => {
-    if (e.pointerType !== 'mouse' || this.pinned) return;
+    if (e.pointerType !== 'mouse' || this.pinned || !this.shown) return;
     if (!this.onMapSurface(e)) {
       // Over a control: nothing of the terrain to show
       this.pending = null;
@@ -156,14 +171,17 @@ export class TreeletReadout extends BaseElement {
   };
 
   private onPointerLeave = (e: PointerEvent): void => {
-    if (e.pointerType !== 'mouse' || this.pinned) return;
+    if (e.pointerType !== 'mouse' || this.pinned || !this.shown) return;
     this.pending = null;
     this.render(null);
   };
 
   private onPointerDown = (e: PointerEvent): void => {
     if (e.pointerType === 'mouse') {
-      this.pinned = false;
+      if (this.pinned) {
+        this.pinned = false;
+        this.render(null);
+      }
       return;
     }
     // A tap on a control is the control's, not a terrain sample
@@ -186,31 +204,35 @@ export class TreeletReadout extends BaseElement {
   };
 
   private render(pick: TerrainPick | null): void {
-    if (!this.bodyEl) return;
-    if (!pick) {
-      this.hidden = true;
-      return;
+    if (!this.rowsEl) return;
+    this.lastPick = pick;
+    const rows: Array<[string, string]> = pick
+      ? formatReadout(pick)
+      : [['Elevation', EMPTY], ['Slope', EMPTY], ['Aspect', EMPTY]];
+    const layer = this.extraLayer();
+    if (layer) {
+      const v = pick ? this.map!.getAnalysisValue(layer.id, pick.lngLat) : null;
+      const unit = 'unit' in layer && layer.unit ? ` ${layer.unit}` : '';
+      rows.push([layer.layerName, v === null ? EMPTY : `${formatValue(v)}${unit}`]);
     }
-    const rows = formatReadout(pick);
-    const extra = this.analysisRow(pick);
-    if (extra) rows.push(extra);
-    this.bodyEl.innerHTML = rows.map(([label, value]) =>
-      `<div class="readout-row"><span class="readout-label">${escapeHtml(label)}</span><span class="readout-value">${escapeHtml(value)}</span></div>`,
-    ).join('');
-    this.hidden = false;
+    // Touch screens sample where they are tapped
+    const touchOnly = typeof matchMedia === 'function' && matchMedia('(hover: none)').matches;
+    const title = this.pinned || touchOnly ? 'Tapped point' : 'Cursor';
+    this.rowsEl.innerHTML = `<div class="grp"><span class="t">${title}</span></div>`
+      + rows.map(([label, value]) =>
+        `<div class="row"><span class="k">${escapeHtml(label)}</span><span class="v${value === EMPTY ? ' dim' : ''}">${escapeHtml(value)}</span></div>`,
+      ).join('');
   }
 
-  /** The value of the topmost visible analysis coat the three lines don't already show. */
-  private analysisRow(pick: TerrainPick): [string, string] | null {
+  /** The topmost visible analysis coat the three lines don't already show. */
+  private extraLayer(): StackLayer | null {
     const map = this.map;
     if (!map) return null;
     const stack = map.getLayerStack();
     for (let i = stack.length - 1; i >= 0; i--) {
       const layer = stack[i];
       if (!layer.visible || !('descriptor' in layer) || !layer.isValueKind || SHOWN_KINDS.has(layer.descriptor.id)) continue;
-      const v = map.getAnalysisValue(layer.id, pick.lngLat);
-      if (v === null) continue;
-      return [layer.layerName, `${formatValue(v)}${layer.unit ? ` ${layer.unit}` : ''}`];
+      return layer;
     }
     return null;
   }

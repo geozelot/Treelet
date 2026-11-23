@@ -16,6 +16,7 @@ import { Vector3 } from 'three';
 import { EventEmitter } from './EventEmitter';
 import {
   DEFAULT_OPTIONS,
+  COMPACT_WIDTH,
   MAX_TILE_ZOOM,
   WEB_MERCATOR_FULL_EXTENT,
   WEB_MERCATOR_MAX_LAT,
@@ -25,6 +26,7 @@ import { version as packageVersion } from '../../package.json';
 import type {
   TreeletOptions,
   ResolvedTreeletOptions,
+  GuiDisplayOptions,
   TreeletEventMap,
   LineOfSightResult,
   LngLat,
@@ -75,7 +77,7 @@ import type { GeoJSON, OverlayStyleSpec } from '../overlays/types';
 import type { OverlayLayer } from '../layers/OverlayLayer';
 import type { TreeletLabels } from '../ui/TreeletLabels';
 import type { TreeletProfile, ProfileData } from '../ui/TreeletProfile';
-import type { TreeletToolbar } from '../ui/TreeletToolbar';
+import type { ProfilePoint } from '../ui/profileChart';
 import { ToolController, type ToolMode, type ToolResult } from '../tools/ToolController';
 import { formatDistance, formatElevation } from '../tools/format';
 import { measurePath, measureSurfaceArea, geodesicAreaOf, type PathMeasure, type AreaMeasure } from '../tools/measure';
@@ -92,8 +94,8 @@ import { LayerController } from './LayerController';
 import { defineTreeletElements } from '../ui/elements';
 import type { TreeletCompass } from '../ui/TreeletCompass';
 import type { TreeletAttribution } from '../ui/TreeletAttribution';
-import type { TreeletLegend } from '../ui/TreeletLegend';
-import type { TreeletReadout } from '../ui/TreeletReadout';
+import type { TreeletInfo } from '../ui/TreeletInfo';
+import type { TreeletHub } from '../ui/TreeletHub';
 
 /** Minimum camera clearance above the terrain, in meters. */
 const CAMERA_MIN_CLEARANCE_M = 2;
@@ -117,6 +119,30 @@ function requireFinite(value: number, name: string): number {
 
 function clamp(v: number, lo: number, hi: number): number {
   return Math.min(Math.max(v, lo), hi);
+}
+
+/** GUI options, with what changed during 1.0 reported (and mapped where it can be). */
+function resolveGui(gui: GuiDisplayOptions): Required<GuiDisplayOptions> {
+  const d = DEFAULT_OPTIONS.guiDisplay;
+  const legacy = gui as { legendPosition?: unknown; readoutPosition?: unknown };
+  if (legacy.legendPosition !== undefined || legacy.readoutPosition !== undefined) {
+    console.warn('treelet: guiDisplay.legendPosition / readoutPosition are gone; the legend and the readout are on the info box\'s Legend page (guiDisplay.infoPosition, guiDisplay.readout)');
+  }
+  let tools: unknown = gui.tools ?? d.tools;
+  if (typeof tools === 'string') {
+    console.warn('treelet: guiDisplay.tools takes true or false; the tools are on the hub\'s Measure page (guiDisplay.layerPosition)');
+    tools = true;
+  }
+  return {
+    enabled: gui.enabled ?? d.enabled,
+    compassPosition: gui.compassPosition ?? d.compassPosition,
+    navigation: gui.navigation ?? d.navigation,
+    layerPosition: gui.layerPosition ?? d.layerPosition,
+    infoPosition: gui.infoPosition ?? d.infoPosition,
+    readout: gui.readout ?? (legacy.readoutPosition === false ? false : d.readout),
+    tools: tools === true,
+    glass: gui.glass ?? d.glass,
+  };
 }
 
 /**
@@ -164,15 +190,7 @@ export function resolveOptions(user: TreeletOptions): ResolvedTreeletOptions {
     initZoom,
     minZoom,
     maxZoom,
-    guiDisplay: {
-      enabled: gui.enabled ?? DEFAULT_OPTIONS.guiDisplay.enabled,
-      compassPosition: gui.compassPosition ?? DEFAULT_OPTIONS.guiDisplay.compassPosition,
-      layerPosition: gui.layerPosition ?? DEFAULT_OPTIONS.guiDisplay.layerPosition,
-      legendPosition: gui.legendPosition ?? DEFAULT_OPTIONS.guiDisplay.legendPosition,
-      readoutPosition: gui.readoutPosition ?? DEFAULT_OPTIONS.guiDisplay.readoutPosition,
-      tools: gui.tools ?? DEFAULT_OPTIONS.guiDisplay.tools,
-      glass: gui.glass ?? DEFAULT_OPTIONS.guiDisplay.glass,
-    },
+    guiDisplay: resolveGui(gui),
     mapDisplay: {
       atlasSegments,
       antialias: map.antialias ?? dm.antialias,
@@ -247,11 +265,13 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
   private destroyed = false;
   private resizeObserver: ResizeObserver | null = null;
   private compass: TreeletCompass | null = null;
+  /** The credits on their own (a tag in a bottom corner) when there is no info box. */
   private attribution: TreeletAttribution | null = null;
-  private legend: TreeletLegend | null = null;
-  private readout: TreeletReadout | null = null;
-  /** Containers stacking the legend and readout that share a corner. */
-  private readonly corners = new Map<UICorner, HTMLDivElement>();
+  /** The info box (legend, readout, view, credits) and the hub (layers, measuring). */
+  private info: TreeletInfo | null = null;
+  private hub: TreeletHub | null = null;
+  /** Narrow map: columns span its width, one open at a time. */
+  private compact: boolean | null = null;
   /** Running parameter animations by layer id. */
   private readonly tweens = new Map<string, TweenHandle>();
   private readonly analysisController: AnalysisController;
@@ -264,8 +284,8 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
   private readonly labels: TreeletLabels | null = null;
   /** Measuring tools, the profile panel and the toolbar. */
   private readonly tools: ToolController;
+  /** The profile card on its own (when there is no hub with a Measure page). */
   private profile: TreeletProfile | null = null;
-  private toolbar: TreeletToolbar | null = null;
   private readonly scratch = new Vector3();
   private readonly scratchDir = new Vector3();
 
@@ -427,6 +447,7 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
         for (const entry of entries) {
           const { width, height } = entry.contentRect;
           this.sceneManager.resize(width, height);
+          this.layoutControls(width, height);
         }
       });
       this.resizeObserver.observe(this.container);
@@ -434,78 +455,98 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
 
     defineTreeletElements();
     if (!this.container.style.position) this.container.style.position = 'relative';
+    this.createControls();
+  }
 
-    // Compass + layer panel
+  /**
+   * The controls: the compass, the hub (layers, measuring) and the info box
+   * (legend, readout, view, credits), each in its own corner (a corner asked
+   * for twice goes to the next free one); the credits on their own when
+   * there is no info box.
+   */
+  private createControls(): void {
+    const gd = this.options.guiDisplay;
+    const glass = gd.glass;
+    const taken = new Set<UICorner>();
+    const claim = (want: UICorner, what: string): UICorner => {
+      if (!taken.has(want)) { taken.add(want); return want; }
+      const order: UICorner[] = ['bottom-left', 'bottom-right', 'top-left', 'top-right'];
+      const free = order.find((c) => !taken.has(c)) ?? want;
+      console.warn(`treelet: the ${what} can't share the ${want} corner; it goes to ${free}`);
+      taken.add(free);
+      return free;
+    };
+
     if (gd.enabled) {
       this.compass = document.createElement('treelet-compass') as TreeletCompass;
       this.container.appendChild(this.compass);
-      this.compass.attach(this, {
-        compassPosition: gd.compassPosition,
-        layerPosition: gd.layerPosition,
-        glass: gd.glass,
+      this.compass.attach(this, { compassPosition: claim(gd.compassPosition, 'compass'), navigation: gd.navigation, glass });
+      this.sceneManager.cameraController.onRawChange((state) => {
+        this.compass?.updateCamera(state);
+        this.info?.updateCamera(state);
       });
-      this.sceneManager.cameraController.onRawChange((state) => this.compass?.updateCamera(state));
-      this.compass.updateCamera(this.sceneManager.cameraController.getState());
+
+      this.hub = document.createElement('treelet-hub') as TreeletHub;
+      this.container.appendChild(this.hub);
+      this.hub.attach(this, { corner: claim(gd.layerPosition, 'hub'), tools: gd.tools, glass });
+
+      if (gd.infoPosition !== false) {
+        this.info = document.createElement('treelet-info') as TreeletInfo;
+        this.container.appendChild(this.info);
+        this.info.attach(this, { corner: claim(gd.infoPosition, 'info box'), readout: gd.readout, glass });
+        this.info.updateCamera(this.sceneManager.cameraController.getState());
+      }
+      // On a narrow map one column is open at a time; the other box steps aside
+      for (const [dock, other] of [[this.hub, this.info], [this.info, this.hub]] as const) {
+        dock?.addEventListener('open', () => {
+          if (!this.compact || !other) return;
+          other.close();
+          other.hidden = true;
+        });
+        dock?.addEventListener('close', () => { if (other) other.hidden = false; });
+      }
     }
 
-    // Attribution bar at the bottom corner not used by the layer panel
-    {
-      const lp = gd.layerPosition;
-      const cp = gd.compassPosition;
-      let attrSide: 'left' | 'right' = 'right';
-      if (lp.startsWith('bottom-')) {
-        attrSide = lp.endsWith('left') ? 'right' : 'left';
-      } else if (cp.startsWith('bottom-')) {
-        attrSide = cp.endsWith('left') ? 'right' : 'left';
-      }
+    if (!this.info) {
+      const side = !taken.has('bottom-left') ? 'left' : !taken.has('bottom-right') ? 'right' : 'left';
       this.attribution = document.createElement('treelet-attribution') as TreeletAttribution;
       this.container.appendChild(this.attribution);
-      this.attribution.attach(this, attrSide);
-
-      // Cursor readout and legends, above the attribution by default; the
-      // two stack when they share a corner
-      if (gd.enabled && gd.readoutPosition !== false) {
-        this.readout = document.createElement('treelet-readout') as TreeletReadout;
-        this.cornerSlot(gd.readoutPosition).appendChild(this.readout);
-        this.readout.attach(this, { glass: gd.glass });
-      }
-      if (gd.enabled && gd.legendPosition !== false) {
-        this.legend = document.createElement('treelet-legend') as TreeletLegend;
-        this.cornerSlot(gd.legendPosition).appendChild(this.legend);
-        this.legend.attach(this, { glass: gd.glass });
-      }
-      if (gd.enabled && gd.tools !== false) {
-        this.toolbar = document.createElement('treelet-toolbar') as TreeletToolbar;
-        const slot = this.cornerSlot(gd.tools === true ? 'top-left' : gd.tools);
-        slot.prepend(this.toolbar);
-        this.toolbar.attach(this, { glass: gd.glass });
-      }
+      this.attribution.attach(this, side, { glass });
     }
+    this.layoutControls(this.container.clientWidth, this.container.clientHeight);
   }
 
-  /** The container that stacks the floating elements of a corner (created on demand). */
-  private cornerSlot(corner: UICorner): HTMLDivElement {
-    let slot = this.corners.get(corner);
-    if (slot) return slot;
-    slot = document.createElement('div');
-    slot.className = 'treelet-corner';
-    slot.dataset.corner = corner;
-    const st = slot.style;
-    st.position = 'absolute';
-    st.zIndex = '998';
-    st.display = 'flex';
-    st.flexDirection = 'column';
-    st.gap = '8px';
-    st.pointerEvents = 'none';
-    st.maxWidth = 'calc(100% - 24px)';
-    const [v, h] = corner.split('-') as ['top' | 'bottom', 'left' | 'right'];
-    st.alignItems = h === 'left' ? 'flex-start' : 'flex-end';
-    if (h === 'left') st.left = '12px'; else st.right = '12px';
-    // Bottom corners sit above the attribution bar
-    if (v === 'top') st.top = '12px'; else st.bottom = '24px';
-    this.container.appendChild(slot);
-    this.corners.set(corner, slot);
-    return slot;
+  /**
+   * Fit the controls to the map's size: below 600 px wide the map is
+   * compact (columns span its width, no navigation wings); a column is at
+   * most as tall as the map leaves it beside the compass.
+   */
+  private layoutControls(width: number, height: number): void {
+    if (!this.compass && !this.hub && !this.info) return;
+    const compact = width > 0 && width < COMPACT_WIDTH;
+    if (compact !== this.compact) {
+      this.compact = compact;
+      for (const el of [this.compass, this.hub, this.info]) el?.toggleAttribute('compact', compact);
+      if (!compact) {
+        if (this.hub) this.hub.hidden = false;
+        if (this.info) this.info.hidden = false;
+      } else if (this.hub?.isOpen && this.info?.isOpen) {
+        this.info.close();
+      }
+    }
+    if (!(height > 0)) return;
+    const gd = this.options.guiDisplay;
+    // The compass's extent from its edge (with the wings below or above it)
+    const compassExtent = this.compass ? (gd.navigation && !compact ? 94 : 60) + 6 : 0;
+    const [cv, ch] = gd.compassPosition.split('-');
+    for (const dock of [this.hub, this.info]) {
+      if (!dock) continue;
+      const [v, h] = [dock.dataset.v, dock.dataset.h];
+      // The compass is in the way when it is at the other end of the same side (any side when compact)
+      const blocked = this.compass && cv !== v && (compact || ch === h);
+      const room = height - 24 - (blocked ? compassExtent : 0);
+      dock.style.setProperty('--dock-max', `${Math.max(120, Math.floor(room))}px`);
+    }
   }
 
   // =========================================================================
@@ -602,7 +643,7 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
       teleported: this.teleported,
     });
     this.teleported = false;
-    this.compass?.updateTileCount(this.terrainRenderer.getInstanceCount());
+    this.info?.updateTileCount(this.terrainRenderer.getInstanceCount());
 
     // ==== Shadows: the near part of the visible range ====
     const shadowsChanged = this.terrainRenderer.renderShadows(cam, Math.min(horizon / 3, dist * 4));
@@ -924,27 +965,24 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
   }
 
   /**
-   * Show an elevation profile at the bottom of the map: of a path (two or
-   * more positions) or of a line-of-sight result (with the sight line).
-   * Hovering the chart marks the point on the terrain.
+   * Show an elevation profile of a path (two or more positions) or of a
+   * line-of-sight result (with the sight line): on the hub's Measure page
+   * (opening it), or in a card at the bottom of the map when the controls
+   * have no Measure page. Hovering the chart marks the point on the terrain.
    */
   showProfile(input: readonly LngLat[] | LineOfSightResult, options: { title?: string } = {}): this {
     let data: ProfileData;
     if (Array.isArray(input)) {
       if (input.length < 2) throw new Error('treelet: a profile needs at least two positions');
       const m = this.measureDistance(input);
-      const range = m.minElevation !== null ? `${formatElevation(m.minElevation)} – ${formatElevation(m.maxElevation)}` : '–';
-      data = {
-        title: options.title ?? 'Elevation profile',
-        points: m.profile,
-        stats: [
-          ['Length', formatDistance(m.distance)],
-          ['Terrain', formatDistance(m.surfaceDistance)],
-          ['Ascent', formatElevation(m.gain)],
-          ['Descent', formatElevation(m.loss)],
-          ['Range', range],
-        ],
-      };
+      const stats: Array<[string, string]> = [
+        ['Length', formatDistance(m.distance)],
+        ['Terrain', formatDistance(m.surfaceDistance)],
+        ['Ascent', formatElevation(m.gain)],
+        ['Descent', formatElevation(m.loss)],
+      ];
+      if (m.minElevation !== null) stats.push(['Lowest', formatElevation(m.minElevation)], ['Highest', formatElevation(m.maxElevation)]);
+      data = { title: options.title ?? 'Elevation profile', points: m.profile, stats };
     } else {
       const r = input as LineOfSightResult;
       data = {
@@ -960,24 +998,28 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
         ],
       };
     }
+    // Hovering the chart marks the sample on the terrain
+    const hooks = {
+      onHover: (p: ProfilePoint | null) => this.setInternalOverlay('__profile_marker__',
+        p ? { type: 'Point', coordinates: [p.lngLat.lng, p.lngLat.lat] } : null,
+        { color: '#1c7ed6', pointRadius: 6, pointStrokeWidth: 2 }),
+      onClose: () => this.setInternalOverlay('__profile_marker__', null, {}),
+    };
+    // On the hub's Measure page; without one, a card at the bottom of the map
+    if (this.hub?.hasTools && this.hub.showProfile(data, hooks)) return this;
     if (!this.profile) {
       defineTreeletElements();
       this.profile = document.createElement('treelet-profile') as TreeletProfile;
       this.container.appendChild(this.profile);
-      this.profile.attach({
-        glass: this.options.guiDisplay.glass,
-        onHover: (p) => this.setInternalOverlay('__profile_marker__',
-          p ? { type: 'Point', coordinates: [p.lngLat.lng, p.lngLat.lat] } : null,
-          { color: '#1c7ed6', pointRadius: 6, pointStrokeWidth: 2 }),
-        onClose: () => this.setInternalOverlay('__profile_marker__', null, {}),
-      });
+      this.profile.attach({ glass: this.options.guiDisplay.glass, ...hooks });
     }
     this.profile.show(data);
     return this;
   }
 
-  /** Close the profile panel. */
+  /** Close the profile. */
   hideProfile(): this {
+    this.hub?.hideProfile();
     this.profile?.hide();
     this.setInternalOverlay('__profile_marker__', null, {});
     return this;
@@ -1601,12 +1643,9 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
     this.analysisController.cancelAll();
     if (this.labels) this.labels.remove();
     if (this.profile) { this.profile.remove(); this.profile = null; }
-    if (this.toolbar) { this.toolbar.remove(); this.toolbar = null; }
     if (this.compass) { this.compass.remove(); this.compass = null; }
+    if (this.hub) { this.hub.remove(); this.hub = null; }
+    if (this.info) { this.info.remove(); this.info = null; }
     if (this.attribution) { this.attribution.remove(); this.attribution = null; }
-    if (this.legend) { this.legend.remove(); this.legend = null; }
-    if (this.readout) { this.readout.remove(); this.readout = null; }
-    for (const slot of this.corners.values()) slot.remove();
-    this.corners.clear();
   }
 }

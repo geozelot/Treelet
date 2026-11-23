@@ -50,29 +50,42 @@ export interface TreeletOptions {
 }
 
 export interface GuiDisplayOptions {
+  /** Show the controls (compass, info box, hub). The credits show either way. Default true. */
   enabled?: boolean;
+  /** Corner of the compass. Default 'top-right'. */
   compassPosition?: UICorner;
+  /**
+   * Zoom, rotate and tilt buttons beside the compass (hidden on narrow maps,
+   * where gestures do this). Default true.
+   */
+  navigation?: boolean;
+  /**
+   * Corner of the hub: the tree box that opens into the Layers page (the
+   * coat stack and the terrain) and the Measure page. Default 'bottom-right'.
+   */
   layerPosition?: UICorner;
   /**
-   * Corner of the legend for the visible analyses, or `false` for none.
-   * Default 'bottom-left'.
+   * Corner of the info box that opens into the Legend page (legends of the
+   * visible analyses, the terrain under the pointer) and the Map page (the
+   * view, its center and extent to copy), with the map's credits at its
+   * foot; or `false` for none (the credits then show as a tag in a bottom
+   * corner). Default 'bottom-left'.
    */
-  legendPosition?: UICorner | false;
+  infoPosition?: UICorner | false;
   /**
-   * Corner of the cursor readout (elevation, slope and aspect under the
-   * pointer; after a tap on touch screens), or `false` for none. Shares its
-   * corner with the legend when both use the same one. Default 'bottom-left'.
+   * The terrain under the pointer (elevation, slope, aspect and the value of
+   * the topmost other analysis coat; after a tap on touch screens) on the
+   * info box's Legend page. Default true.
    */
-  readoutPosition?: UICorner | false;
+  readout?: boolean;
   /**
-   * The measuring toolbar (distance, area, profile, line of sight,
-   * viewshed): a corner, `true` for 'top-left', or `false` (default) for none.
+   * The hub's Measure page: distance, area, profile, line of sight and
+   * viewshed, the live result and the elevation profile. Default true.
    */
-  tools?: UICorner | boolean;
+  tools?: boolean;
   /**
-   * Frosted-glass compass and layer controls, including the menus that open
-   * from them: translucent, with the map blurred behind. Costs some GPU time
-   * while the map redraws, so it is off by default. Default false.
+   * Frosted-glass controls: translucent, with the map blurred behind. Costs
+   * some GPU time while the map redraws, so it is off by default. Default false.
    */
   glass?: boolean;
 }

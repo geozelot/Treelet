@@ -7,7 +7,7 @@ import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { defineTreeletElements } from '../../src/ui/elements';
 import { niceTicks, nearestIndex, chartSvg, profileCsv, chartScales, CSS_PALETTE, type ProfilePoint } from '../../src/ui/profileChart';
 import { formatDistance, formatArea, formatElevation } from '../../src/tools/format';
-import { describeResult, type TreeletToolbar } from '../../src/ui/TreeletToolbar';
+import { resultPairs, type TreeletToolbar } from '../../src/ui/TreeletToolbar';
 import type { TreeletProfile } from '../../src/ui/TreeletProfile';
 import type { Treelet } from '../../src/core/Treelet';
 import type { ToolResult } from '../../src/tools/ToolController';
@@ -88,7 +88,7 @@ describe('<treelet-profile>', () => {
     expect(el.hidden).toBe(false);
     expect(root.querySelector('.title')!.textContent).toBe('Elevation profile');
     expect(root.querySelector('.stats')!.textContent).toContain('5.00 km');
-    expect(root.querySelector('svg')).not.toBeNull();
+    expect(root.querySelector('.chart svg')).not.toBeNull();
     const chart = root.querySelector('.chart') as HTMLElement;
     const frames: FrameRequestCallback[] = [];
     vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => frames.push(cb));
@@ -148,7 +148,13 @@ describe('<treelet-toolbar>', () => {
     const result: ToolResult = { mode: 'distance', points: [{ lng: 0, lat: 0 }, { lng: 1, lat: 1 }], path };
     map.setTool({ mode: 'distance', drawing: true, points: result.points, result });
     map.emit('measure', { result });
-    expect(root.querySelector('.result')!.textContent).toBe('2.41 km · terrain 2.60 km');
+    const pairs = () => [...root.querySelectorAll('.results .pair > span')].map((p) => p.textContent);
+    expect(root.querySelector('.status .grp')!.textContent).toBe('Distance');
+    expect(pairs().slice(0, 4)).toEqual(['Length2.41 km', 'Terrain2.60 km', 'Ascent300 m', 'Descent20 m']);
+    const actions = root.querySelector('[data-action="clear"]');
+    map.emit('measure', { result: { ...result, path: { ...path, distance: 2500 } } });
+    expect(pairs()[0]).toBe('Length2.50 km');
+    expect(root.querySelector('[data-action="clear"]')).toBe(actions); // live results only patch the pairs
     (root.querySelector('[data-action="profile"]') as HTMLElement).click();
     expect(map.showProfile).toHaveBeenCalledWith(result.points);
     (root.querySelector('[data-action="finish"]') as HTMLElement).click();
@@ -159,20 +165,24 @@ describe('<treelet-toolbar>', () => {
     expect((root.querySelector('.status') as HTMLElement).hidden).toBe(true);
   });
 
-  it('the viewshed button asks for the observer', () => {
+  it('the viewshed button asks for the observer, with a hint while it waits', () => {
     const { map, root } = mount();
     (root.querySelector('[data-tool="viewshed"]') as HTMLElement).click();
     expect(map.pickLocation).toHaveBeenCalledWith({ prompt: 'Click the terrain to place the observer' });
+    (map as { isPicking: () => boolean }).isPicking = () => true;
+    map.emit('pickstart', {});
+    expect(root.querySelector('[data-tool="viewshed"]')!.getAttribute('aria-pressed')).toBe('true');
+    expect(root.querySelector('.status .hint')!.textContent).toMatch(/place the observer/);
   });
 
-  it('describes results of every tool', () => {
-    expect(describeResult(null)).toEqual([]);
-    expect(describeResult({ mode: 'area', points: [], area: { area: 3_210_000, surfaceArea: 3_650_000, perimeter: 7800, minElevation: 0, maxElevation: 0 } }))
-      .toEqual(['<b>3.21 km²</b> · terrain 3.65 km²', 'Perimeter 7.80 km']);
+  it('gives the results of every tool as pairs', () => {
+    expect(resultPairs(null)).toEqual([]);
+    expect(resultPairs({ mode: 'area', points: [], area: { area: 3_210_000, surfaceArea: 3_650_000, perimeter: 7800, minElevation: 0, maxElevation: 0 } }))
+      .toEqual([['Area', '3.21 km²'], ['Terrain', '3.65 km²'], ['Perimeter', '7.80 km']]);
     const sight = { visible: false, distance: 8450, clearance: -2, eyeElevation: 576, targetElevation: 2244, obstruction: { lngLat: { lng: 0, lat: 0 }, distance: 8400, elevation: 2240 }, profile: [] };
-    expect(describeResult({ mode: 'sight', points: [], sight })[0]).toBe('<b>Hidden</b> · blocked at 8.40 km');
-    expect(describeResult({ mode: 'sight', points: [], sight: { ...sight, visible: true, obstruction: null, clearance: 12 } }))
-      .toEqual(['<b>Visible</b> · 8.45 km', 'Clearance 12 m']);
-    expect(describeResult({ mode: 'sight', points: [], sight: null })).toEqual(['No elevation data at the ends']);
+    expect(resultPairs({ mode: 'sight', points: [], sight })).toEqual([['Result', 'Hidden'], ['Blocked at', '8.40 km'], ['Distance', '8.45 km']]);
+    expect(resultPairs({ mode: 'sight', points: [], sight: { ...sight, visible: true, obstruction: null, clearance: 12 } }))
+      .toEqual([['Result', 'Visible'], ['Distance', '8.45 km'], ['Clearance', '12 m']]);
+    expect(resultPairs({ mode: 'sight', points: [], sight: null })).toEqual([['Result', 'No data']]);
   });
 });

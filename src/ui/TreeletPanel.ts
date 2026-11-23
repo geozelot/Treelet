@@ -1,34 +1,31 @@
 // ============================================================================
 // treelet.js - TreeletPanel Web Component
 //
-// <treelet-panel> - layer selection panel (slides out from layer box).
+// <treelet-panel> - the layers, as the hub's Layers page: rows of 24 that
+// drill into sub-pages (one level deep, with a back row on top).
 //
-// Layout:
-//   Each column: active section (name + gear → settings) + selector header
+//   Overlay  - running region analyses (progress, cancel), a pending pick,
+//              failures; then the coat stack, top first: eye, name → the
+//              coat's page; then Add layer → Analysis kinds and Imagery
+//   Terrain  - Source → the base layers (a plain row with only one),
+//              Exaggeration (scrub), Light → sun settings, Mesh (segments)
 //
-//   Terrain  - active base layer with gear → exaggeration, light, mesh
-//              header → dropdown of other base layers (header is a
-//              plain label when there is only one)
+//   Coat page  - Opacity, Blend, the analysis' parameters (rendered from
+//                its schema), its ramp, Move up / Move down / Remove
+//   Light page - Sun: Manual (direction, altitude) or Date (day, time)
 //
-//   Overlay  - the coat stack (imagery + analyses) with gear → stack manager:
-//                one row per coat, top first: visibility, name (→ its
-//                settings), move up/down, remove
-//                coat settings: opacity, blend, the analysis' parameters
-//                (rendered from its schema) and ramp
-//              header → dropdown:
-//                Analysis group (registered analyses; adds a coat)
-//                Layers group (drapes not active; swaps the imagery)
-//
-// A dropdown opens while the mouse is over its header or list, or after a
-// tap / Enter on the header (until a tap elsewhere, Escape, or focus leaves).
+// Values change in place: a 'layerupdate' or 'sunchange' from elsewhere
+// patches the page on the next frame (after a drag ends); the panel's own
+// changes don't re-render it, so a dragged scrub keeps working. Escape on a
+// sub-page goes back (focus returns to the row that opened it).
 // ============================================================================
 
-import { panelStyles } from './styles';
 import { BaseElement, escapeHtml } from './dom';
+import { kitStyles, scrubHtml, progressHtml, bindScrubs, setScrub } from './kit';
+import { EYE_SVG, EYE_OFF_SVG, CHEV_RIGHT_SVG, CHEV_LEFT_SVG, PLUS_SVG, CLOSE_SVG } from './icons';
 import type { Treelet } from '../core/Treelet';
 import type { BlendMode } from '../core/types';
 import type { BaseLayer } from '../layers/BaseLayer';
-import type { DrapeLayer } from '../layers/DrapeLayer';
 import type { AnalysisLayer } from '../layers/AnalysisLayer';
 import type { StackLayer } from '../layers/LayerRegistry';
 import type { ParamSpec, RGB } from '../analysis/types';
@@ -37,28 +34,25 @@ import { runRegionAnalysis } from './regionAnalysis';
 import type { RegionAnalysisKind } from '../core/AnalysisController';
 import { BUILTIN_RAMPS, isRampName, rampGradientCss, rampNamesFor } from '../analysis/ramps';
 
-/** Settings-row id of the coat stack (the Overlay column's active row). */
-const STACK_ID = '__stack__';
-
 const BLEND_MODES: { id: BlendMode; label: string }[] = [
   { id: 'normal',    label: 'Normal' },
   { id: 'multiply',  label: 'Multiply' },
   { id: 'screen',    label: 'Screen' },
-  { id: 'softlight', label: 'Soft Light' },
+  { id: 'softlight', label: 'Soft light' },
 ];
 
-/** SVG gear icon (14×14). */
-const GEAR_SVG = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="2.5"/><path d="M13.3 10a1.2 1.2 0 0 0 .2 1.3l.1.1a1.4 1.4 0 1 1-2 2l-.1-.1a1.2 1.2 0 0 0-1.3-.2 1.2 1.2 0 0 0-.7 1.1v.2a1.4 1.4 0 1 1-2.9 0v-.1a1.2 1.2 0 0 0-.8-1.1 1.2 1.2 0 0 0-1.3.2l-.1.1a1.4 1.4 0 1 1-2-2l.1-.1a1.2 1.2 0 0 0 .2-1.3 1.2 1.2 0 0 0-1.1-.7h-.2a1.4 1.4 0 1 1 0-2.9h.1a1.2 1.2 0 0 0 1.1-.8 1.2 1.2 0 0 0-.2-1.3l-.1-.1a1.4 1.4 0 1 1 2-2l.1.1a1.2 1.2 0 0 0 1.3.2h.1a1.2 1.2 0 0 0 .7-1.1v-.2a1.4 1.4 0 1 1 2.9 0v.1a1.2 1.2 0 0 0 .7 1.1 1.2 1.2 0 0 0 1.3-.2l.1-.1a1.4 1.4 0 1 1 2 2l-.1.1a1.2 1.2 0 0 0-.2 1.3v.1a1.2 1.2 0 0 0 1.1.7h.2a1.4 1.4 0 1 1 0 2.9h-.1a1.2 1.2 0 0 0-1.1.7Z"/></svg>`;
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
-/** SVG chevron (10×10, pointing down; CSS turns it toward where the list opens). */
-const CHEVRON_SVG = `<svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 3.75 5 6.25 7.5 3.75"/></svg>`;
+/** How long a failed analysis stays listed (ms). */
+const ERROR_MS = 8000;
 
-/** Eye (visible) and eye-off icons (12×12). */
-const EYE_SVG = `<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 8s2.5-4.5 6.5-4.5S14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8Z"/><circle cx="8" cy="8" r="2"/></svg>`;
-const EYE_OFF_SVG = `<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 2.5l11 11"/><path d="M6.3 6.4A2 2 0 0 0 9.6 9.7"/><path d="M4.4 4.9C2.6 6.1 1.5 8 1.5 8s2.5 4.5 6.5 4.5c1.2 0 2.3-.4 3.2-1"/><path d="M7 3.6c.3 0 .7-.1 1-.1 4 0 6.5 4.5 6.5 4.5s-.7 1.3-2 2.5"/></svg>`;
-const UP_SVG = `<svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 6.25 5 3.75l2.5 2.5"/></svg>`;
-const DOWN_SVG = `<svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 3.75 5 6.25l2.5-2.5"/></svg>`;
-const CLOSE_SVG = `<svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2.5 2.5l5 5M7.5 2.5l-5 5"/></svg>`;
+const panelStyles = /* css */ `
+  ${kitStyles}
+  :host { display: flex; flex-direction: column; gap: 2px; }
+  .panel, .jobs { display: flex; flex-direction: column; gap: 2px; }
+  .jobs:empty { display: none; }
+  .row > .ramp { margin-left: auto; }
+`;
 
 function capitalize(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
@@ -95,10 +89,14 @@ function sunText(azimuth: number, altitude: number): string {
   return altitude < 0 ? `${Math.round(azimuth)}° · below the horizon` : `${Math.round(azimuth)}° · ${Math.round(altitude)}° up`;
 }
 
+function stageText(stage: 'loading' | 'computing', progress: number): string {
+  return `${stage === 'loading' ? 'Loading' : 'Computing'} ${Math.round(progress * 100)}%`;
+}
+
 const MINUTES_PER_DAY = 24 * 60;
 
-/** One button of a toggle group; the delegated click handler reads its data attributes. */
-interface ToggleOption {
+/** One segment of a segment group; the delegated click handler reads its data attributes. */
+interface Segment {
   action: string;
   layerId: string;
   param?: string;
@@ -110,22 +108,47 @@ interface ToggleOption {
   data?: Record<string, string | number>;
 }
 
-function toggleButtons(options: readonly ToggleOption[]): string {
+function segmentButtons(options: readonly Segment[]): string {
   return options.map((o) => {
     const param = o.param === undefined ? '' : ` data-param="${escapeHtml(o.param)}"`;
     const data = Object.entries(o.data ?? {}).map(([k, v]) => ` data-${k}="${escapeHtml(String(v))}"`).join('');
-    return `<button type="button" class="toggle-btn${o.active ? ' active' : ''}" data-action="${o.action}" data-layer-id="${escapeHtml(o.layerId)}"${param}`
+    return `<button type="button" data-action="${o.action}" data-layer-id="${escapeHtml(o.layerId)}"${param}`
       + ` data-value="${escapeHtml(o.value)}"${data} data-focus-key="${escapeHtml(o.focusKey)}" aria-pressed="${o.active}">${escapeHtml(o.label)}</button>`;
   }).join('');
 }
 
-/** A labelled row of toggle buttons. */
-function toggleRow(label: string, options: readonly ToggleOption[]): string {
-  return `
-    <div class="toggle-row">
-      <span class="toggle-label">${escapeHtml(label)}</span>
-      <span class="toggle-group">${toggleButtons(options)}</span>
-    </div>`;
+/** A group header. */
+function grp(title: string): string {
+  return `<div class="grp"><span class="t">${escapeHtml(title)}</span></div>`;
+}
+
+/**
+ * Choices with a label: in the row when short (up to 3, few characters),
+ * under a group header across the row (up to 5 short ones), else choice rows.
+ */
+function choices(label: string, options: readonly Segment[]): string {
+  const chars = options.reduce((n, o) => n + o.label.length, 0);
+  const group = `role="group" aria-label="${escapeHtml(label)}"`;
+  if (options.length <= 3 && chars + label.length <= 26) {
+    return `<div class="row flush"><span class="k">${escapeHtml(label)}</span><div class="seg" ${group}>${segmentButtons(options)}</div></div>`;
+  }
+  if (options.length <= 5 && chars <= 36 && options.every((o) => o.label.length <= 10)) {
+    return `${grp(label)}<div class="seg full" ${group}>${segmentButtons(options)}</div>`;
+  }
+  return grp(label) + options.map((o) => {
+    const param = o.param === undefined ? '' : ` data-param="${escapeHtml(o.param)}"`;
+    return `<button type="button" class="row${o.active ? ' sel' : ''}" data-action="${o.action}" data-layer-id="${escapeHtml(o.layerId)}"${param}`
+      + ` data-value="${escapeHtml(o.value)}" data-focus-key="${escapeHtml(o.focusKey)}" aria-pressed="${o.active}"><span class="t">${escapeHtml(o.label)}</span></button>`;
+  }).join('');
+}
+
+/** The focused element of a shadow root (null when focus is elsewhere or gone). */
+function activeIn(root: ShadowRoot): HTMLElement | null {
+  try {
+    return root.activeElement as HTMLElement | null;
+  } catch {
+    return null; // some DOM implementations throw while the focused element is detached
+  }
 }
 
 /** Key of a control's value label (actions keep a parameter named like a panel control apart). */
@@ -150,46 +173,34 @@ function formatNumber(v: number, step: number): string {
   return v.toFixed(decimals);
 }
 
+/** A value with its unit: a space before word units (m, h), none before symbols (°, %, /km). */
+function withUnit(v: number, step: number, unit: string): string {
+  return `${formatNumber(v, step)}${unit && /^[A-Za-z]/.test(unit) ? ' ' : ''}${unit}`;
+}
+
+/** The page shown: the layers, or one of the sub-pages. */
+type View =
+  | { kind: 'main' }
+  | { kind: 'coat'; id: string }
+  | { kind: 'add' }
+  | { kind: 'source' }
+  | { kind: 'light' };
+
 /**
- * <treelet-panel> - Main UI panel for treelet.js.
+ * <treelet-panel> - the layers of a map.
  *
  * Uses event delegation: listeners on the shadow root handle all
- * interactions. No per-element listeners are registered, so innerHTML
- * replacement (render) doesn't incur re-binding overhead.
+ * interactions, so replacing the page's markup needs no re-binding.
  */
 export class TreeletPanel extends BaseElement {
   private shadow: ShadowRoot;
   private map: Treelet | null = null;
-
-  /** Vertical position for direction-aware expansion. */
-  private vPos: 'top' | 'bottom' = 'top';
-
-  /** Horizontal position - controls column order (from box outwards). */
-  private hPos: 'left' | 'right' = 'right';
-
-  /** Which active row has its settings gear open (base layer id or STACK_ID). */
-  private settingsOpen: string | null = null;
-
-  /** Which coat in the stack manager has its settings expanded. */
-  private coatOpen: string | null = null;
-
-  /** Settings were just opened: the next render fades them in. */
-  private settingsEntering = false;
-
-  /** Column whose dropdown the mouse is over / that a tap or Enter opened. */
-  private hoverCol: string | null = null;
-  private pinnedCol: string | null = null;
-
-  /** How the latest interaction inside the panel started. */
-  private lastInput: 'mouse' | 'touch' | 'keyboard' = 'mouse';
-
-  /** Whether delegated listeners have been bound. */
-  private delegated = false;
+  private view: View = { kind: 'main' };
 
   /** Set while the panel itself changes the map, so its own 'layerupdate' / 'sunchange' don't re-render it. */
   private ownChange = false;
 
-  /** A pointer is down in the panel (a slider may be dragged): updates wait until it is up. */
+  /** A pointer is down in the panel (a scrub may be dragged): updates wait until it is up. */
   private pointerHeld = false;
 
   /** Layers whose values changed elsewhere, shown on the next frame. */
@@ -197,51 +208,118 @@ export class TreeletPanel extends BaseElement {
   private updateFrame = 0;
   private sunPending = false;
 
-  /** Persistent panel container - only its innerHTML is replaced on re-render,
-   *  avoiding repeated CSS re-parse from full shadow DOM innerHTML replacement. */
+  /** Persistent containers: only the page's markup is replaced on re-render. */
   private panelEl: HTMLDivElement | null = null;
+  /** Running jobs, a pending pick and failures (rebuilt only when one starts or ends). */
+  private jobsEl: HTMLDivElement | null = null;
+  private pickPrompt: string | null = null;
+  private readonly errors = new Map<string, { label: string; message: string; timer: ReturnType<typeof setTimeout> }>();
+  private subscribed = false;
 
   constructor() {
     super();
     this.shadow = this.attachShadow({ mode: 'open' });
+    this.shadow.innerHTML = `<style>${panelStyles}</style><div class="panel"></div>`;
+    this.panelEl = this.shadow.querySelector('.panel') as HTMLDivElement;
+    this.jobsEl = document.createElement('div');
+    this.jobsEl.className = 'jobs';
+    this.jobsEl.setAttribute('role', 'list');
+    this.jobsEl.setAttribute('aria-label', 'Running analyses');
+    this.shadow.addEventListener('click', this.handleClick);
+    this.shadow.addEventListener('change', this.handleChange);
+    this.shadow.addEventListener('pointerdown', this.handlePointerDown, true);
+    this.shadow.addEventListener('keydown', this.handleKeyDown);
+    bindScrubs(this.shadow, this.handleScrub);
   }
 
-  attach(map: Treelet, vPos?: 'top' | 'bottom', hPos?: 'left' | 'right'): void {
+  /** Attach to a map (the hub places the panel on its Layers page). */
+  attach(map: Treelet, options: { glass?: boolean } = {}): void {
+    if (this.map !== map) this.unsubscribe();
     this.map = map;
-    if (vPos) this.vPos = vPos;
-    if (hPos) this.hPos = hPos;
-    this.setAttribute('data-v', this.vPos);
-    this.setAttribute('data-h', this.hPos);
-
-    // Bind delegated handlers ONCE - they survive innerHTML replacements
-    if (!this.delegated) {
-      this.delegated = true;
-      this.shadow.addEventListener('click', this.handleClick);
-      this.shadow.addEventListener('input', this.handleInput);
-      this.shadow.addEventListener('pointerover', this.handlePointerOver);
-      this.shadow.addEventListener('pointerdown', this.handlePointerDown, true);
-      this.shadow.addEventListener('keydown', this.handleKeyDown);
-      this.shadow.addEventListener('focusout', this.handleFocusOut);
-      this.addEventListener('pointerleave', this.handlePointerLeave);
-    }
-
-    // Inject style and persistent panel container once
-    if (!this.panelEl) {
-      this.shadow.innerHTML = `<style>${panelStyles}</style><div class="panel"></div>`;
-      this.panelEl = this.shadow.querySelector('.panel') as HTMLDivElement;
-    }
-
+    this.toggleAttribute('glass', options.glass === true);
+    if (this.isConnected) this.subscribe();
+    this.renderJobs();
     this.render();
   }
 
+  connectedCallback(): void {
+    if (this.map) {
+      this.subscribe();
+      this.renderJobs();
+      this.render();
+    }
+  }
+
+  disconnectedCallback(): void {
+    this.unsubscribe();
+    for (const e of this.errors.values()) clearTimeout(e.timer);
+    this.errors.clear();
+  }
+
+  private subscribe(): void {
+    const map = this.map;
+    if (!map || this.subscribed) return;
+    this.subscribed = true;
+    map.on('layerchange', this.onLayerChange);
+    map.on('layerupdate', this.onLayerUpdate);
+    map.on('sunchange', this.onSunChange);
+    map.on('analysisstart', this.onJobsChange);
+    map.on('analysisprogress', this.onProgress);
+    map.on('analysisend', this.onEnd);
+    map.on('pickstart', this.onPickStart);
+    map.on('pickend', this.onPickEnd);
+  }
+
+  private unsubscribe(): void {
+    const map = this.map;
+    if (!map || !this.subscribed) return;
+    this.subscribed = false;
+    map.off('layerchange', this.onLayerChange);
+    map.off('layerupdate', this.onLayerUpdate);
+    map.off('sunchange', this.onSunChange);
+    map.off('analysisstart', this.onJobsChange);
+    map.off('analysisprogress', this.onProgress);
+    map.off('analysisend', this.onEnd);
+    map.off('pickstart', this.onPickStart);
+    map.off('pickend', this.onPickEnd);
+    if (this.updateFrame) cancelAnimationFrame(this.updateFrame);
+    this.updateFrame = 0;
+  }
+
+  private readonly onLayerChange = (): void => this.refresh();
+  private readonly onLayerUpdate = (e: { id: string }): void => this.layerUpdated(e.id);
+  private readonly onSunChange = (): void => this.sunChanged();
+  private readonly onJobsChange = (): void => this.renderJobs();
+  private readonly onPickStart = (e: { prompt: string }): void => { this.pickPrompt = e.prompt; this.renderJobs(); };
+  private readonly onPickEnd = (): void => { this.pickPrompt = null; this.renderJobs(); };
+
+  private readonly onProgress = (e: { id: string; stage: 'loading' | 'computing'; progress: number }): void => {
+    const row = this.jobsEl?.querySelector<HTMLElement>(`[data-job="${CSS.escape(e.id)}"] .scrub`);
+    if (!row) { this.renderJobs(); return; }
+    const fill = row.querySelector<HTMLElement>('.fl');
+    const text = row.querySelector<HTMLElement>('.v');
+    if (fill) fill.style.width = `${Math.round(e.progress * 100)}%`;
+    if (text) text.textContent = stageText(e.stage, e.progress);
+    row.setAttribute('aria-valuenow', String(Math.round(e.progress * 100)));
+  };
+
+  private readonly onEnd = (e: { id: string; label: string; status: string; error?: string }): void => {
+    if (e.status === 'error') {
+      const timer = setTimeout(() => { this.errors.delete(e.id); this.renderJobs(); }, ERROR_MS);
+      this.errors.set(e.id, { label: e.label, message: e.error ?? 'failed', timer });
+    }
+    this.renderJobs();
+  };
+
+  /** Show the map's layers again (after layers were added, removed or reordered). */
   refresh(): void {
     if (this.map) this.render();
   }
 
   /**
-   * A layer's values changed ('layerupdate'): show them in its open coat
-   * settings on the next frame. Changes the panel made itself are already
-   * shown (and re-rendering would destroy the slider being dragged).
+   * A layer's values changed ('layerupdate'): show them on its open page on
+   * the next frame. Changes the panel made itself are already shown (and
+   * re-rendering would end the drag of the scrub that made them).
    */
   layerUpdated(id: string): void {
     if (this.ownChange || !this.map) return;
@@ -249,11 +327,18 @@ export class TreeletPanel extends BaseElement {
     this.scheduleUpdate();
   }
 
-  /** The sun moved ('sunchange'): show it in the light settings unless the panel moved it. */
+  /** The sun moved ('sunchange'): show it unless the panel moved it. */
   sunChanged(): void {
     if (this.ownChange || !this.map) return;
     this.sunPending = true;
     this.scheduleUpdate();
+  }
+
+  /** Back to the layers from any sub-page (the hub calls this as it closes). */
+  resetSettings(): void {
+    if (this.view.kind === 'main') return;
+    this.view = { kind: 'main' };
+    this.render();
   }
 
   private scheduleUpdate(): void {
@@ -266,13 +351,12 @@ export class TreeletPanel extends BaseElement {
 
   private flushUpdates(): void {
     if (!this.map || !this.panelEl) return;
-    if (this.coatOpen !== null && this.pendingUpdates.has(this.coatOpen)) this.renderCoat(this.coatOpen);
+    const v = this.view;
+    const coat = v.kind === 'coat' && this.pendingUpdates.has(v.id);
+    const sun = this.sunPending && (v.kind === 'light' || v.kind === 'main');
     this.pendingUpdates.clear();
-    if (this.sunPending) {
-      this.sunPending = false;
-      const block = this.panelEl.querySelector<HTMLElement>('.light-settings');
-      if (block) this.replaceHtml(block, this.renderLightSettings());
-    }
+    this.sunPending = false;
+    if (coat || sun) this.render();
   }
 
   /** Run a change of the map made by the panel (its events then don't re-render the panel). */
@@ -285,39 +369,17 @@ export class TreeletPanel extends BaseElement {
     }
   }
 
-  /** Re-render one coat's open settings in place. */
-  private renderCoat(id: string): void {
-    const block = this.panelEl?.querySelector<HTMLElement>(`.coat-settings[data-layer-id="${CSS.escape(id)}"]`);
-    const layer = this.map?.getLayerStack().find((l) => l.id === id);
-    if (block && layer) this.replaceHtml(block, this.renderCoatSettings(layer));
-    else this.render();
-  }
-
-  /** Replace an element's content, keeping keyboard focus on the same control. */
-  private replaceHtml(el: HTMLElement, html: string): void {
-    const focused = this.shadow.activeElement as HTMLElement | null;
-    const key = focused && el.contains(focused) ? focused.dataset.focusKey : undefined;
-    el.innerHTML = html;
-    if (key) el.querySelector<HTMLElement>(`[data-focus-key="${CSS.escape(key)}"]`)?.focus();
-  }
-
-  /** Close open settings and dropdowns (called when the layer row closes). */
-  resetSettings(): void {
-    this.settingsOpen = null;
-    this.coatOpen = null;
-    this.hoverCol = null;
-    this.pinnedCol = null;
-    this.render();
-  }
-
-  /** Apply hoverCol / pinnedCol to the rendered selectors. */
-  private syncSelectors(): void {
-    this.panelEl?.querySelectorAll<HTMLElement>('.has-choices').forEach((el) => {
-      const col = el.dataset.col;
-      const open = col === this.hoverCol || col === this.pinnedCol;
-      el.classList.toggle('open', open);
-      el.querySelector('.layer-col-header')?.setAttribute('aria-expanded', String(open));
-    });
+  /** Show another page; focus goes to its back row, or back to the row that opened it. */
+  private go(view: View, focusKey?: string): void {
+    const from = this.view;
+    this.view = view;
+    let key = focusKey;
+    if (key === undefined) {
+      if (view.kind !== 'main') key = 'back';
+      else if (from.kind === 'coat') key = `coat-${from.id}`;
+      else if (from.kind !== 'main') key = from.kind;
+    }
+    this.render(key);
   }
 
   // =========================================================================
@@ -329,529 +391,500 @@ export class TreeletPanel extends BaseElement {
     const map = this.map;
     const target = e.target as HTMLElement;
 
-    // === Sliders: just stop propagation ===
-    if (target.tagName === 'INPUT') {
+    // === Navigation: sub-pages and back ===
+    const nav = target.closest<HTMLElement>('[data-view]');
+    if (nav) {
       e.stopPropagation();
+      const kind = nav.dataset.view as View['kind'];
+      this.go(kind === 'coat' ? { kind, id: nav.dataset.layerId! } : { kind } as View);
       return;
     }
 
-    // === Dropdown header: a tap or Enter toggles it (the mouse opens it by hovering) ===
-    const header = target.closest('.has-choices > .layer-col-header') as HTMLElement | null;
-    if (header) {
+    // === Jobs: cancel a run or a pick, dismiss a failure ===
+    const cancel = target.closest<HTMLElement>('[data-job-cancel]');
+    if (cancel) {
       e.stopPropagation();
-      if (this.lastInput !== 'mouse') {
-        const col = (header.parentElement as HTMLElement).dataset.col!;
-        this.pinnedCol = this.pinnedCol === col ? null : col;
-        this.syncSelectors();
+      const id = cancel.dataset.jobCancel!;
+      if (id === 'pick') {
+        map.cancelPick();
+      } else if (this.errors.has(id)) {
+        clearTimeout(this.errors.get(id)!.timer);
+        this.errors.delete(id);
+        this.renderJobs();
+      } else {
+        map.cancelAnalysis(id);
       }
       return;
     }
 
-    // === Active row click → toggle settings panel ===
-    const activeRow = target.closest('.active-row[data-layer-id]') as HTMLElement | null;
-    if (activeRow) {
-      e.stopPropagation();
-      const layerId = activeRow.dataset.layerId!;
-      const opening = this.settingsOpen !== layerId;
-      this.settingsOpen = opening ? layerId : null;
-      this.settingsEntering = opening;
-      this.pinnedCol = null;
+    const control = target.closest<HTMLElement>('[data-action]');
+    if (!control) return;
+    e.stopPropagation();
+    const action = control.dataset.action!;
+    const id = control.dataset.layerId ?? '';
+    const key = control.dataset.param ?? '';
+    const value = control.dataset.value ?? '';
+    const coatChange = (change: () => void) => {
+      this.own(change);
       this.render();
-      return;
-    }
+    };
 
-    // === Dropdown entry → add an analysis, swap the imagery, or switch the base layer ===
-    const layerBtn = target.closest('.layer-col-body .layer-btn[data-action="activate"]') as HTMLElement | null;
-    if (layerBtn) {
-      e.stopPropagation();
-      const entry = layerBtn.closest('.layer-entry') as HTMLElement | null;
-      if (!entry) return;
-
-      const layerId = entry.dataset.layerId!;
-      const layerType = entry.dataset.layerType!;
-      const col = (entry.closest('.has-choices') as HTMLElement | null)?.dataset.col;
-
-      this.pinnedCol = null;
-      this.hoverCol = null;
-
-      if (layerType === 'base') {
-        this.settingsOpen = null;
-        map.setActiveBaseLayer(layerId);
-      } else if (layerType === 'analysis') {
-        const kind = entry.dataset.kind!;
+    switch (action) {
+      // --- Stack rows ---
+      case 'visible': {
+        const row = control.closest<HTMLElement>('[data-visible]')!;
+        map.setLayerVisible(id, row.dataset.visible !== 'true');
+        return;
+      }
+      // --- Add layer ---
+      case 'add': {
+        const kind = control.dataset.kind!;
         if (getAnalysis(kind)?.raster) {
           runRegionAnalysis(map, kind as RegionAnalysisKind);
+          this.go({ kind: 'main' }, 'add');
         } else {
-          // The map re-renders on 'layerchange' before the handle is known: open the new coat, then render
+          // The map re-renders on 'layerchange' before the handle is known: open the new coat after
           const handle = map.addAnalysisLayer({ analysis: kind });
-          this.settingsOpen = STACK_ID;
-          this.coatOpen = handle.id;
-          this.render();
+          this.go({ kind: 'coat', id: handle.id });
         }
-      } else if (layerType === 'drape') {
-        map.activateDrapeLayer(layerId);
+        return;
       }
-      // The map's 'layerchange' re-renders; close now in case nothing changed
-      this.syncSelectors();
-      // The chosen entry is gone from the new list: keep keyboard focus on its column
-      if (this.lastInput === 'keyboard' && col) {
-        this.focusSelector(`.has-choices[data-col="${col}"] > .layer-col-header`);
-      }
-      return;
-    }
-
-    // === Stack rows ===
-    const stackRow = target.closest('.stack-row[data-layer-id]') as HTMLElement | null;
-    if (stackRow) {
-      e.stopPropagation();
-      const id = stackRow.dataset.layerId!;
-      const action = (target.closest('[data-action]') as HTMLElement | null)?.dataset.action;
-      if (action === 'visible') {
-        map.setLayerVisible(id, stackRow.dataset.visible !== 'true');
-      } else if (action === 'up' || action === 'down') {
-        const index = parseInt(stackRow.dataset.index!, 10);
+      case 'drape':
+        map.activateDrapeLayer(id);
+        this.go({ kind: 'main' }, 'add');
+        return;
+      case 'base':
+        map.setActiveBaseLayer(id);
+        this.go({ kind: 'main' }, 'source');
+        return;
+      // --- The coat's page ---
+      case 'up':
+      case 'down': {
+        const index = parseInt(control.dataset.index!, 10);
         map.moveLayer(id, action === 'up' ? index + 1 : index - 1);
-      } else if (action === 'remove') {
-        if (this.coatOpen === id) this.coatOpen = null;
-        if (stackRow.dataset.layerType === 'drape') map.deactivateDrapeLayer();
+        return;
+      }
+      case 'remove':
+        this.view = { kind: 'main' };
+        if (control.dataset.layerType === 'drape') map.deactivateDrapeLayer();
         else map.removeAnalysisLayer(id);
-      } else {
-        this.coatOpen = this.coatOpen === id ? null : id;
+        this.render('add');
+        return;
+      case 'blend':
+        coatChange(() => map.setLayerBlendMode(id, value as BlendMode));
+        return;
+      case 'ramp':
+        coatChange(() => map.setAnalysisRamp(id, value as never));
+        return;
+      case 'color':
+        coatChange(() => map.setAnalysisParams(id, { [key]: [
+          parseFloat(control.dataset.r!), parseFloat(control.dataset.g!), parseFloat(control.dataset.b!),
+        ] }));
+        return;
+      case 'select':
+        coatChange(() => map.setAnalysisParams(id, { [key]: value }));
+        return;
+      case 'toggle':
+        coatChange(() => map.setAnalysisParams(id, { [key]: value === 'true' }));
+        return;
+      case 'auto':
+        coatChange(() => {
+          if (value === 'true') {
+            map.setAnalysisParams(id, { [key]: 'auto' });
+          } else {
+            const domain = map.getLegend(id)?.domain ?? [parseFloat(control.dataset.min!), parseFloat(control.dataset.max!)];
+            map.setAnalysisParams(id, { [key]: [domain[0], domain[1]] });
+          }
+        });
+        return;
+      case 'optional':
+        // An optional span: off = null, on = the pair the button carries
+        coatChange(() => map.setAnalysisParams(id, {
+          [key]: value === 'true' ? [parseFloat(control.dataset.min!), parseFloat(control.dataset.max!)] : null,
+        }));
+        return;
+      // --- Terrain ---
+      case 'wireframe':
+        map.setWireframe(value !== 'solid');
+        map.setWireframeWhite(value === 'white');
         this.render();
-      }
-      return;
-    }
-
-    // === Coat settings controls (inside an expanded stack row) ===
-    const control = target.closest('[data-action][data-layer-id]') as HTMLElement | null;
-    if (control) {
-      e.stopPropagation();
-      const id = control.dataset.layerId!;
-      const key = control.dataset.param ?? '';
-      const value = control.dataset.value ?? '';
-      const coatChange = (change: () => void) => {
-        this.own(change);
-        this.renderCoat(id);
-      };
-      switch (control.dataset.action) {
-        case 'blend':
-          coatChange(() => map.setLayerBlendMode(id, value as BlendMode));
-          break;
-        case 'ramp':
-          coatChange(() => map.setAnalysisRamp(id, value as never));
-          break;
-        case 'color':
-          coatChange(() => map.setAnalysisParams(id, { [key]: [
-            parseFloat(control.dataset.r!), parseFloat(control.dataset.g!), parseFloat(control.dataset.b!),
-          ] }));
-          break;
-        case 'select':
-          coatChange(() => map.setAnalysisParams(id, { [key]: value }));
-          break;
-        case 'toggle':
-          coatChange(() => map.setAnalysisParams(id, { [key]: value === 'true' }));
-          break;
-        case 'auto':
-          coatChange(() => {
-            if (value === 'true') {
-              map.setAnalysisParams(id, { [key]: 'auto' });
-            } else {
-              const domain = map.getLegend(id)?.domain ?? [parseFloat(control.dataset.min!), parseFloat(control.dataset.max!)];
-              map.setAnalysisParams(id, { [key]: [domain[0], domain[1]] });
-            }
-          });
-          break;
-        case 'optional':
-          // An optional span: off = null, on = the pair the button carries
-          coatChange(() => map.setAnalysisParams(id, {
-            [key]: value === 'true' ? [parseFloat(control.dataset.min!), parseFloat(control.dataset.max!)] : null,
-          }));
-          break;
-        case 'wireframe':
-          map.setWireframe(value !== 'solid');
-          map.setWireframeWhite(value === 'white');
-          this.render();
-          break;
-        case 'suntime':
-          this.own(() => {
-            if (value === 'date') {
-              // Start from now, to the quarter hour
-              const now = new Date();
-              now.setMinutes(Math.round(now.getMinutes() / 15) * 15, 0, 0);
-              map.setSunTime(now);
-            } else {
-              map.setSunTime(null);
-            }
-          });
-          this.render();
-          break;
-      }
-      return;
+        return;
+      case 'suntime':
+        this.own(() => {
+          if (value === 'date') {
+            // Start from now, to the quarter hour
+            const now = new Date();
+            now.setMinutes(Math.round(now.getMinutes() / 15) * 15, 0, 0);
+            map.setSunTime(now);
+          } else {
+            map.setSunTime(null);
+          }
+        });
+        this.render();
+        return;
     }
   };
 
-  /** Mouse over a selector (header or list) opens it; anywhere else closes it. */
-  private handlePointerOver = (ev: Event): void => {
-    const e = ev as PointerEvent;
-    if (e.pointerType !== 'mouse') return;
-    const sel = (e.target as HTMLElement).closest('.has-choices') as HTMLElement | null;
-    const col = sel?.dataset.col ?? null;
-    if (col === this.hoverCol) return;
-    this.hoverCol = col;
-    this.syncSelectors();
+  /** The day input of the sun's date. */
+  private handleChange = (e: Event): void => {
+    const target = e.target as HTMLInputElement;
+    if (!this.map || target.dataset.action !== 'sunday') return;
+    e.stopPropagation();
+    const [y, m, d] = target.value.split('-').map(Number);
+    if (!(y && m && d)) return;
+    const map = this.map;
+    this.own(() => {
+      const next = new Date((map.getSunTime() ?? new Date()).getTime());
+      next.setFullYear(y, m - 1, d);
+      map.setSunTime(next);
+    });
+    this.showSunPosition();
   };
 
-  private handlePointerLeave = (e: PointerEvent): void => {
-    if (e.pointerType !== 'mouse' || this.hoverCol === null) return;
-    this.hoverCol = null;
-    this.syncSelectors();
-  };
-
-  /** Record the input kind; a tap outside the open dropdown closes it. */
-  private handlePointerDown = (ev: Event): void => {
-    const e = ev as PointerEvent;
-    // Value updates from elsewhere wait while a pointer is down (a slider may be dragged)
-    if (!this.pointerHeld && typeof window !== 'undefined') {
-      this.pointerHeld = true;
-      const release = () => {
-        window.removeEventListener('pointerup', release, true);
-        window.removeEventListener('pointercancel', release, true);
-        this.pointerHeld = false;
-        if (this.pendingUpdates.size > 0 || this.sunPending) this.scheduleUpdate();
-      };
-      window.addEventListener('pointerup', release, true);
-      window.addEventListener('pointercancel', release, true);
-    }
-    this.lastInput = e.pointerType === 'touch' || e.pointerType === 'pen' ? 'touch' : 'mouse';
-    if (this.pinnedCol === null) return;
-    const sel = (e.target as HTMLElement).closest('.has-choices') as HTMLElement | null;
-    if (sel?.dataset.col !== this.pinnedCol) {
-      this.pinnedCol = null;
-      this.syncSelectors();
-    }
-  };
-
-  /** Escape closes the open dropdown, then the open settings (focus returns to their button). */
-  private handleKeyDown = (ev: Event): void => {
-    const e = ev as KeyboardEvent;
-    this.lastInput = 'keyboard';
-    if (e.key !== 'Escape') return;
-    if (this.pinnedCol !== null || this.hoverCol !== null) {
-      const col = this.pinnedCol ?? this.hoverCol;
-      this.pinnedCol = null;
-      this.hoverCol = null;
-      this.syncSelectors();
-      this.focusSelector(`.has-choices[data-col="${col}"] > .layer-col-header`);
-      e.stopPropagation();
-    } else if (this.settingsOpen !== null) {
-      const id = this.settingsOpen;
-      this.settingsOpen = null;
-      this.coatOpen = null;
-      this.render();
-      this.focusSelector(`.active-row[data-layer-id="${CSS.escape(id)}"]`);
-      e.stopPropagation();
-    }
-  };
-
-  /**
-   * Keyboard focus leaving an open dropdown closes it. Checked once focus has
-   * settled: a re-render briefly removes the focused button and refocuses it.
-   */
-  private handleFocusOut = (): void => {
-    if (this.lastInput !== 'keyboard' || this.pinnedCol === null) return;
-    setTimeout(() => {
-      if (this.pinnedCol === null) return;
-      const sel = this.panelEl?.querySelector(`.has-choices[data-col="${this.pinnedCol}"]`);
-      if (!sel || !sel.contains(this.shadow.activeElement)) {
-        this.pinnedCol = null;
-        this.syncSelectors();
-      }
-    }, 0);
-  };
-
-  private focusSelector(selector: string): void {
-    (this.panelEl?.querySelector(selector) as HTMLElement | null)?.focus();
+  private showSunPosition(): void {
+    const pos = this.panelEl?.querySelector<HTMLElement>('[data-value-for="sun:position"]');
+    if (pos && this.map) pos.textContent = sunText(this.map.getSunAzimuth(), this.map.getSunAltitude());
   }
 
+  /** Value updates from elsewhere wait while a pointer is down (a scrub may be dragged). */
+  private handlePointerDown = (): void => {
+    if (this.pointerHeld || typeof window === 'undefined') return;
+    this.pointerHeld = true;
+    const release = () => {
+      window.removeEventListener('pointerup', release, true);
+      window.removeEventListener('pointercancel', release, true);
+      this.pointerHeld = false;
+      if (this.pendingUpdates.size > 0 || this.sunPending) this.scheduleUpdate();
+    };
+    window.addEventListener('pointerup', release, true);
+    window.addEventListener('pointercancel', release, true);
+  };
+
+  /** Escape on a sub-page goes back (and stays in the panel). */
+  private handleKeyDown = (ev: Event): void => {
+    const e = ev as KeyboardEvent;
+    if (e.key !== 'Escape' || this.view.kind === 'main') return;
+    e.preventDefault();
+    e.stopPropagation();
+    this.go({ kind: 'main' });
+  };
+
   /**
-   * Sliders and the day input: `data-action` says what they set (an analysis
-   * parameter, a span end, the coat opacity, exaggeration or the sun),
-   * `data-layer-id` and `data-param` which one. The panel updates the value
-   * labels itself; its own changes don't re-render it.
+   * Scrub rows: `data-action` says what they set (an analysis parameter, a
+   * span end, the coat opacity, exaggeration or the sun), `data-layer-id`
+   * and `data-param` which one. Returns the value as shown.
    */
-  private handleInput = (e: Event): void => {
+  private handleScrub = (el: HTMLElement, val: number): string | void => {
     if (!this.map) return;
     const map = this.map;
-    const target = e.target as HTMLInputElement;
-    if (target.tagName !== 'INPUT') return;
-    e.stopPropagation();
-    const action = target.dataset.action ?? '';
-    const val = parseFloat(target.value);
-    const id = target.dataset.layerId ?? '';
-    const param = target.dataset.param ?? '';
-    const label = this.panelEl?.querySelector<HTMLElement>(`[data-value-for="${CSS.escape(valueKey(id, action, param))}"]`);
-    const step = parseFloat(target.step) || 1;
-    const unit = target.dataset.unit ?? '';
+    const action = el.dataset.action ?? '';
+    const id = el.dataset.layerId ?? '';
+    const param = el.dataset.param ?? '';
+    const step = Number(el.dataset.step) || 1;
+    const unit = el.dataset.unit ?? '';
+    let text: string | undefined;
 
     this.own(() => {
       switch (action) {
-        case 'sunday':
         case 'sunhour': {
-          const current = map.getSunTime() ?? new Date();
-          const next = new Date(current.getTime());
-          if (action === 'sunday') {
-            const [y, m, d] = target.value.split('-').map(Number);
-            if (!(y && m && d)) return;
-            next.setFullYear(y, m - 1, d);
-          } else {
-            // Within the day shown (the slider ends at 23:45)
-            const minutes = Math.max(0, Math.min(MINUTES_PER_DAY - 1, Math.round(val * 60)));
-            next.setHours(Math.floor(minutes / 60), minutes % 60, 0, 0);
-            if (label) label.textContent = formatHour(minutes / 60);
-          }
+          const next = new Date((map.getSunTime() ?? new Date()).getTime());
+          // Within the day shown (the scrub ends at 23:45)
+          const minutes = Math.max(0, Math.min(MINUTES_PER_DAY - 1, Math.round(val * 60)));
+          next.setHours(Math.floor(minutes / 60), minutes % 60, 0, 0);
           map.setSunTime(next);
-          const pos = this.panelEl?.querySelector<HTMLElement>('[data-value-for="sun:position"]');
-          if (pos) pos.textContent = sunText(map.getSunAzimuth(), map.getSunAltitude());
+          text = formatHour(minutes / 60);
+          this.showSunPosition();
           return;
         }
         case 'exaggeration':
-          if (label) label.textContent = `${val.toFixed(1)}x`;
           map.setExaggeration(val);
+          text = `${val.toFixed(1)}×`;
           return;
         case 'azimuth':
-          if (label) label.textContent = `${Math.round(val)}°`;
           map.setSunAzimuth(val);
+          text = `${Math.round(val)}°`;
           return;
         case 'altitude':
-          if (label) label.textContent = `${Math.round(val)}°`;
           map.setSunAltitude(val);
+          text = `${Math.round(val)}°`;
           return;
         case 'opacity':
-          if (label) label.textContent = `${Math.round(val * 100)}%`;
           map.setLayerOpacity(id, val);
+          text = `${Math.round(val * 100)}%`;
           return;
         case 'span': {
-          // One end of a [low, high] pair: read both sliders
-          const other = this.panelEl?.querySelector<HTMLInputElement>(
-            `input[data-action="span"][data-layer-id="${CSS.escape(id)}"][data-param="${CSS.escape(param)}"][data-span="${target.dataset.span === '0' ? '1' : '0'}"]`,
+          // One end of a [low, high] pair: read the other scrub
+          const end = el.dataset.span;
+          const other = this.panelEl?.querySelector<HTMLElement>(
+            `.scrub[data-action="span"][data-layer-id="${CSS.escape(id)}"][data-param="${CSS.escape(param)}"][data-span="${end === '0' ? '1' : '0'}"]`,
           );
-          const a = target.dataset.span === '0' ? val : parseFloat(other?.value ?? '0');
-          const b = target.dataset.span === '1' ? val : parseFloat(other?.value ?? '0');
-          if (target.dataset.wrap !== undefined) {
+          const otherValue = Number(other?.dataset.value ?? 0);
+          const a = end === '0' ? val : otherValue;
+          const b = end === '1' ? val : otherValue;
+          if (el.dataset.wrap !== undefined) {
             // A circular range runs clockwise from a to b (a > b passes through north)
-            if (label) label.textContent = `${formatNumber(a, step)}${unit} → ${formatNumber(b, step)}${unit}`;
             map.setAnalysisParams(id, { [param]: [a, b] });
           } else {
-            const lo = Math.min(a, b);
-            const hi = Math.max(a, b, lo + step);
-            if (label) label.textContent = `${formatNumber(lo, step)}–${formatNumber(hi, step)}${unit}`;
+            // The ends keep their order: the other end moves along, a step apart, when crossed
+            const min = Number(el.dataset.min);
+            const max = Number(el.dataset.max);
+            let lo = a;
+            let hi = b;
+            if (end === '0' && hi < lo + step) {
+              hi = Math.min(max, lo + step);
+              lo = Math.min(lo, hi - step);
+            } else if (end === '1' && lo > hi - step) {
+              lo = Math.max(min, hi - step);
+              hi = Math.max(hi, lo + step);
+            }
             map.setAnalysisParams(id, { [param]: [lo, hi] });
+            const show = (s: HTMLElement, v: number) => setScrub(s, v, withUnit(v, step, unit));
+            if (other) show(other, end === '0' ? hi : lo);
+            show(el, end === '0' ? lo : hi); // the dragged end, kept a step from the range's end
+            return;
           }
+          text = withUnit(val, step, unit);
           return;
         }
         case 'param':
-          if (label) label.textContent = `${formatNumber(val, step)}${unit}`;
           map.setAnalysisParams(id, { [param]: val });
+          text = withUnit(val, step, unit);
           return;
       }
     });
+    return text;
   };
 
   // =========================================================================
-  // Render (HTML generation - no event binding needed)
+  // Render
   // =========================================================================
 
-  private render(): void {
-    if (!this.map) return;
+  private render(focusKey?: string): void {
+    if (!this.map || !this.panelEl) return;
+    const view = this.resolveView();
+    let html: string;
+    switch (view.kind) {
+      case 'coat': html = this.renderCoatPage(view.id); break;
+      case 'add': html = this.renderAddPage(); break;
+      case 'source': html = this.renderSourcePage(); break;
+      case 'light': html = this.renderLightPage(); break;
+      default: html = this.renderMain();
+    }
+    // Keep keyboard focus on the same control across the rebuild
+    const focused = activeIn(this.shadow);
+    const key = focusKey ?? focused?.dataset.focusKey;
+    this.panelEl.innerHTML = html;
+    const slot = this.panelEl.querySelector('.jobs-slot');
+    if (slot && this.jobsEl) slot.replaceWith(this.jobsEl);
+    if (key && (focusKey !== undefined || focused)) {
+      this.panelEl.querySelector<HTMLElement>(`[data-focus-key="${CSS.escape(key)}"]`)?.focus();
+    }
+  }
 
-    const baseLayers = this.map.getBaseLayers();
-    const drapeLayers = this.map.getDrapeLayers();
-    const stack = this.map.getLayerStack();
-    const activeDrapeId = this.map.getActiveDrapeId();
-    const activeBase = baseLayers.find((l) => l.visible);
+  /** The view, or the layers when its coat is gone. */
+  private resolveView(): View {
+    const v = this.view;
+    if (v.kind === 'coat' && !this.map!.getLayerStack().some((l) => l.id === v.id)) this.view = { kind: 'main' };
+    return this.view;
+  }
 
-    // Build each column: active section (button → settings) + selector (header hover → dropdown)
-    const terrainCol = `
-      <div class="layer-col" data-col="terrain">
-        <div class="layer-col-active">
-          ${this.renderActiveBaseLayer(activeBase)}
-        </div>
-        ${this.renderSelector('terrain', 'Terrain', baseLayers
-          .filter((l) => !l.visible)
-          .map((l) => this.renderBaseLayerButton(l))
-          .join(''))}
-      </div>`;
+  /** Running jobs, failures and a pending pick (rebuilt only when one starts or ends). */
+  private renderJobs(): void {
+    if (!this.map || !this.jobsEl) return;
+    const rows: string[] = [];
+    const cancel = (id: string, label: string, verb = 'Cancel') =>
+      `<button type="button" class="ib" data-job-cancel="${escapeHtml(id)}" aria-label="${verb} ${escapeHtml(label)}" title="${verb}">${CLOSE_SVG}</button>`;
+    if (this.pickPrompt) {
+      rows.push(`<div class="row wrap tight" data-job="pick" role="listitem"><span class="t dim" style="flex: 1; padding: 0 6px">${escapeHtml(this.pickPrompt)} · Esc</span>${cancel('pick', 'the pick')}</div>`);
+    }
+    for (const j of this.map.getAnalysisJobs?.() ?? []) {
+      rows.push(`<div class="duo" data-job="${escapeHtml(j.id)}" role="listitem">${progressHtml(j.label, stageText(j.stage, j.progress), j.progress)}${cancel(j.id, j.label)}</div>`);
+    }
+    for (const [id, e] of this.errors) {
+      rows.push(`<div class="row wrap tight" data-job="${escapeHtml(id)}" role="listitem"><span class="t" style="flex: 1; padding: 0 6px">${escapeHtml(e.label)} <span class="err">${escapeHtml(e.message)}</span></span>${cancel(id, e.label, 'Dismiss')}</div>`);
+    }
+    this.jobsEl.innerHTML = rows.join('');
+  }
 
-    const overlayCol = `
-      <div class="layer-col" data-col="overlay">
-        <div class="layer-col-active">
-          ${this.renderActiveStack(stack)}
-        </div>
-        ${this.renderSelector('overlay', 'Overlay', this.renderOverlayDropdown(activeDrapeId, drapeLayers))}
-      </div>`;
+  // =========================================================================
+  // The layers
+  // =========================================================================
 
-    // Order: from box outwards - Terrain nearest to icon
-    const columns = this.hPos === 'right'
-      ? overlayCol + terrainCol
-      : terrainCol + overlayCol;
+  private renderMain(): string {
+    const map = this.map!;
+    const stack = map.getLayerStack();
+    const bases = map.getBaseLayers();
+    const active = bases.find((l) => l.visible);
+    const rows: string[] = [grp('Overlay'), '<div class="jobs-slot"></div>'];
+    for (let index = stack.length - 1; index >= 0; index--) rows.push(this.renderStackRow(stack[index]));
+    rows.push(`<button type="button" class="row tight" data-view="add" data-focus-key="add">
+      <span class="ib">${PLUS_SVG}</span><span class="nm dim"><span class="t">Add layer</span><span class="chev">${CHEV_RIGHT_SVG}</span></span></button>`);
 
-    // Only replace panel content - style tag and panel container persist.
-    // Keep focus on the same control across the rebuild (keyboard users).
-    if (this.panelEl) {
-      const focused = this.shadow.activeElement as HTMLElement | null;
-      const focusKey = focused?.id || focused?.dataset.focusKey;
-      this.panelEl.innerHTML = columns;
-      this.settingsEntering = false;
-      this.syncSelectors();
-      if (focusKey) {
-        const el = this.panelEl.querySelector(focused!.id ? `#${CSS.escape(focusKey)}` : `[data-focus-key="${CSS.escape(focusKey)}"]`);
-        (el as HTMLElement | null)?.focus();
+    rows.push(grp('Terrain'));
+    rows.push(this.renderSourceRow(active, bases.length));
+    const exag = map.getExaggeration();
+    const [emin, emax] = widen(0.5, 5, [exag], 0.1);
+    rows.push(scrubHtml({
+      label: 'Exaggeration', value: exag, min: emin, max: emax, step: 0.1, text: `${exag.toFixed(1)}×`,
+      data: { action: 'exaggeration', 'layer-id': active?.id ?? '' }, focusKey: 'exaggeration',
+    }));
+    rows.push(`<button type="button" class="row fill" data-view="light" data-focus-key="light" aria-label="Light: ${escapeHtml(this.lightSummary())}">
+      <span class="k">Light</span><span class="v">${escapeHtml(this.lightSummary())}</span><span class="chev">${CHEV_RIGHT_SVG}</span></button>`);
+    rows.push(this.renderMeshRow());
+    return rows.join('');
+  }
+
+  /** A coat: eye, then its name opening its page. */
+  private renderStackRow(layer: StackLayer): string {
+    const id = escapeHtml(layer.id);
+    const name = escapeHtml(layer.layerName);
+    const v = layer.visible;
+    return `<div class="row tight" data-layer-id="${id}" data-visible="${v}">
+      <button type="button" class="ib${v ? ' on' : ' off'}" data-action="visible" data-layer-id="${id}" data-focus-key="eye-${id}"
+        aria-pressed="${v}" aria-label="${v ? 'Hide' : 'Show'} ${name}" title="${v ? 'Hide' : 'Show'}">${v ? EYE_SVG : EYE_OFF_SVG}</button>
+      <button type="button" class="nm${v ? '' : ' off'}" data-view="coat" data-layer-id="${id}" data-focus-key="coat-${id}"
+        aria-label="${name} settings"><span class="t">${name}</span><span class="chev">${CHEV_RIGHT_SVG}</span></button>
+    </div>`;
+  }
+
+  private renderSourceRow(active: BaseLayer | undefined, count: number): string {
+    const name = escapeHtml(active?.layerName ?? 'None');
+    if (count < 2) return `<div class="row fill"><span class="k">Source</span><span class="v">${name}</span></div>`;
+    return `<button type="button" class="row fill" data-view="source" data-focus-key="source" aria-label="Source: ${name}">
+      <span class="k">Source</span><span class="v">${name}</span><span class="chev">${CHEV_RIGHT_SVG}</span></button>`;
+  }
+
+  private renderMeshRow(): string {
+    const wire = this.map!.getWireframe();
+    const white = this.map!.getWireframeWhite();
+    const mode = !wire ? 'solid' : white ? 'white' : 'wire';
+    const options: Array<[string, string]> = [['solid', 'Solid'], ['wire', 'Wire'], ['white', 'White']];
+    return choices('Mesh', options.map(([v, label]) => ({
+      action: 'wireframe', layerId: 'mesh', value: v, label, active: mode === v, focusKey: `mesh-${v}`,
+    })));
+  }
+
+  private lightSummary(): string {
+    const map = this.map!;
+    const time = map.getSunTime?.() ?? null;
+    if (!time) return `Manual · ${Math.round(map.getSunAzimuth())}° · ${Math.round(map.getSunAltitude())}°`;
+    return `${time.getDate()} ${MONTHS[time.getMonth()]} · ${formatHour(time.getHours() + time.getMinutes() / 60)}`;
+  }
+
+  private backRow(title: string): string {
+    return `<button type="button" class="row back" data-view="main" data-focus-key="back" aria-label="Back to the layers">
+      <span class="chev">${CHEV_LEFT_SVG}</span><span class="t">${escapeHtml(title)}</span></button>`;
+  }
+
+  // =========================================================================
+  // Sub-pages
+  // =========================================================================
+
+  /** Analysis kinds (add a coat) and the imagery not shown (swap it in). */
+  private renderAddPage(): string {
+    const map = this.map!;
+    const parts: string[] = [this.backRow('Add layer'), grp('Analysis')];
+    // Raster kinds appear only when the map can compute them over the view
+    const computable = new Set<string>(map.getRegionAnalyses?.() ?? []);
+    for (const d of listAnalyses()) {
+      if (d.raster && !computable.has(d.id)) continue;
+      parts.push(`<button type="button" class="row" data-action="add" data-kind="${escapeHtml(d.id)}" data-focus-key="add-${escapeHtml(d.id)}">
+        <span class="t">${escapeHtml(d.label)}</span>${d.raster ? '<span class="v dim">over the view</span>' : ''}</button>`);
+    }
+    const active = map.getActiveDrapeId();
+    const drapes = map.getDrapeLayers().filter((l) => l.id !== active);
+    if (drapes.length) {
+      parts.push(grp('Imagery'));
+      for (const d of drapes) {
+        parts.push(`<button type="button" class="row" data-action="drape" data-layer-id="${escapeHtml(d.id)}" data-focus-key="drape-${escapeHtml(d.id)}">
+          <span class="t">${escapeHtml(d.layerName)}</span></button>`);
       }
-    }
-  }
-
-  /** Class list for a settings panel: hidden, or fading in right after opening. */
-  private settingsClass(isOpen: boolean, extra = ''): string {
-    if (!isOpen) return `active-settings hidden${extra}`;
-    return (this.settingsEntering ? 'active-settings entering' : 'active-settings') + extra;
-  }
-
-  /** Column title; with alternatives it is a chevron button for their dropdown. */
-  private renderSelector(col: string, title: string, choices: string): string {
-    if (!choices) {
-      return `
-        <div class="layer-col-selector">
-          <div class="layer-col-header"><span class="layer-col-title">${title}</span></div>
-        </div>`;
-    }
-    return `
-      <div class="layer-col-selector has-choices" data-col="${col}">
-        <button type="button" class="layer-col-header" aria-expanded="false" aria-label="Choose ${title.toLowerCase()}" data-focus-key="header-${col}">
-          <span class="layer-col-title">${title}</span>
-          <span class="header-chevron">${CHEVRON_SVG}</span>
-        </button>
-        <div class="layer-col-body">${choices}</div>
-      </div>`;
-  }
-
-  // =========================================================================
-  // Active section renderers (name + gear icon + expandable settings)
-  // =========================================================================
-
-  /** Render the active base layer row with gear → exaggeration, light, mesh. */
-  private renderActiveBaseLayer(layer: BaseLayer | undefined): string {
-    if (!layer) {
-      return `<div class="active-btn-wrap"><div class="active-row is-empty"><span class="active-name">None</span></div></div>`;
-    }
-
-    const isOpen = this.settingsOpen === layer.id;
-    const exag = this.map!.getExaggeration();
-
-    return `
-      <div class="active-btn-wrap">
-        <button type="button" class="active-row" data-layer-id="${escapeHtml(layer.id)}" data-layer-type="base"
-          data-focus-key="active-terrain" aria-expanded="${isOpen}" title="${escapeHtml(layer.layerName)} settings">
-          <span class="active-name">${escapeHtml(layer.layerName)}</span>
-          <span class="gear-icon" aria-hidden="true">${GEAR_SVG}</span>
-        </button>
-        <div class="${this.settingsClass(isOpen)}" data-layer-id="${escapeHtml(layer.id)}">
-          ${this.renderSlider(layer.id, 'exaggeration', 'exaggeration', 'Exaggeration', exag, 0.5, 5, 0.1, `${exag.toFixed(1)}x`)}
-          <div class="light-settings">${this.renderLightSettings()}</div>
-          ${this.renderMeshSettings()}
-        </div>
-      </div>
-    `;
-  }
-
-  /** The Overlay column's active row: the visible coats, and the stack manager behind the gear. */
-  private renderActiveStack(stack: StackLayer[]): string {
-    const isOpen = this.settingsOpen === STACK_ID;
-    const names = stack.filter((l) => l.visible).map((l) => escapeHtml(l.layerName));
-    const label = names.length ? names.join(' · ') : 'None';
-
-    return `
-      <div class="active-btn-wrap">
-        <button type="button" class="active-row" data-layer-id="${STACK_ID}" data-layer-type="stack"
-          data-focus-key="active-overlay" aria-expanded="${isOpen}" title="Overlay stack">
-          <span class="active-name">${label}</span>
-          <span class="gear-icon" aria-hidden="true">${GEAR_SVG}</span>
-        </button>
-        <div class="${this.settingsClass(isOpen, ' stack-settings')}" data-layer-id="${STACK_ID}">
-          ${stack.length ? this.renderStackRows(stack) : '<div class="stack-empty">No overlays. Add one from the list.</div>'}
-        </div>
-      </div>
-    `;
-  }
-
-  /** One row per coat, top of the stack first. */
-  private renderStackRows(stack: StackLayer[]): string {
-    const parts: string[] = [];
-    for (let index = stack.length - 1; index >= 0; index--) {
-      const layer = stack[index];
-      const id = escapeHtml(layer.id);
-      const open = this.coatOpen === layer.id;
-      const type = isAnalysis(layer) ? 'analysis' : 'drape';
-      parts.push(`
-        <div class="stack-row${open ? ' open' : ''}${layer.visible ? '' : ' is-hidden'}" data-layer-id="${id}" data-layer-type="${type}"
-          data-index="${index}" data-visible="${layer.visible}">
-          <button type="button" class="stack-btn stack-eye" data-action="visible" data-focus-key="eye-${id}"
-            aria-pressed="${layer.visible}" title="${layer.visible ? 'Hide' : 'Show'}">${layer.visible ? EYE_SVG : EYE_OFF_SVG}</button>
-          <button type="button" class="stack-name" data-action="open" data-focus-key="coat-${id}" aria-expanded="${open}"
-            title="${escapeHtml(layer.layerName)} settings">${escapeHtml(layer.layerName)}</button>
-          <button type="button" class="stack-btn" data-action="up" data-focus-key="up-${id}" title="Move up"
-            ${index === stack.length - 1 ? 'disabled' : ''}>${UP_SVG}</button>
-          <button type="button" class="stack-btn" data-action="down" data-focus-key="down-${id}" title="Move down"
-            ${index === 0 ? 'disabled' : ''}>${DOWN_SVG}</button>
-          <button type="button" class="stack-btn stack-remove" data-action="remove" data-focus-key="remove-${id}"
-            title="${type === 'drape' ? 'Remove imagery' : 'Remove'}">${CLOSE_SVG}</button>
-        </div>
-        ${open ? `<div class="coat-settings" data-layer-id="${id}">${this.renderCoatSettings(layer)}</div>` : ''}
-      `);
     }
     return parts.join('');
   }
 
-  /** Opacity, blend mode, then the analysis' parameters and ramp. */
-  private renderCoatSettings(layer: StackLayer): string {
-    const id = layer.id;
+  /** The base layers; the active one selected. */
+  private renderSourcePage(): string {
+    const parts: string[] = [this.backRow('Source')];
+    for (const l of this.map!.getBaseLayers()) {
+      parts.push(`<button type="button" class="row${l.visible ? ' sel' : ''}" data-action="base" data-layer-id="${escapeHtml(l.id)}"
+        data-focus-key="base-${escapeHtml(l.id)}" aria-pressed="${l.visible}"><span class="t">${escapeHtml(l.layerName)}</span></button>`);
+    }
+    return parts.join('');
+  }
+
+  private renderLightPage(): string {
+    const map = this.map!;
+    const azimuth = map.getSunAzimuth();
+    const altitude = map.getSunAltitude();
+    const time = map.getSunTime?.() ?? null;
+    const mode = time ? 'date' : 'manual';
+    const parts: string[] = [this.backRow('Light')];
+    parts.push(choices('Sun', ([['manual', 'Manual'], ['date', 'Date']] as const).map(([v, label]) => ({
+      action: 'suntime', layerId: 'sun', value: v, label, active: mode === v, focusKey: `sun-${v}`,
+    }))));
+    if (!time) {
+      parts.push(scrubHtml({
+        label: 'Direction', value: azimuth, min: 0, max: 360, step: 1, text: `${Math.round(azimuth)}°`,
+        data: { action: 'azimuth', 'layer-id': 'sun', param: 'azimuth' }, focusKey: valueKey('sun', 'azimuth', 'azimuth'),
+      }));
+      parts.push(scrubHtml({
+        label: 'Altitude', value: altitude, min: 5, max: 90, step: 1, text: `${Math.round(altitude)}°`,
+        data: { action: 'altitude', 'layer-id': 'sun', param: 'altitude' }, focusKey: valueKey('sun', 'altitude', 'altitude'),
+      }));
+      return parts.join('');
+    }
+    // Date mode: the sun stands where it does at that local time over the map center
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const day = `${time.getFullYear()}-${pad(time.getMonth() + 1)}-${pad(time.getDate())}`;
+    const hour = time.getHours() + time.getMinutes() / 60;
+    parts.push(`<div class="row fill"><span class="k">Day</span>
+      <input type="date" class="date" data-action="sunday" data-layer-id="sun" data-focus-key="sun:day" value="${day}" aria-label="Day"></div>`);
+    parts.push(scrubHtml({
+      label: 'Time', value: hour, min: 0, max: 24 - 0.25, step: 0.25, text: formatHour(hour),
+      data: { action: 'sunhour', 'layer-id': 'sun', param: 'sunhour' }, focusKey: valueKey('sun', 'sunhour', 'sunhour'),
+    }));
+    parts.push(`<div class="row"><span class="k">Sun</span><span class="v" data-value-for="sun:position">${sunText(azimuth, altitude)}</span></div>`);
+    return parts.join('');
+  }
+
+  /** A coat's page: opacity, blend, the analysis' parameters and ramp, then its place in the stack. */
+  private renderCoatPage(id: string): string {
+    const stack = this.map!.getLayerStack();
+    const index = stack.findIndex((l) => l.id === id);
+    const layer = stack[index];
+    const eid = escapeHtml(id);
     const opacity = layer.display.opacity;
     const blend = layer.display.blendMode;
+    const type = isAnalysis(layer) ? 'analysis' : 'drape';
     const parts: string[] = [
-      this.renderSlider(id, 'opacity', 'opacity', 'Opacity', opacity, 0, 1, 0.05, `${Math.round(opacity * 100)}%`),
-      `<div class="setting-label">Blend</div>
-      <div class="toggle-row wrap">${toggleButtons(BLEND_MODES.map((m) => ({
+      this.backRow(layer.layerName),
+      scrubHtml({
+        label: 'Opacity', value: opacity, min: 0, max: 1, step: 0.05, text: `${Math.round(opacity * 100)}%`,
+        data: { action: 'opacity', 'layer-id': id, param: 'opacity' }, focusKey: valueKey(id, 'opacity', 'opacity'),
+      }),
+      choices('Blend', BLEND_MODES.map((m) => ({
         action: 'blend', layerId: id, value: m.id, label: m.label, active: blend === m.id, focusKey: `blend-${id}-${m.id}`,
-      })))}</div>`,
+      }))),
     ];
     if (isAnalysis(layer)) {
       for (const spec of layer.descriptor.params) parts.push(this.renderParam(layer, spec));
       if (layer.isValueKind) parts.push(this.renderRampList(layer));
     }
+    parts.push(grp('Layer'));
+    const top = index === stack.length - 1;
+    const bottom = index === 0;
+    parts.push(`<div class="acts even" data-layer-id="${eid}">
+      <button type="button" class="btn" data-action="up" data-layer-id="${eid}" data-index="${index}" data-focus-key="up-${eid}"${top ? ' disabled' : ''}>Move up</button>
+      <button type="button" class="btn" data-action="down" data-layer-id="${eid}" data-index="${index}" data-focus-key="down-${eid}"${bottom ? ' disabled' : ''}>Move down</button>
+      <button type="button" class="btn" data-action="remove" data-layer-id="${eid}" data-layer-type="${type}" data-focus-key="remove-${eid}">Remove</button>
+    </div>`);
     return parts.join('');
-  }
-
-  /**
-   * A labelled slider. `action` (what it sets), `param` and the layer id ride
-   * on the input for the delegated handler; the focus key keeps keyboard
-   * focus on it across re-renders.
-   */
-  private renderSlider(
-    id: string, action: string, param: string, label: string, value: number, min: number, max: number, step: number, text: string, unit = '',
-  ): string {
-    const key = escapeHtml(valueKey(id, action, param));
-    return `
-      <div class="control-row">
-        <span class="control-label">${escapeHtml(label)}</span>
-        <span class="control-value" data-value-for="${key}">${escapeHtml(text)}</span>
-      </div>
-      <input type="range" data-action="${action}" data-layer-id="${escapeHtml(id)}" data-param="${escapeHtml(param)}" data-unit="${escapeHtml(unit)}"
-        data-focus-key="${key}" min="${min}" max="${max}" step="${step}" value="${value}" aria-label="${escapeHtml(label)}">`;
   }
 
   /** One parameter control from the analysis' schema. */
   private renderParam(layer: AnalysisLayer, spec: ParamSpec): string {
     const id = layer.id;
-    const eid = escapeHtml(id);
     const value = layer.params[spec.key];
     const unit = 'unit' in spec ? spec.unit ?? '' : '';
     switch (spec.type) {
@@ -859,14 +892,17 @@ export class TreeletPanel extends BaseElement {
         const v = typeof value === 'number' ? value : spec.min;
         let [min, max] = [spec.min, spec.max];
         if (spec.bounds === 'elevation') {
-          // The slider spans what is on screen
+          // The scrub spans what is on screen
           const [lo, hi] = this.map!.getVisibleElevationRange();
           min = Math.max(spec.min, Math.floor(lo / spec.step) * spec.step);
           max = Math.min(spec.max, Math.ceil(Math.max(hi, min + spec.step) / spec.step) * spec.step);
         }
-        // A value set from code may lie outside the slider's range: widen it to show the value
+        // A value set from code may lie outside the scrub's range: widen it to show the value
         [min, max] = widen(min, max, [v], spec.step);
-        return this.renderSlider(id, 'param', spec.key, spec.label, v, min, max, spec.step, `${formatNumber(v, spec.step)}${unit}`, unit);
+        return scrubHtml({
+          label: spec.label, value: v, min, max, step: spec.step, text: withUnit(v, spec.step, unit),
+          data: { action: 'param', 'layer-id': id, param: spec.key, unit }, focusKey: valueKey(id, 'param', spec.key),
+        });
       }
       case 'span': {
         const auto = value === 'auto';
@@ -875,7 +911,7 @@ export class TreeletPanel extends BaseElement {
         if (spec.optional) {
           // Default sector when switched on: through north for bearings, else the full range
           const on: [number, number] = spec.wrap ? [315, 45] : [spec.min, spec.max];
-          parts.push(toggleRow(spec.label, [
+          parts.push(choices(spec.label, [
             { action: 'optional', layerId: id, param: spec.key, value: 'false', label: 'All', active: off, focusKey: `off-${id}-${spec.key}` },
             { action: 'optional', layerId: id, param: spec.key, value: 'true', label: spec.wrap ? 'Sector' : 'Range', active: !off,
               focusKey: `on-${id}-${spec.key}`, data: { min: on[0], max: on[1] } },
@@ -883,69 +919,61 @@ export class TreeletPanel extends BaseElement {
           if (off) return parts.join('');
         }
         if (spec.auto) {
-          parts.push(toggleRow(spec.label, [
+          parts.push(choices(spec.optional ? 'Mode' : spec.label, [
             { action: 'auto', layerId: id, param: spec.key, value: 'true', label: 'Auto', active: auto, focusKey: `auto-${id}-${spec.key}` },
             { action: 'auto', layerId: id, param: spec.key, value: 'false', label: 'Manual', active: !auto,
               focusKey: `manual-${id}-${spec.key}`, data: { min: spec.min, max: spec.max } },
           ]));
         }
+        if (!spec.auto && !spec.optional) parts.push(grp(spec.label));
         if (auto) {
           const d = this.map!.getLegend(id)?.domain;
-          if (d) parts.push(`<div class="control-row"><span class="control-label">Visible</span><span class="control-value">${formatNumber(d[0], spec.step)}–${formatNumber(d[1], spec.step)}${unit}</span></div>`);
-        } else {
-          const [lo, hi] = Array.isArray(value) ? value as [number, number] : [spec.min, spec.max];
-          const key = escapeHtml(valueKey(id, 'span', spec.key));
-          const wrap = spec.wrap ? ' data-wrap=""' : '';
-          let [smin, smax, step] = [spec.min, spec.max, spec.step];
-          if (spec.bounds === 'data') {
-            // Sliders span the raster's values (and the current range)
-            const r = this.map!.getRasterInfo?.(id)?.range ?? [lo, hi];
-            const a = Math.min(r[0], lo);
-            const b = Math.max(r[1], hi, a + 1e-6);
-            step = niceStep((b - a) / 200);
-            smin = Number((Math.floor(a / step + 1e-9) * step).toPrecision(12));
-            smax = Number((Math.ceil(b / step - 1e-9) * step).toPrecision(12));
-          } else if (!spec.wrap) {
-            [smin, smax] = widen(smin, smax, [lo, hi], step);
-          }
-          const text = spec.wrap
-            ? `${formatNumber(lo, step)}${unit} → ${formatNumber(hi, step)}${unit}`
-            : `${formatNumber(lo, step)}–${formatNumber(hi, step)}${unit}`;
-
-          parts.push(`
-            <div class="control-row">
-              <span class="control-label">${spec.auto || spec.optional ? (spec.wrap ? 'From → to' : 'Range') : escapeHtml(spec.label)}</span>
-              <span class="control-value" data-value-for="${key}">${text}</span>
-            </div>
-            <input type="range" data-action="span" data-layer-id="${eid}" data-param="${spec.key}" data-span="0" data-unit="${escapeHtml(unit)}"${wrap}
-              data-focus-key="${key}:0" min="${smin}" max="${smax}" step="${step}" value="${lo}" aria-label="${escapeHtml(spec.label)} ${spec.wrap ? 'from' : 'low'}">
-            <input type="range" data-action="span" data-layer-id="${eid}" data-param="${spec.key}" data-span="1" data-unit="${escapeHtml(unit)}"${wrap}
-              data-focus-key="${key}:1" min="${smin}" max="${smax}" step="${step}" value="${hi}" aria-label="${escapeHtml(spec.label)} ${spec.wrap ? 'to' : 'high'}">`);
+          if (d) parts.push(`<div class="row"><span class="k">Visible</span><span class="v">${formatNumber(d[0], spec.step)}–${escapeHtml(withUnit(d[1], spec.step, unit))}</span></div>`);
+          return parts.join('');
         }
+        const [lo, hi] = Array.isArray(value) ? value as [number, number] : [spec.min, spec.max];
+        let [smin, smax, step] = [spec.min, spec.max, spec.step];
+        if (spec.bounds === 'data') {
+          // Scrubs span the raster's values (and the current range)
+          const r = this.map!.getRasterInfo?.(id)?.range ?? [lo, hi];
+          const a = Math.min(r[0], lo);
+          const b = Math.max(r[1], hi, a + 1e-6);
+          step = niceStep((b - a) / 200);
+          smin = Number((Math.floor(a / step + 1e-9) * step).toPrecision(12));
+          smax = Number((Math.ceil(b / step - 1e-9) * step).toPrecision(12));
+        } else if (!spec.wrap) {
+          [smin, smax] = widen(smin, smax, [lo, hi], step);
+        }
+        const names = spec.wrap ? ['From', 'To'] : ['Low', 'High'];
+        const end = (i: 0 | 1, v: number) => scrubHtml({
+          label: names[i], ariaLabel: `${spec.label} ${names[i].toLowerCase()}`, value: v, min: smin, max: smax, step,
+          text: withUnit(v, step, unit),
+          data: { action: 'span', 'layer-id': id, param: spec.key, span: i, unit, wrap: spec.wrap ? '' : undefined },
+          focusKey: `${valueKey(id, 'span', spec.key)}:${i}`,
+        });
+        parts.push(`<div class="duo">${end(0, lo)}${end(1, hi)}</div>`);
         return parts.join('');
       }
       case 'select':
-        return toggleRow(spec.label, spec.options.map((o) => ({
+        return choices(spec.label, spec.options.map((o) => ({
           action: 'select', layerId: id, param: spec.key, value: o.value, label: o.label,
           active: String(value) === o.value, focusKey: `sel-${id}-${spec.key}-${o.value}`,
         })));
       case 'color': {
         const current = Array.isArray(value) ? value as RGB : [0, 0, 0] as RGB;
-        const presets = spec.presets ?? [];
-        return `
-          <div class="setting-label">${escapeHtml(spec.label)}</div>
-          <div class="swatch-row">
-            ${presets.map((p) => {
-              const active = sameColor(p.color, current);
-              return `<button type="button" class="color-swatch${active ? ' active' : ''}" data-action="color" data-layer-id="${eid}"
-                data-param="${spec.key}" style="background:${hex(p.color)}" data-r="${p.color[0]}" data-g="${p.color[1]}" data-b="${p.color[2]}"
-                data-focus-key="swatch-${eid}-${spec.key}-${escapeHtml(p.label)}" title="${escapeHtml(p.label)}" aria-label="${escapeHtml(p.label)}" aria-pressed="${active}"></button>`;
-            }).join('')}
-          </div>`;
+        const eid = escapeHtml(id);
+        return `<div class="row"><span class="k">${escapeHtml(spec.label)}</span><div class="sws" role="group" aria-label="${escapeHtml(spec.label)}">
+          ${(spec.presets ?? []).map((p) => {
+            const active = sameColor(p.color, current);
+            return `<button type="button" class="sw" data-action="color" data-layer-id="${eid}"
+              data-param="${spec.key}" style="background:${hex(p.color)}" data-r="${p.color[0]}" data-g="${p.color[1]}" data-b="${p.color[2]}"
+              data-focus-key="swatch-${eid}-${spec.key}-${escapeHtml(p.label)}" title="${escapeHtml(p.label)}" aria-label="${escapeHtml(p.label)}" aria-pressed="${active}"></button>`;
+          }).join('')}
+        </div></div>`;
       }
       case 'boolean': {
         const on = value === true;
-        return toggleRow(spec.label, [
+        return choices(spec.label, [
           { action: 'toggle', layerId: id, param: spec.key, value: 'true', label: 'On', active: on, focusKey: `on-${id}-${spec.key}` },
           { action: 'toggle', layerId: id, param: spec.key, value: 'false', label: 'Off', active: !on, focusKey: `off-${id}-${spec.key}` },
         ]);
@@ -953,122 +981,21 @@ export class TreeletPanel extends BaseElement {
     }
   }
 
-  // =========================================================================
-  // Dropdown renderers (simple buttons, no gear icons)
-  // =========================================================================
-
-  /** Render a base layer as a simple selectable button (for dropdown). */
-  private renderBaseLayerButton(layer: BaseLayer): string {
-    return `
-      <div class="layer-entry" data-layer-id="${escapeHtml(layer.id)}" data-layer-type="base">
-        <button type="button" class="layer-btn" data-action="activate">${escapeHtml(layer.layerName)}</button>
-      </div>
-    `;
-  }
-
-  /** Build the overlay dropdown: Analysis group (adds a coat) then Layers group (drapes not active). */
-  private renderOverlayDropdown(activeDrapeId: string | null, drapeLayers: DrapeLayer[]): string {
-    const parts: string[] = [];
-
-    parts.push('<div class="dropdown-group-label">Analysis</div>');
-    // Raster kinds appear only when the map can compute them over the view
-    const computable = new Set<string>(this.map!.getRegionAnalyses?.() ?? []);
-    for (const d of listAnalyses()) {
-      if (d.raster && !computable.has(d.id)) continue;
-      parts.push(`
-        <div class="layer-entry" data-layer-id="${escapeHtml(d.id)}" data-layer-type="analysis" data-kind="${escapeHtml(d.id)}">
-          <button type="button" class="layer-btn" data-action="activate">${escapeHtml(d.label)}</button>
-        </div>
-      `);
-    }
-
-    const inactiveDrapes = drapeLayers.filter((l: DrapeLayer) => l.id !== activeDrapeId);
-    if (inactiveDrapes.length > 0) {
-      parts.push('<div class="overlay-separator"></div>');
-      parts.push('<div class="dropdown-group-label">Layers</div>');
-      for (const drape of inactiveDrapes) {
-        parts.push(`
-          <div class="layer-entry" data-layer-id="${escapeHtml(drape.id)}" data-layer-type="drape">
-            <button type="button" class="layer-btn" data-action="activate">${escapeHtml(drape.layerName)}</button>
-          </div>
-        `);
-      }
-    }
-
-    return parts.join('');
-  }
-
-  // =========================================================================
-  // Settings pieces
-  // =========================================================================
-
   private renderRampList(layer: AnalysisLayer): string {
     const eid = escapeHtml(layer.id);
     const current = layer.ramp ?? layer.descriptor.ramp;
     const custom = current !== undefined && !isRampName(current);
     // Class presets place their breaks on the layer's value range
     const domain = this.map!.getLegend(layer.id)?.domain ?? [0, 1];
-    return `
-      <div class="setting-label">Color Ramp</div>
-      <div class="ramp-list">
-        ${rampNamesFor(layer.descriptor.id).map((name) => {
-          const active = current === name;
-          const spec = BUILTIN_RAMPS[name];
-          return `<button type="button" class="ramp-btn${active ? ' active' : ''}" data-action="ramp" data-layer-id="${eid}" data-value="${name}"
-            data-focus-key="ramp-${eid}-${name}" aria-pressed="${active}">
-            <span>${capitalize(name)}</span>
-            <span class="ramp-indicator" style="background:${rampGradientCss(spec, spec.type === 'classes' ? domain : [0, 1])}"></span>
-          </button>`;
-        }).join('')}
-        ${custom ? `<div class="ramp-btn active" aria-current="true"><span>Custom</span>
-          <span class="ramp-indicator" style="background:${rampGradientCss(current, domain)}"></span></div>` : ''}
-      </div>
-    `;
-  }
-
-  private renderLightSettings(): string {
-    const map = this.map!;
-    const azimuth = map.getSunAzimuth();
-    const altitude = map.getSunAltitude();
-    const time = map.getSunTime?.() ?? null;
-    const mode = time ? 'date' : 'manual';
-    const toggle = toggleRow('Sun', ([['manual', 'Manual'], ['date', 'Date']] as const).map(([v, label]) => ({
-      action: 'suntime', layerId: 'sun', value: v, label, active: mode === v, focusKey: `sun-${v}`,
-    })));
-    if (!time) {
-      return `
-        <div class="setting-label">Light Direction</div>
-        ${toggle}
-        ${this.renderSlider('sun', 'azimuth', 'azimuth', 'Direction', azimuth, 0, 360, 1, `${Math.round(azimuth)}°`)}
-        ${this.renderSlider('sun', 'altitude', 'altitude', 'Altitude', altitude, 5, 90, 1, `${Math.round(altitude)}°`)}
-      `;
-    }
-    // Date mode: the sun stands where it does at that local time over the map center
-    const pad = (n: number) => String(n).padStart(2, '0');
-    const day = `${time.getFullYear()}-${pad(time.getMonth() + 1)}-${pad(time.getDate())}`;
-    const hour = time.getHours() + time.getMinutes() / 60;
-    return `
-      <div class="setting-label">Light Direction</div>
-      ${toggle}
-      <div class="control-row">
-        <span class="control-label">Day</span>
-        <input type="date" class="date-input" data-action="sunday" data-layer-id="sun" data-param="sunday" data-focus-key="sun:day" value="${day}" aria-label="Day">
-      </div>
-      ${this.renderSlider('sun', 'sunhour', 'sunhour', 'Time', hour, 0, 24 - 0.25, 0.25, formatHour(hour))}
-      <div class="control-row">
-        <span class="control-label">Sun</span>
-        <span class="control-value" data-value-for="sun:position">${sunText(azimuth, altitude)}</span>
-      </div>
-    `;
-  }
-
-  private renderMeshSettings(): string {
-    const wire = this.map!.getWireframe();
-    const white = this.map!.getWireframeWhite();
-    const mode = !wire ? 'solid' : white ? 'white' : 'wire';
-    const options: Array<[string, string]> = [['solid', 'Solid'], ['wire', 'Wireframe'], ['white', 'White']];
-    return toggleRow('Mesh', options.map(([v, label]) => ({
-      action: 'wireframe', layerId: 'mesh', value: v, label, active: mode === v, focusKey: `mesh-${v}`,
-    })));
+    return grp('Ramp') + rampNamesFor(layer.descriptor.id).map((name) => {
+      const active = current === name;
+      const spec = BUILTIN_RAMPS[name];
+      return `<button type="button" class="row${active ? ' sel' : ''}" data-action="ramp" data-layer-id="${eid}" data-value="${name}"
+        data-focus-key="ramp-${eid}-${name}" aria-pressed="${active}">
+        <span class="t">${capitalize(name)}</span>
+        <span class="ramp" style="background:${rampGradientCss(spec, spec.type === 'classes' ? domain : [0, 1])}"></span>
+      </button>`;
+    }).join('') + (custom ? `<div class="row sel" aria-current="true"><span class="t">Custom</span>
+      <span class="ramp" style="background:${rampGradientCss(current, domain)}"></span></div>` : '');
   }
 }

@@ -102,6 +102,9 @@ function defaultWorkerCount(): number {
   return Math.max(1, Math.min(4, cores - 1));
 }
 
+/** Below this map width (CSS px) the controls are compact: full-width columns, one open at a time. */
+export const COMPACT_WIDTH = 600;
+
 /** Default options with all fields resolved. */
 export const DEFAULT_OPTIONS: ResolvedTreeletOptions = {
   initCenter: { lng: 0, lat: 0 },
@@ -111,10 +114,11 @@ export const DEFAULT_OPTIONS: ResolvedTreeletOptions = {
   guiDisplay: {
     enabled: true,
     compassPosition: 'top-right',
+    navigation: true,
     layerPosition: 'bottom-right',
-    legendPosition: 'bottom-left',
-    readoutPosition: 'bottom-left',
-    tools: false,
+    infoPosition: 'bottom-left',
+    readout: true,
+    tools: true,
     glass: false,
   },
   mapDisplay: {

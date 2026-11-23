@@ -1,34 +1,59 @@
 // ============================================================================
-// treelet.js - Attribution Control
+// treelet.js - Attribution
 //
-// <treelet-attribution> - slim bar at the bottom edge of the map container.
-// Shows the Treelet logo + name, followed by attribution strings from the
-// active base layer and any active external drape layer.
-// Positioned at the opposite bottom corner to the layer panel.
+// <treelet-attribution> - the Treelet mark followed by the attributions of
+// the active base layer, the shown imagery and the visible overlays.
+//
+//  - Inside the info column (the default UI) it is the column's footer: a
+//    row under a hairline, centred on the rail's lowest button.
+//  - On its own (no info column: `guiDisplay.infoPosition: false`, or the
+//    UI turned off) it is a slim tag in a bottom corner of the map.
+//
+// Refreshes on every `layerchange`. Attribution strings may contain simple
+// HTML (links, emphasis); it is sanitized to text plus `<a href>` with
+// http(s)/mailto targets.
 // ============================================================================
 
 import type { Treelet } from '../core/Treelet';
 import { BaseElement, appendSanitizedHtml } from './dom';
+import { kitStyles } from './kit';
+import { TREE_SVG } from './treeSvg';
 
-/** Inline treelet logo SVG (optimized from assets/treelet_logo.svg). */
-const LOGO_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 3.196 2.665"><g transform="translate(-89.118,-155.866)"><path d="m92.008 157.174-.325.599c.169-.004.338.011.503.045z" fill="#a5c500"/><path d="m89.518 157.998 1.238.009c-.144-.262-.258-.54-.339-.827z" fill="#ccc"/><path d="m92.314 157.153c-.148-.19-.273-.397-.372-.614-.097-.217-.167-.443-.21-.673l-1.307 1.266z" fill="#ccc"/><path d="m89.118 156.279c.156.21.288.436.392.675.101.238.175.486.218.738l1.405-1.375z" fill="#999"/><rect width=".325" height="1.043" x="19.705" y="180.364" rx="0" fill="#999" transform="matrix(.91845 -.39553 .40191 .91568 0 0)"/><rect width=".324" height=".793" x="113.853" y="148.952" rx="0" fill="#999" transform="matrix(.99578 .09178 -.14996 .98869 0 0)"/></g></svg>`;
+const attributionStyles = /* css */ `
+  ${kitStyles}
+  :host { display: block; min-width: 0; }
+  .credit {
+    min-height: 25px; display: flex; align-items: center; gap: 6px; padding: 4px 8px;
+    border-top: 1px solid var(--border);
+    font-size: 10px; line-height: 14px; color: var(--text-dim);
+  }
+  .mark { display: flex; align-items: center; gap: 4px; flex: none; }
+  .mark svg { width: 13px; height: 11px; color: var(--text); }
+  .mark b { font-weight: 600; color: var(--text); }
+  .attr { min-width: 0; }
+  .attr a { color: inherit; }
+
+  /* On its own: a tag in a bottom corner */
+  :host([data-side]) { position: absolute; bottom: 0; z-index: 999; max-width: calc(100% - 80px); }
+  :host([data-side="left"]) { left: 0; }
+  :host([data-side="right"]) { right: 0; }
+  :host([data-side]) .credit {
+    min-height: 18px; padding: 0 8px; border: 0; white-space: nowrap;
+    background: var(--surface-bg); -webkit-backdrop-filter: var(--surface-filter); backdrop-filter: var(--surface-filter);
+  }
+  :host([data-side="left"]) .credit { border-top: 1px solid var(--border); border-right: 1px solid var(--border); border-top-right-radius: 5px; padding-left: 12px; }
+  :host([data-side="right"]) .credit { border-top: 1px solid var(--border); border-left: 1px solid var(--border); border-top-left-radius: 5px; padding-right: 12px; }
+  :host([data-side]) .attr { overflow: hidden; text-overflow: ellipsis; }
+`;
 
 /**
- * Slim attribution bar anchored to a bottom corner.
- *
- * Layout: `<logo> Treelet | <layer attributions>`
- *
- * Automatically refreshes on every `layerchange` event, collecting
- * attribution text from the active base and drape layer sources.
- *
- * Attribution strings may contain simple HTML (links, emphasis); it is
- * sanitized to text plus `<a href>` with http(s)/mailto targets.
+ * The map's credits: `<logo> Treelet · <layer attributions>`.
  */
 export class TreeletAttribution extends BaseElement {
   private shadow: ShadowRoot;
   private map: Treelet | null = null;
   private attrEl: HTMLElement | null = null;
-  private sepEl: HTMLElement | null = null;
+  private readonly onLayerChange = (): void => this.refresh();
 
   constructor() {
     super();
@@ -36,149 +61,70 @@ export class TreeletAttribution extends BaseElement {
   }
 
   /**
-   * Attach to a Treelet instance and render in the given bottom corner.
+   * Attach to a Treelet instance.
    *
    * @param map  - Treelet map instance
-   * @param side - `'left'` or `'right'` for bottom-left / bottom-right
+   * @param side - `'left'` or `'right'`: a tag in that bottom corner of the
+   *               map. Without it the credits are a row for a column's footer.
    */
-  attach(map: Treelet, side: 'left' | 'right'): void {
+  attach(map: Treelet, side?: 'left' | 'right', options: { glass?: boolean } = {}): void {
+    if (this.map && this.map !== map) this.map.off('layerchange', this.onLayerChange);
     this.map = map;
-    this.render(side);
-    this.attrEl = this.shadow.getElementById('attr');
-    this.sepEl = this.shadow.getElementById('sep');
+    if (side) this.dataset.side = side; else delete this.dataset.side;
+    this.toggleAttribute('glass', options.glass === true);
+    if (!this.attrEl) {
+      this.shadow.innerHTML = `<style>${attributionStyles}</style>
+        <div class="credit" role="contentinfo" aria-label="Credits">
+          <span class="mark">${TREE_SVG}<b>Treelet</b></span><span class="attr"></span>
+        </div>`;
+      this.attrEl = this.shadow.querySelector('.attr');
+    }
+    map.on('layerchange', this.onLayerChange);
     this.refresh();
+  }
 
-    map.on('layerchange', () => this.refresh());
+  disconnectedCallback(): void {
+    this.map?.off('layerchange', this.onLayerChange);
+  }
+
+  connectedCallback(): void {
+    if (this.map && this.attrEl) {
+      this.map.off('layerchange', this.onLayerChange);
+      this.map.on('layerchange', this.onLayerChange);
+      this.refresh();
+    }
   }
 
   /**
    * Rebuild the displayed attribution text from active layer sources.
    */
   refresh(): void {
-    if (!this.map || !this.attrEl || !this.sepEl) return;
+    if (!this.map || !this.attrEl) return;
 
     const parts: string[] = [];
 
     // Active base layer attribution
     for (const layer of this.map.getBaseLayers()) {
-      if (layer.visible && layer.attribution) {
-        parts.push(layer.attribution);
-      }
+      if (layer.visible && layer.attribution) parts.push(layer.attribution);
     }
-
     // The active drape's attribution (while its imagery is shown)
     for (const drape of this.map.getDrapeLayers()) {
-      if (drape.visible && drape.attribution) {
-        parts.push(drape.attribution);
-      }
+      if (drape.visible && drape.attribution) parts.push(drape.attribution);
     }
-
     // Visible overlays (their data may require a notice, e.g. ODbL)
     for (const overlay of this.map.getOverlayLayers()) {
-      if (overlay.visible && overlay.attribution) {
-        parts.push(overlay.attribution);
-      }
+      if (overlay.visible && overlay.attribution) parts.push(overlay.attribution);
     }
 
     // Deduplicate (same text may appear across base, drape and overlays)
     const unique = [...new Set(parts)];
 
     this.attrEl.replaceChildren();
-    if (unique.length === 0) {
-      this.attrEl.style.display = 'none';
-      this.sepEl.style.display = 'none';
-      this.attrEl.removeAttribute('title');
-    } else {
-      unique.forEach((html, i) => {
-        if (i > 0) this.attrEl!.appendChild(document.createTextNode(' | '));
-        appendSanitizedHtml(this.attrEl!, html);
-      });
-      this.attrEl.style.display = '';
-      this.sepEl.style.display = '';
-      this.attrEl.title = this.attrEl.textContent ?? '';
-    }
-  }
-
-  // =========================================================================
-  // Rendering
-  // =========================================================================
-
-  private render(side: 'left' | 'right'): void {
-    const radius = side === 'left' ? '0 4px 0 0' : '4px 0 0 0';
-
-    this.shadow.innerHTML = `
-      <style>
-        :host {
-          position: absolute;
-          bottom: 0;
-          ${side}: 0;
-          z-index: 999;
-          pointer-events: auto;
-          color-scheme: light dark;
-          max-width: calc(100% - 60px);
-        }
-
-        .bar {
-          display: flex;
-          align-items: center;
-          gap: 3px;
-          background: light-dark(rgba(255, 255, 255, 0.75), rgba(0, 0, 0, 0.55));
-          color: light-dark(#333, #ccc);
-          font-family: system-ui, -apple-system, sans-serif;
-          font-size: 10px;
-          line-height: 1.4;
-          padding: 2px 6px;
-          border-radius: ${radius};
-          white-space: nowrap;
-          overflow: hidden;
-          max-width: 100%;
-          box-sizing: border-box;
-          opacity: 0.65;
-          transition: opacity 0.15s;
-        }
-
-        .bar:hover {
-          opacity: 1;
-        }
-
-        .logo {
-          display: flex;
-          align-items: center;
-          gap: 2px;
-          flex-shrink: 0;
-        }
-
-        .logo svg {
-          width: 10px;
-          height: 10px;
-        }
-
-        .logo span {
-          font-weight: 600;
-          opacity: 0.7;
-        }
-
-        .sep {
-          opacity: 0.4;
-        }
-
-        .attr {
-          opacity: 0.85;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          min-width: 0;
-        }
-
-        .attr a {
-          color: inherit;
-        }
-      </style>
-      <div class="bar">
-        <div class="logo">${LOGO_SVG}<span>Treelet</span></div>
-        <span class="sep" id="sep">|</span>
-        <span class="attr" id="attr"></span>
-      </div>
-    `;
+    unique.forEach((html, i) => {
+      this.attrEl!.appendChild(document.createTextNode(i > 0 ? ' · ' : ''));
+      appendSanitizedHtml(this.attrEl!, html);
+    });
+    if (unique.length) this.attrEl.title = this.attrEl.textContent ?? '';
+    else this.attrEl.removeAttribute('title');
   }
 }
-

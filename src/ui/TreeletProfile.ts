@@ -1,16 +1,20 @@
 // ============================================================================
 // treelet.js - TreeletProfile Web Component
 //
-// <treelet-profile> - an elevation profile at the bottom of the map: the
-// chart, statistics, CSV and PNG export. Hovering the chart reports the
-// sample under the pointer (the map marks it on the terrain).
+// <treelet-profile> - an elevation profile: the chart, its statistics as
+// label / value pairs, CSV and PNG export. Inside the hub's Measure page
+// (the default UI) it is a block of rows under the tools; on its own (no
+// hub) it is a card at the bottom of the map. Hovering the chart reports
+// the sample under the pointer (the map marks it on the terrain).
 //
 // The chart is drawn once per profile and width; hovering moves a marker
 // and the tooltip (once per frame) without drawing it again.
 // ============================================================================
 
 import { BaseElement, escapeHtml } from './dom';
-import { cornerCardStyles } from './cornerStyles';
+import { kitStyles } from './kit';
+import { CLOSE_SVG } from './icons';
+import { pairRows } from './TreeletToolbar';
 import {
   CSS_PALETTE, MARGIN, chartSvg, chartScales, nearestIndex, profileCsv,
   type ChartPalette, type ChartScales, type ProfilePoint,
@@ -26,38 +30,36 @@ export interface ProfileData {
   obstructionIndex?: number;
 }
 
+/** Chart heights: on its own, and in a column (a 72 plot plus the axes). */
 const CHART_HEIGHT = 150;
+const EMBEDDED_CHART_HEIGHT = 72 + MARGIN.top + MARGIN.bottom;
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
 const profileStyles = /* css */ `
-  ${cornerCardStyles}
+  ${kitStyles}
 
   :host {
-    position: absolute;
-    left: 50%;
-    bottom: 24px;
-    transform: translateX(-50%);
-    z-index: 997;
-    width: min(640px, calc(100% - 24px));
-    max-width: none;
+    display: block;
     --chart-line: light-dark(#1c7ed6, #4dabf7);
     --chart-fill: light-dark(rgba(28, 126, 214, 0.18), rgba(77, 171, 247, 0.22));
     --chart-sight: light-dark(#2f9e44, #69db7c);
     --chart-blocked: light-dark(#e03131, #ff8787);
   }
-
-  .card { gap: 4px; padding: 8px 10px 8px; }
-  .head { display: flex; align-items: center; gap: 8px; }
-  .title { flex: 1; min-width: 0; font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .head .close { padding: 3px 6px; background: transparent; color: var(--text-dim); font-size: 14px; line-height: 1; }
-  .stats { display: flex; flex-wrap: wrap; gap: 2px 14px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
-  .stats b { color: var(--text); font-weight: 600; }
-  .chart { position: relative; height: ${CHART_HEIGHT}px; touch-action: none; }
+  /* On its own: a card at the bottom of the map */
+  :host(:not([embedded])) {
+    position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); z-index: 997;
+    width: min(640px, calc(100% - 24px));
+  }
+  .card { display: flex; flex-direction: column; gap: 2px; }
+  :host(:not([embedded])) .card { padding: 6px; }
+  .stats { display: flex; flex-direction: column; gap: 2px; }
+  :host(:not([embedded])) .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 0; }
+  .chart { position: relative; touch-action: none; margin: 2px 0; overflow: hidden; }
   .chart svg { display: block; }
   .tip {
     position: absolute; top: 2px; left: 0; pointer-events: none; white-space: nowrap;
-    font-variant-numeric: tabular-nums; color: var(--text); background: var(--surface-bg);
-    border: 1px solid var(--border); border-radius: 5px; padding: 1px 5px;
+    height: 16px; padding: 0 5px; border-radius: 3px; background: var(--active-bg);
+    font-size: 10px; line-height: 16px; font-variant-numeric: tabular-nums; color: var(--text);
   }
   .tip[hidden] { display: none; }
 `;
@@ -78,14 +80,23 @@ export class TreeletProfile extends BaseElement {
   private resize: ResizeObserver | null = null;
   private onHover: ((point: ProfilePoint | null) => void) | null = null;
   private onClose: (() => void) | null = null;
+  private chartHeight = CHART_HEIGHT;
 
   constructor() {
     super();
     this.shadow = this.attachShadow({ mode: 'open' });
   }
 
-  attach(options: { glass?: boolean; onHover?: (point: ProfilePoint | null) => void; onClose?: () => void } = {}): void {
-    if (options.glass) this.setAttribute('glass', ''); else this.removeAttribute('glass');
+  /**
+   * @param options.embedded - a block of rows in a column (the hub's Measure
+   *                           page) instead of a card at the bottom of the map
+   */
+  attach(options: {
+    glass?: boolean; embedded?: boolean; onHover?: (point: ProfilePoint | null) => void; onClose?: () => void;
+  } = {}): void {
+    this.toggleAttribute('glass', options.glass === true);
+    this.toggleAttribute('embedded', options.embedded === true);
+    this.chartHeight = options.embedded ? EMBEDDED_CHART_HEIGHT : CHART_HEIGHT;
     this.onHover = options.onHover ?? null;
     this.onClose = options.onClose ?? null;
     this.hidden = true;
@@ -115,19 +126,19 @@ export class TreeletProfile extends BaseElement {
     this.marker = null;
     this.hidden = false;
     this.shadow.innerHTML = `<style>${profileStyles}</style>
-      <div class="card" role="region" aria-label="Elevation profile">
-        <div class="head">
-          <span class="title">${escapeHtml(data.title)}</span>
-          <button type="button" class="card-btn" data-action="csv" title="Download the profile as CSV">CSV</button>
-          <button type="button" class="card-btn" data-action="png" title="Download the chart as PNG">PNG</button>
-          <button type="button" class="card-btn close" data-action="close" aria-label="Close the profile" title="Close">×</button>
+      <div class="card${this.hasAttribute('embedded') ? '' : ' surf'}" role="region" aria-label="${escapeHtml(data.title)}">
+        <div class="grp head"><span class="t title">${escapeHtml(data.title)}</span>
+          <button type="button" class="ib" data-action="close" aria-label="Close the profile" title="Close">${CLOSE_SVG}</button></div>
+        <div class="chart" style="height: ${this.chartHeight}px"><div class="tip" hidden></div></div>
+        <div class="stats">${pairRows(data.stats)}</div>
+        <div class="acts">
+          <button type="button" class="btn" data-action="csv" title="Download the profile as CSV">CSV</button>
+          <button type="button" class="btn" data-action="png" title="Download the chart as PNG">PNG</button>
         </div>
-        <div class="stats">${data.stats.map(([k, v]) => `<span>${escapeHtml(k)} <b>${escapeHtml(v)}</b></span>`).join('')}</div>
-        <div class="chart"><div class="tip" hidden></div></div>
       </div>`;
     this.chartEl = this.shadow.querySelector('.chart');
     this.tipEl = this.shadow.querySelector('.tip');
-    this.shadow.querySelector('.head')!.addEventListener('click', this.onClick);
+    this.shadow.querySelector('.card')!.addEventListener('click', this.onClick);
     this.chartEl!.addEventListener('pointermove', this.onMove);
     this.chartEl!.addEventListener('pointerleave', this.onLeave);
     this.drawChart();
@@ -147,7 +158,7 @@ export class TreeletProfile extends BaseElement {
   }
 
   private width(): number {
-    return Math.max(160, Math.round(this.chartEl?.clientWidth || 600));
+    return Math.max(160, Math.round(this.chartEl?.clientWidth || (this.hasAttribute('embedded') ? 252 : 600)));
   }
 
   /** Draw the chart (once per profile and width) with its hover marker. */
@@ -156,8 +167,8 @@ export class TreeletProfile extends BaseElement {
     const width = this.width();
     if (width === this.chartWidth && this.marker) return; // resized, but not in width
     this.chartWidth = width;
-    this.scales = chartScales(this.data.points, width, CHART_HEIGHT);
-    const svg = chartSvg(this.data.points, width, CHART_HEIGHT, CSS_PALETTE, {
+    this.scales = chartScales(this.data.points, width, this.chartHeight);
+    const svg = chartSvg(this.data.points, width, this.chartHeight, CSS_PALETTE, {
       obstructionIndex: this.data.obstructionIndex,
       decimate: true,
       scales: this.scales,
@@ -173,7 +184,7 @@ export class TreeletProfile extends BaseElement {
     group.setAttribute('class', 'hover');
     group.setAttribute('display', 'none');
     line.setAttribute('y1', String(MARGIN.top));
-    line.setAttribute('y2', String(CHART_HEIGHT - MARGIN.bottom));
+    line.setAttribute('y2', String(this.chartHeight - MARGIN.bottom));
     line.setAttribute('stroke', CSS_PALETTE.hover);
     line.setAttribute('stroke-width', '1');
     line.setAttribute('stroke-opacity', '0.5');
@@ -282,7 +293,7 @@ export class TreeletProfile extends BaseElement {
   private async exportPng(): Promise<void> {
     if (!this.data) return;
     const w = this.chartWidth || this.width();
-    const svg = chartSvg(this.data.points, w, CHART_HEIGHT, this.palette(), { obstructionIndex: this.data.obstructionIndex });
+    const svg = chartSvg(this.data.points, w, this.chartHeight, this.palette(), { obstructionIndex: this.data.obstructionIndex });
     const url = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
     try {
       const img = new Image();
@@ -290,7 +301,7 @@ export class TreeletProfile extends BaseElement {
       const scale = 2;
       const canvas = document.createElement('canvas');
       canvas.width = w * scale;
-      canvas.height = CHART_HEIGHT * scale;
+      canvas.height = this.chartHeight * scale;
       const ctx = canvas.getContext('2d');
       if (!ctx) return;
       ctx.scale(scale, scale);

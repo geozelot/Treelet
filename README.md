@@ -64,12 +64,13 @@ The library is designed to be easily extendable - via registry or plugin package
   - **GeoJSON** - points, lines and polygons draped on the terrain, with labels; fills as a coat
 
 - #### Inspection and tools:
+  - **Controls** - a compass with navigation, and two corner boxes that open into columns of rows: the tree (Layers, Measure) and the info box (Legend, Map, credits); full width on phones
   - **Cursor readout** - elevation, slope and aspect under the pointer
   - **Terrain sampling** - `sampleTerrain(lngLat)`, `pick(x, y)`: elevation, slope, aspect, curvature, normal
   - **Measuring** - distance and area on the map and along the terrain, ascent and descent
-  - **Elevation profiles** - a chart panel with hover, CSV and PNG export
+  - **Elevation profiles** - a chart with hover, CSV and PNG export
   - **Line of sight** - with Earth curvature and refraction
-  - **Toolbar** - measure, area, profile, line of sight and viewshed on the map (`guiDisplay.tools`)
+  - **Measuring tools** - distance, area, profile, line of sight and viewshed on the map (the tree's Measure page)
 
 ###
 ###
@@ -202,15 +203,30 @@ The defaults fit a typical view in well under the tile budget at any screen size
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `enabled` | `boolean` | `true` | Show compass + layer panel |
-| `compassPosition` | `UICorner` | `'top-right'` | Compass widget corner |
-| `layerPosition` | `UICorner` | `'bottom-right'` | Layer panel corner |
-| `legendPosition` | `UICorner \| false` | `'bottom-left'` | Corner of the legend for the visible analyses, or `false` for none |
-| `readoutPosition` | `UICorner \| false` | `'bottom-left'` | Corner of the cursor readout (elevation, slope, aspect under the pointer, and the value of the topmost other analysis coat; hidden over the map's controls), or `false` for none; stacks with the legend in a shared corner |
-| `tools` | `UICorner \| boolean` | `false` | The measuring toolbar: a corner, `true` for `'top-left'`, or `false` for none |
+| `enabled` | `boolean` | `true` | Show the controls (compass, hub, info box); the credits show either way |
+| `compassPosition` | `UICorner` | `'top-right'` | Corner of the compass |
+| `navigation` | `boolean` | `true` | Zoom, rotate and tilt buttons beside the compass (hidden on narrow maps) |
+| `layerPosition` | `UICorner` | `'bottom-right'` | Corner of the hub: the tree box with the Layers and Measure pages |
+| `infoPosition` | `UICorner \| false` | `'bottom-left'` | Corner of the info box with the Legend and Map pages and the credits, or `false` for none (the credits then show as a tag in a bottom corner) |
+| `readout` | `boolean` | `true` | The terrain under the pointer on the Legend page (elevation, slope, aspect and the value of the topmost other analysis coat; after a tap on touch screens) |
+| `tools` | `boolean` | `true` | The hub's Measure page: the measuring tools, their results and the elevation profile |
 | `glass` | `boolean` | `false` | Frosted-glass controls (translucent, map blurred behind); costs some GPU time while the map redraws |
 
-The controls open on mouse hover, on a tap (touch screens; a tap elsewhere closes them) and with the keyboard (Tab to a control, Escape to close). On a touch screen the first tap on the compass opens its panel and the next one resets the orientation. On narrow maps the compass panel drops its Map and Viewport sections and the layer panel shrinks to fit.
+##### The controls
+
+Every control is built from the same parts: rows 24 px high and 2 apart, a column padded 6, text 8 in from a row's edge. The selected choice has the active fill and a 2px line in the accent green; values are *scrub rows* (the row is the slider: drag it, tap or click a place in it, or use the arrow keys).
+
+- **Compass** (60 box): its arrow follows the camera; a click resets the orientation. With `navigation`, wings beside it zoom (±1 level), rotate (±15°) and tilt (±5°).
+- **Hub** (the tree, 56 box) and **info box** (56 box): a tap, click, Enter or Space turns the box into a column (264 wide) with a slim rail on its outer side. The box's icon sits at the rail's far end and closes the column; the page buttons stay by the corner it opened from. Escape steps back out of a sub-page, then closes the column. A click on the map leaves it open (the tools need those clicks).
+  - **Layers**: the coat stack, top first (eye, then the coat's page: opacity, blend, its parameters rendered from the schema, ramp, order, removal), *Add layer* (analysis kinds and imagery), running region analyses with progress and cancel; then the terrain: source, exaggeration, light (a manual sun or a day and time) and mesh.
+  - **Measure**: the tools, the live result, and the elevation profile.
+  - **Legend**: the legends of the visible analyses and the terrain under the pointer.
+  - **Map**: zoom, tiles, pitch and bearing; the center and extent, copied as EPSG:4326 or EPSG:3857 coordinates.
+  - The credits (the active base layer's, the imagery's and the visible overlays') sit at the info column's foot.
+- **Narrow maps** (under 600 px): the columns span the map's width, one is open at a time (the other box steps aside), and the compass has no wings.
+- Two controls asking for the same corner: the later one takes the next free corner (with a warning).
+
+The elements (`<treelet-compass>`, `<treelet-hub>`, `<treelet-info>` and the pages' `<treelet-panel>`, `<treelet-toolbar>`, `<treelet-profile>`, `<treelet-legend>`, `<treelet-readout>`, `<treelet-attribution>`) are exported; `TreeletHub` and `TreeletInfo` have `open(page?)`, `close()`, `isOpen` and `page`.
 
 #### View
 
@@ -469,7 +485,7 @@ The ground color is a stack of coats, bottom first: the active drape (imagery) a
 | `setLayerBlendMode(handle, mode)` | `this` | `'normal' \| 'multiply' \| 'screen' \| 'softlight'` (any drape, active or not) |
 | `getLayerBlendMode(handle)` | `BlendMode` | |
 
-At most 6 coats are drawn (the lowest ones; a coat at opacity 0 or outside its `minZoom`–`maxZoom` isn't drawn and doesn't count). An active drape outside its zoom range shows the coats below it. The layer panel's *Overlay* row opens the stack: visibility, order, removal and each coat's settings, rendered from its parameter schema.
+At most 6 coats are drawn (the lowest ones; a coat at opacity 0 or outside its `minZoom`–`maxZoom` isn't drawn and doesn't count). An active drape outside its zoom range shows the coats below it. The hub's Layers page lists the stack: visibility, and each coat's page with its settings (rendered from its parameter schema), order and removal.
 
 #### Drape layers
 
@@ -601,7 +617,7 @@ The sun lights the hillshade and casts the shadows coat; place it by hand or by 
 | `getSunTime()` | `Date \| null` | |
 | `getSunPosition(date?, lngLat?)` | `SunPosition` | `{ azimuth, altitude, declination, equationOfTime }` (NOAA algorithm, refraction-corrected) |
 
-Setting the azimuth or altitude by hand clears the sun time. The layer panel's *Terrain* settings switch between a manual sun and a day and time.
+Setting the azimuth or altitude by hand clears the sun time. The *Light* page (the hub's Layers page) switches between a manual sun and a day and time.
 
 ### Region analyses and rasters
 
@@ -639,7 +655,7 @@ Options of every region analysis (`RegionOptions`, `ResultLayerOptions`):
 | Sky view | `radius` (whole region), `directions` (16) | `data` (0–1) |
 | TPI | `radius` (500 m), `innerRadius` (0: a box; > 0: a ring) | `data` (m) |
 
-Every result carries `bounds`, `width`, `height`, `zoom`, `cellSize` (meters) and `missingTiles`. A job that would have no raster slot for its coat fails before loading anything; `'done'` is reported once the result is shown (a failure to show it ends the job with `'error'`). A region whose tiles failed to load is loaded again by the next analysis (the failed tiles are retried). The viewshed casts rays from the observer to every cell on the edge of the search square and drops distant ground by the Earth's curvature less refraction (`d² (1 − k) / 2R`). Sun hours sweep the terrain's shadow along the sun's azimuth for every sun position of the day; terrain outside the region casts no shadow. Without a radius the sky view searches the whole region exactly (one sweep per direction); with one it samples up to 128 cells per direction, which is slower. While an analysis runs, the legend shows its progress and a cancel button; the layer panel's *Analysis* list runs them over the view (the viewshed asks for a click on the observer first).
+Every result carries `bounds`, `width`, `height`, `zoom`, `cellSize` (meters) and `missingTiles`. A job that would have no raster slot for its coat fails before loading anything; `'done'` is reported once the result is shown (a failure to show it ends the job with `'error'`). A region whose tiles failed to load is loaded again by the next analysis (the failed tiles are retried). The viewshed casts rays from the observer to every cell on the edge of the search square and drops distant ground by the Earth's curvature less refraction (`d² (1 − k) / 2R`). Sun hours sweep the terrain's shadow along the sun's azimuth for every sun position of the day; terrain outside the region casts no shadow. Without a radius the sky view searches the whole region exactly (one sweep per direction); with one it samples up to 128 cells per direction, which is slower. While an analysis runs, the hub's Layers page shows its progress and a cancel button (and the tree box at rest a progress line); *Add layer* runs them over the view (the viewshed asks for a click on the observer first).
 
 ```ts
 const summit = { lng: 11.3853, lat: 47.3122 };
@@ -686,7 +702,7 @@ Value rasters are filtered bilinearly between cell centers in the shader (no-dat
 
 #### Overlay layers
 
-GeoJSON features drawn on the terrain: lines draped along it (densified to the terrain in view; where finer tiles load, their heights are updated in place), points as round markers, polygon fills rasterized into a coat (so they lie exactly on the ground; they take one of the 4 raster slots), labels from a property. Terrain in front hides them; a translucent line covers each pixel once. The fill coat belongs to its overlay: it shows only while the overlay is visible and in its zoom range, at the overlay's opacity times its own, and keeps its place in the stack (and its blend mode) when the data or style changes; removing it from the stack turns the overlay's fills off. A visible overlay's `layerAttribution` shows in the attribution bar. Positions must be numbers (or numeric strings); others are skipped with a warning.
+GeoJSON features drawn on the terrain: lines draped along it (densified to the terrain in view; where finer tiles load, their heights are updated in place), points as round markers, polygon fills rasterized into a coat (so they lie exactly on the ground; they take one of the 4 raster slots), labels from a property. Terrain in front hides them; a translucent line covers each pixel once. The fill coat belongs to its overlay: it shows only while the overlay is visible and in its zoom range, at the overlay's opacity times its own, and keeps its place in the stack (and its blend mode) when the data or style changes; removing it from the stack turns the overlay's fills off. A visible overlay's `layerAttribution` shows in the map's credits. Positions must be numbers (or numeric strings); others are skipped with a warning.
 
 | Method | Returns | Description |
 |---|---|---|
@@ -738,12 +754,12 @@ map.addOverlayLayer({
 | `getElevationProfile(from, to, samples?)` | `ProfileSample[]` | `{ lngLat, distance, elevation }` samples along a line (distance in meters) |
 | `getVisibleElevationRange()` | `[number, number]` | Min and max elevation of the tiles on screen |
 | `getElevationGrid(options?)` | `Promise<ElevationGrid>` | Elevations of a region as one grid (see [Region analyses](#region-analyses)) |
-| `pickLocation(options?)` | `Promise<TerrainPick \| null>` | Wait for a click on the terrain (crosshair cursor; `prompt` shown in the legend); `null` after Escape or `cancelPick()` |
+| `pickLocation(options?)` | `Promise<TerrainPick \| null>` | Wait for a click on the terrain (crosshair cursor; `prompt` shown on the hub's Layers page); `null` after Escape or `cancelPick()` |
 | `project(lngLat)` | `{ x, y } \| null` | Screen position (container pixels) of the terrain at a position |
 | `measureDistance(points)` | `PathMeasure` | `{ distance, surfaceDistance, gain, loss, minElevation, maxElevation, profile }` of a path |
 | `measureArea(ring)` | `AreaMeasure` | `{ area, surfaceArea, perimeter, minElevation, maxElevation }` of a polygon |
 | `lineOfSight(from, to, options?)` | `LineOfSightResult \| null` | `{ visible, obstruction, clearance, distance, profile }`; options `fromHeight` (1.7 m), `toHeight` (0), `curvature`, `refraction` |
-| `showProfile(path \| lineOfSight, options?)` | `this` | Open the profile panel for a path or a line-of-sight result |
+| `showProfile(path \| lineOfSight, options?)` | `this` | Show the elevation profile of a path or a line-of-sight result (on the hub's Measure page) |
 | `hideProfile()` | `this` | Close it |
 
 Slope, aspect and curvature come from the same 12-texel surface the shader shades, at the finest loaded tile's resolution.
@@ -775,7 +791,7 @@ map.on('measure', ({ mode, final, result }) => {
 map.startTool('distance');
 ```
 
-With `guiDisplay.tools` the toolbar offers the tools, plus the viewshed from a clicked point, and shows the live result with *Profile*, *Finish* and *Clear*.
+The hub's Measure page (`guiDisplay.tools`) offers the tools, plus the viewshed from a clicked point, and shows the live result with *Profile*, *Finish* and *Clear*; `showProfile` opens the profile there (or, without a Measure page, in a card at the bottom of the map).
 
 ## API Reference
 

@@ -36,7 +36,8 @@ const map = (window as any).__treelet = Treelet.map('map', {
     glass: true,
     compassPosition: 'top-right',
     layerPosition: 'bottom-right',
-    tools: 'top-left',
+    infoPosition: 'bottom-left',
+    tools: true,
   },
 });
 
@@ -99,7 +100,7 @@ const basemapOrtho = map.addDrapeLayer({
 // =========================================================================
 // Presets - a few coat stacks. The map starts with a hillshade coat; each
 // preset adds its own analyses on top of the imagery it picks. Open the
-// Overlay stack in the layer panel to change them.
+// tree's Layers page to change them.
 // =========================================================================
 type Preset = 'relief' | 'avalanche' | 'flood' | 'viewshed' | 'sun' | 'peaks' | 'shadows';
 /** The running sun animation of the Shadows preset (stopped by any other preset). */

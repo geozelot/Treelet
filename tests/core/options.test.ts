@@ -20,14 +20,24 @@ describe('resolveOptions', () => {
     expect(o.mapDisplay.fog).toBe(true);
     expect(o.guiDisplay.glass).toBe(false);
     expect(resolveOptions({ ...base, guiDisplay: { glass: true } }).guiDisplay.glass).toBe(true);
-    expect(o.guiDisplay.legendPosition).toBe('bottom-left');
-    expect(resolveOptions({ ...base, guiDisplay: { legendPosition: false } }).guiDisplay.legendPosition).toBe(false);
-    expect(o.guiDisplay.readoutPosition).toBe('bottom-left');
-    expect(o.guiDisplay.tools).toBe(false);
-    expect(resolveOptions({ ...base, guiDisplay: { tools: 'bottom-right' } }).guiDisplay.tools).toBe('bottom-right');
-    expect(resolveOptions({ ...base, guiDisplay: { readoutPosition: 'top-left' } }).guiDisplay.readoutPosition).toBe('top-left');
+    expect(o.guiDisplay.infoPosition).toBe('bottom-left');
+    expect(resolveOptions({ ...base, guiDisplay: { infoPosition: false } }).guiDisplay.infoPosition).toBe(false);
+    expect(o.guiDisplay.navigation).toBe(true);
+    expect(o.guiDisplay.readout).toBe(true);
+    expect(o.guiDisplay.tools).toBe(true);
+    expect(resolveOptions({ ...base, guiDisplay: { tools: false } }).guiDisplay.tools).toBe(false);
     expect(o.workerCount).toBeGreaterThanOrEqual(1);
     expect(o.workerCount).toBeLessThanOrEqual(4);
+  });
+
+  it('maps the GUI options replaced during 1.0, with a warning', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const legacy = (gui: Record<string, unknown>) => resolveOptions({ ...base, guiDisplay: gui as never }).guiDisplay;
+    expect(legacy({ tools: 'top-left' }).tools).toBe(true);
+    expect(legacy({ readoutPosition: false }).readout).toBe(false);
+    expect(legacy({ legendPosition: 'top-left' })).not.toHaveProperty('legendPosition');
+    expect(warn).toHaveBeenCalledTimes(3);
+    warn.mockRestore();
   });
 
   it('rejects non-finite and inconsistent values', () => {

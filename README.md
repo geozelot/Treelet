@@ -64,7 +64,8 @@ The library is designed to be easily extendable - via registry or plugin package
   - **GeoJSON** - points, lines and polygons draped on the terrain, with labels; fills as a coat
 
 - #### Inspection and tools:
-  - **Controls** - a compass with navigation, and two corner boxes that open into columns of rows: the tree (Layers, Measure) and the info box (Legend, Map, credits); full width on phones
+  - **Controls** - a compass with navigation, and two corner boxes that open into columns of rows: the tree (Layers, Themes, Measure) and the info box (Legend, Map, credits); full width on phones
+  - **Themes** - named setups of imagery, coats and view (`setThemes`, `applyTheme`), offered on the tree's Themes page
   - **Cursor readout** - elevation, slope and aspect under the pointer
   - **Terrain sampling** - `sampleTerrain(lngLat)`, `pick(x, y)`: elevation, slope, aspect, curvature, normal
   - **Measuring** - distance and area on the map and along the terrain, ascent and descent
@@ -206,7 +207,7 @@ The defaults fit a typical view in well under the tile budget at any screen size
 | `enabled` | `boolean` | `true` | Show the controls (compass, hub, info box); the credits show either way |
 | `compassPosition` | `UICorner` | `'top-right'` | Corner of the compass |
 | `navigation` | `boolean` | `true` | Zoom, rotate and tilt buttons beside the compass (hidden on narrow maps) |
-| `layerPosition` | `UICorner` | `'bottom-right'` | Corner of the hub: the tree box with the Layers and Measure pages |
+| `layerPosition` | `UICorner` | `'bottom-right'` | Corner of the hub: the tree box with the Layers, Themes and Measure pages |
 | `infoPosition` | `UICorner \| false` | `'bottom-left'` | Corner of the info box with the Legend and Map pages and the credits, or `false` for none (the credits then show as a tag in a bottom corner) |
 | `readout` | `boolean` | `true` | The terrain under the pointer on the Legend page (elevation, slope, aspect and the value of the topmost other analysis coat; after a tap on touch screens) |
 | `tools` | `boolean` | `true` | The hub's Measure page: the measuring tools, their results and the elevation profile |
@@ -219,6 +220,7 @@ Every control is built from the same parts: rows 24 px high and 2 apart, a colum
 - **Compass** (60 box): its arrow follows the camera; a click resets the orientation. With `navigation`, wings beside it zoom (±1 level), rotate (±15°) and tilt (±5°).
 - **Hub** (the tree, 56 box) and **info box** (56 box): a tap, click, Enter or Space turns the box into a column (264 wide) with a slim rail on its outer side. The box's icon sits at the rail's far end and closes the column; the page buttons stay by the corner it opened from. Escape steps back out of a sub-page, then closes the column. A click on the map leaves it open (the tools need those clicks).
   - **Layers**: the coat stack, top first (eye, then the coat's page: opacity, blend, its parameters rendered from the schema, ramp, order, removal), *Add layer* (analysis kinds and imagery), running region analyses with progress and cancel; then the terrain: source, exaggeration, light (a manual sun or a day and time) and mesh.
+  - **Themes** (while the map has [themes](#themes)): one row per theme; a row applies its theme.
   - **Measure**: the tools, the live result, and the elevation profile.
   - **Legend**: the legends of the visible analyses and the terrain under the pointer.
   - **Map**: zoom, tiles, pitch and bearing; the center and extent, copied as EPSG:4326 or EPSG:3857 coordinates.
@@ -303,6 +305,7 @@ map.on('tileerror', ({ coord, layer, error }) => { /* request failed; retried wi
 | `'pickstart'` / `'pickend'` | `{ prompt }` / `{}` | `pickLocation()` waits for a click / stopped waiting |
 | `'toolchange'` | `{ mode, drawing }` | A tool started, finished drawing or stopped |
 | `'measure'` | `{ mode, final, result }` | A tool's result changed (`final` when drawing ended; `result` null when cleared) |
+| `'themechange'` | `{ id }` | The themes were replaced, or another theme was applied (`id` null: none is) |
 
 ### Terrain
 
@@ -594,6 +597,37 @@ await map.animateAnalysisParams(water, { level: [lo, (lo + hi) / 2] }, 4000);
 
 A ramp can also be given as data: `{ type: 'continuous', stops: [[t, [r, g, b]], …] }` with `t` in 0–1 over the value range, or `{ type: 'classes', breaks: [...], colors: [...], labels? }` with breaks in the analysis' units (one more color than breaks). Colors may be `[r, g, b, a]`; a class with alpha 0 draws nothing and is left out of the legend. Legends, the panel preview and the shader all read the same spec.
 
+#### Themes
+
+A theme is a thematic map: a named setup of imagery, coats and view. `apply(map)` sets it up; `clear(map)`, if given, takes it down before the next theme is applied (also before the same theme is applied again). While a map has themes, the tree has a **Themes** page with a row for each; a row applies its theme.
+
+```ts
+let coats: LayerHandle[] = [];
+map.setThemes([
+  {
+    id: 'relief',
+    name: 'Relief',
+    description: 'Elevation colors under the hillshade', // the row's tooltip
+    apply: (m) => { m.deactivateDrapeLayer(); coats = [m.addAnalysisLayer({ analysis: 'elevation' })]; },
+    clear: (m) => { coats.forEach((h) => m.removeAnalysisLayer(h)); coats = []; },
+  },
+  {
+    id: 'avalanche',
+    name: 'Avalanche',
+    apply: (m) => { m.activateDrapeLayer(ortho); coats = [m.addAnalysisLayer({ analysis: 'slope', ramp: 'avalanche' })]; },
+    clear: (m) => { coats.forEach((h) => m.removeAnalysisLayer(h)); coats = []; },
+  },
+]);
+map.applyTheme('relief');
+```
+
+| Method | Returns | Description |
+|---|---|---|
+| `setThemes(themes)` | `this` | Replace the themes (ids unique); the map is left as it is, and the applied theme stays applied when the new list has its id |
+| `getThemes()` | `MapTheme[]` | The themes |
+| `applyTheme(id \| null)` | `this` | Clear the applied theme, then apply this one (`null` only clears); an unknown id throws |
+| `getActiveTheme()` | `string \| null` | Id of the theme applied last |
+
 ### Light, shadow and exaggeration
 
 The sun lights the hillshade and casts the shadows coat; place it by hand or by date and time. Exaggeration stretches the relief (analyses stay true to scale).
@@ -813,6 +847,7 @@ type BlendMode = 'normal' | 'multiply' | 'screen' | 'softlight';
 interface LegendSpec { id: string; title: string; unit?: string; type: 'continuous' | 'classes'; domain: [number, number]; stops?: [number, RGBA][]; classes?: { color: RGBA; label: string }[] }
 type DecoderName = 'terrain-rgb' | 'mapbox' | 'terrarium';
 type UICorner = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right';
+interface MapTheme { id: string; name: string; description?: string; apply: (map: Treelet) => void; clear?: (map: Treelet) => void }
 
 interface TerrainSample { elevation: number; slope: number; aspect: number | null; curvature: number; normal: [number, number, number] }
 interface RegionInfo { bounds: TileBounds; width: number; height: number; zoom: number; cellSize: number; missingTiles: number }

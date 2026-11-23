@@ -26,6 +26,8 @@ export interface DockPageSpec {
   label: string;
   /** Rail icon (an SVG string). */
   icon: string;
+  /** Hidden until `setPageHidden(id, false)` (a page with nothing to show yet). */
+  hidden?: boolean;
 }
 
 export interface DockSpec {
@@ -124,6 +126,9 @@ export class DockFrame {
   private readonly tabs = new Map<string, HTMLButtonElement>();
   private readonly pages = new Map<string, HTMLDivElement>();
   private readonly jobline: HTMLElement;
+  private readonly tablist: HTMLElement | null;
+  /** Pages whose button is hidden. */
+  private readonly hiddenPages = new Set<string>();
   private current: string;
   private opened = false;
 
@@ -146,7 +151,7 @@ export class DockFrame {
       </button>
       <div class="pane surf" id="pane" role="region" aria-label="${name}" hidden>
         <div class="pbody">
-          ${pages.map((p) => `<div class="page" id="page-${p.id}" data-page="${p.id}"${single ? '' : ` role="tabpanel" aria-labelledby="tab-${p.id}"`} hidden></div>`).join('')}
+          ${pages.map((p) => `<div class="page" id="page-${p.id}" data-page="${p.id}" hidden></div>`).join('')}
           ${spec.footer ? '<div class="foot"></div>' : ''}
         </div>
         <div class="rail">
@@ -162,9 +167,12 @@ export class DockFrame {
     this.foot = shadow.querySelector('.foot');
     this.home = shadow.querySelector('.rb.home') as HTMLButtonElement;
     this.jobline = shadow.querySelector('.jobline') as HTMLElement;
+    this.tablist = shadow.querySelector('.tabs');
     shadow.querySelectorAll<HTMLButtonElement>('.rb[role="tab"]').forEach((b) => this.tabs.set(b.dataset.page!, b));
     shadow.querySelectorAll<HTMLDivElement>('.page').forEach((p) => this.pages.set(p.dataset.page!, p));
-    this.current = pages[pages.length - 1].id;
+    for (const p of pages) if (p.hidden) this.hiddenPages.add(p.id);
+    this.current = this.fallbackPage();
+    this.syncTabs();
     this.syncPage();
 
     this.box.addEventListener('click', (e) => this.open(undefined, e.detail === 0));
@@ -199,7 +207,7 @@ export class DockFrame {
 
   /** Open the column (on `page`, or the page shown last). */
   open(page?: string, focus = false): void {
-    if (page && this.pages.has(page)) this.current = page;
+    if (page && this.shown(page)) this.current = page;
     const was = this.opened;
     this.opened = true;
     this.host.toggleAttribute('open', true);
@@ -223,7 +231,7 @@ export class DockFrame {
 
   /** Show a page (opening the column when closed). */
   show(page: string): void {
-    if (!this.pages.has(page)) return;
+    if (!this.shown(page)) return;
     if (!this.opened) { this.open(page); return; }
     if (page === this.current) return;
     this.current = page;
@@ -238,6 +246,54 @@ export class DockFrame {
     fill.style.width = `${Math.round(Math.max(0, Math.min(1, progress ?? 0)) * 100)}%`;
   }
 
+  /**
+   * Hide or show a page and its rail button. Hiding the open page turns to
+   * the page by the corner; one page left hides the rail's page buttons.
+   */
+  setPageHidden(page: string, hidden: boolean): void {
+    if (!this.pages.has(page) || this.hiddenPages.has(page) === hidden) return;
+    if (hidden) this.hiddenPages.add(page);
+    else this.hiddenPages.delete(page);
+    this.syncTabs();
+    if (hidden && page === this.current) {
+      this.current = this.fallbackPage();
+      this.syncPage();
+      if (this.opened) this.onChange(true, this.current);
+    }
+  }
+
+  /** Whether a page exists and is not hidden. */
+  private shown(page: string): boolean {
+    return this.pages.has(page) && !this.hiddenPages.has(page);
+  }
+
+  /** The page by the corner (the last one not hidden). */
+  private fallbackPage(): string {
+    const ids = this.visibleIds();
+    return ids[ids.length - 1] ?? this.spec.pages[this.spec.pages.length - 1].id;
+  }
+
+  private visibleIds(): string[] {
+    return this.spec.pages.map((p) => p.id).filter((id) => !this.hiddenPages.has(id));
+  }
+
+  /** Page buttons of hidden pages hide; with one page left the buttons go. */
+  private syncTabs(): void {
+    if (!this.tablist) return;
+    for (const [id, tab] of this.tabs) tab.hidden = this.hiddenPages.has(id);
+    const tabbed = this.visibleIds().length > 1;
+    this.tablist.hidden = !tabbed;
+    for (const [id, el] of this.pages) {
+      if (tabbed) {
+        el.setAttribute('role', 'tabpanel');
+        el.setAttribute('aria-labelledby', `tab-${id}`);
+      } else {
+        el.removeAttribute('role');
+        el.removeAttribute('aria-labelledby');
+      }
+    }
+  }
+
   private syncPage(): void {
     for (const [id, el] of this.pages) el.hidden = id !== this.current;
     for (const [id, tab] of this.tabs) {
@@ -249,7 +305,7 @@ export class DockFrame {
 
   /** Arrow keys move along the page buttons (and show the page). */
   private onTabKey(e: KeyboardEvent): void {
-    const ids = this.spec.pages.map((p) => p.id);
+    const ids = this.visibleIds();
     const i = ids.indexOf(this.current);
     let next = -1;
     if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') next = Math.max(0, i - 1);

@@ -37,6 +37,7 @@ import type {
   TreeletStats,
   UICorner,
   TileBounds,
+  MapTheme,
 } from './types';
 import { SceneManager } from '../scene/SceneManager';
 import { CameraTerrain, marchToTerrain, type GroundSampler } from '../scene/CameraTerrain';
@@ -279,6 +280,9 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
   private sunTime: Date | null = null;
   /** The pending pickLocation(), if any. */
   private picking: { finish: (pick: TerrainPick | null) => void } | null = null;
+  /** Thematic maps (the hub's Themes page) and the one applied. */
+  private themes: MapTheme[] = [];
+  private activeTheme: string | null = null;
   /** Draws overlay layers (and the tools' geometry) on the terrain. */
   private readonly overlays: OverlayRenderer;
   private readonly labels: TreeletLabels | null = null;
@@ -1576,6 +1580,57 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
 
   /** Level-of-detail quality: > 1 finer tiles, < 1 coarser. */
   setLodQuality(quality: number): this { this.terrainRenderer.setLodQuality(requireFinite(quality, 'quality')); return this; }
+
+  // =========================================================================
+  // Themes
+  // =========================================================================
+
+  /**
+   * The thematic maps to offer (the hub's Themes page shows them while the
+   * list is not empty). Replacing the list leaves the map as it is; the
+   * applied theme stays applied when the new list has its id.
+   */
+  setThemes(themes: readonly MapTheme[]): this {
+    const ids = new Set<string>();
+    for (const t of themes) {
+      if (!t || typeof t.id !== 'string' || !t.id || typeof t.name !== 'string' || typeof t.apply !== 'function') {
+        throw new Error('treelet: a theme needs an id, a name and an apply function');
+      }
+      if (ids.has(t.id)) throw new Error(`treelet: two themes have the id "${t.id}"`);
+      ids.add(t.id);
+    }
+    this.themes = [...themes];
+    if (this.activeTheme !== null && !ids.has(this.activeTheme)) this.activeTheme = null;
+    this.emit('themechange', { id: this.activeTheme });
+    return this;
+  }
+
+  /** The thematic maps offered. */
+  getThemes(): MapTheme[] { return [...this.themes]; }
+
+  /** Id of the theme applied last, or null. */
+  getActiveTheme(): string | null { return this.activeTheme; }
+
+  /**
+   * Apply a theme: the applied one's `clear` runs first (also when it is
+   * applied again), then the theme's `apply`. `null` only clears.
+   */
+  applyTheme(id: string | null): this {
+    const theme = id === null ? null : this.themes.find((t) => t.id === id);
+    if (theme === undefined) throw new Error(`treelet: no theme "${id}"`);
+    const previous = this.themes.find((t) => t.id === this.activeTheme);
+    this.activeTheme = null;
+    try {
+      previous?.clear?.(this);
+      if (theme) {
+        theme.apply(this);
+        this.activeTheme = theme.id;
+      }
+    } finally {
+      this.emit('themechange', { id: this.activeTheme });
+    }
+    return this;
+  }
 
   // =========================================================================
   // UI accessor methods

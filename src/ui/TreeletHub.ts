@@ -1,21 +1,24 @@
 // ============================================================================
 // treelet.js - TreeletHub Web Component
 //
-// <treelet-hub> - the tree box. It opens into a column with two pages:
+// <treelet-hub> - the tree box. It opens into a column with these pages:
 //
 //   Layers  - the coat stack and the terrain (<treelet-panel>)
+//   Themes  - the thematic maps of `map.setThemes()` (only while there
+//             are any)
 //   Measure - the measuring tools and their results (<treelet-toolbar>),
 //             and the elevation profile (<treelet-profile>)
 //
-// The page buttons sit on the rail by the box's corner (Measure above
-// Layers); the tree at the rail's far end closes the column. While region
-// analyses run, the box at rest shows their progress as a thin line.
+// The page buttons sit on the rail by the box's corner (Measure, Themes,
+// then Layers by the corner); the tree at the rail's far end closes the
+// column. While region analyses run, the box at rest shows their progress
+// as a thin line.
 // ============================================================================
 
-import { BaseElement } from './dom';
+import { BaseElement, escapeHtml } from './dom';
 import { DockFrame } from './dock';
 import { TREE_SVG } from './treeSvg';
-import { LAYERS_SVG, MEASURE_SVG } from './icons';
+import { LAYERS_SVG, MEASURE_SVG, THEMES_SVG } from './icons';
 import type { TreeletPanel } from './TreeletPanel';
 import { resultPairs, type TreeletToolbar } from './TreeletToolbar';
 import type { TreeletProfile, ProfileData } from './TreeletProfile';
@@ -24,7 +27,7 @@ import type { Treelet } from '../core/Treelet';
 import type { UICorner } from '../core/types';
 
 /** Pages of the hub. */
-export type HubPage = 'layers' | 'measure';
+export type HubPage = 'layers' | 'themes' | 'measure';
 
 const hubStyles = /* css */ `
   .box > svg { width: 34px; height: 28px; }
@@ -45,6 +48,7 @@ export class TreeletHub extends BaseElement {
   private profileHover: ((p: ProfilePoint | null) => void) | null = null;
   private profileClose: (() => void) | null = null;
   private readonly onJobs = (): void => this.showJobs();
+  private readonly onThemes = (): void => this.renderThemes();
   private readonly onTool = (): void => {
     this.toggleAttribute('tool-active', !!this.map && (this.map.getTool().mode !== null || this.map.isPicking()));
   };
@@ -74,9 +78,15 @@ export class TreeletHub extends BaseElement {
         railIcon: TREE_SVG,
         pages: [
           ...(tools ? [{ id: 'measure', label: 'Measure', icon: MEASURE_SVG }] : []),
+          { id: 'themes', label: 'Themes', icon: THEMES_SVG, hidden: true },
           { id: 'layers', label: 'Layers', icon: LAYERS_SVG },
         ],
       }, (open, page) => this.onDockChange(open, page), hubStyles);
+
+      this.dock.pageEl('themes').addEventListener('click', (e) => {
+        const row = (e.target as Element).closest<HTMLElement>('[data-theme]');
+        if (row && this.map) this.map.applyTheme(row.dataset.theme!);
+      });
 
       this.panel = document.createElement('treelet-panel') as TreeletPanel;
       this.dock.pageEl('layers').appendChild(this.panel);
@@ -100,12 +110,14 @@ export class TreeletHub extends BaseElement {
     if (this.isConnected) this.subscribe();
     this.showJobs();
     this.onTool();
+    this.renderThemes();
   }
 
   connectedCallback(): void {
     if (this.map && this.dock) {
       this.subscribe();
       this.showJobs();
+      this.renderThemes();
     }
   }
 
@@ -178,6 +190,7 @@ export class TreeletHub extends BaseElement {
     map.on('toolchange', this.onTool);
     map.on('pickstart', this.onTool);
     map.on('pickend', this.onTool);
+    map.on('themechange', this.onThemes);
   }
 
   private unsubscribe(): void {
@@ -190,6 +203,36 @@ export class TreeletHub extends BaseElement {
     map.off('toolchange', this.onTool);
     map.off('pickstart', this.onTool);
     map.off('pickend', this.onTool);
+    map.off('themechange', this.onThemes);
+  }
+
+  /**
+   * The Themes page: one row per theme, the applied one selected (a row
+   * applies its theme, again when it is selected). The page and its rail
+   * button are hidden while there are no themes.
+   */
+  private renderThemes(): void {
+    const dock = this.dock;
+    if (!dock || !this.map) return;
+    const themes = this.map.getThemes?.() ?? [];
+    const active = this.map.getActiveTheme?.() ?? null;
+    dock.setPageHidden('themes', themes.length === 0);
+    const page = dock.pageEl('themes');
+    let focused: string | undefined;
+    try {
+      focused = (this.shadow.activeElement as HTMLElement | null)?.dataset?.theme;
+    } catch { /* focus moved while the page was rebuilt */ }
+    page.innerHTML = themes.length === 0 ? '' : '<div class="grp"><span class="t">Themes</span></div>'
+      + themes.map((t) => {
+        const on = t.id === active;
+        const tip = t.description ? ` title="${escapeHtml(t.description)}"` : '';
+        return `<button type="button" class="row${on ? ' sel' : ''}" data-theme="${escapeHtml(t.id)}" aria-pressed="${on}"${tip}>`
+          + `<span class="t">${escapeHtml(t.name)}</span></button>`;
+      }).join('');
+    // A row that had focus keeps it
+    if (focused !== undefined) {
+      [...page.querySelectorAll<HTMLElement>('[data-theme]')].find((b) => b.dataset.theme === focused)?.focus();
+    }
   }
 
   /** The mean progress of the running jobs on the box at rest. */

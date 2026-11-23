@@ -100,6 +100,18 @@ function fakeMap(opts: { baseLayers?: number; stack?: unknown[]; legends?: unkno
     getTool: () => ({ mode: null, drawing: false, result: null }),
     isPicking: () => false,
     showProfile: vi.fn(),
+    themes: [] as Array<{ id: string; name: string; description?: string }>,
+    activeTheme: null as string | null,
+    getThemes() { return [...this.themes]; },
+    getActiveTheme() { return this.activeTheme; },
+    setThemes(themes: Array<{ id: string; name: string; description?: string }>) {
+      this.themes = themes;
+      this.emit('themechange', { id: this.activeTheme });
+    },
+    applyTheme: vi.fn(function (this: { activeTheme: string | null; emit: (e: string, d: unknown) => void }, id: string | null) {
+      this.activeTheme = id;
+      this.emit('themechange', { id });
+    }),
   };
   return map;
 }
@@ -145,6 +157,13 @@ function mountInfo(map = fakeMap(), options: { readout?: boolean } = {}) {
   document.body.appendChild(info);
   info.attach(asMap(map), { corner: 'bottom-left', ...options });
   return { map, info, root: info.shadowRoot! };
+}
+
+/** Labels of the rail buttons on screen (hidden pages and a hidden page list left out). */
+function railLabels(root: ShadowRoot): Array<string | null> {
+  return [...root.querySelectorAll<HTMLElement>('.rail .rb')]
+    .filter((b) => !b.closest('[hidden]'))
+    .map((b) => b.getAttribute('aria-label'));
 }
 
 /** Open a coat's page in a mounted panel. */
@@ -553,8 +572,7 @@ describe('hub', () => {
     expect(pane.hidden).toBe(false);
     expect(opened).toHaveBeenCalledTimes(1);
     // The rail: the tree first (closes), then the pages, Layers by the corner
-    const rail = [...root.querySelectorAll('.rail .rb')].map((b) => b.getAttribute('aria-label'));
-    expect(rail).toEqual(['Close layers and measuring', 'Measure', 'Layers']);
+    expect(railLabels(root)).toEqual(['Close layers and measuring', 'Measure', 'Layers']);
     expect(hub.page).toBe('layers');
     expect((root.querySelector('#page-layers') as HTMLElement).hidden).toBe(false);
     click(root, '#tab-measure');
@@ -591,8 +609,56 @@ describe('hub', () => {
     const { hub, root } = mountHub(fakeMap(), { tools: false });
     hub.open('measure');
     expect(hub.hasTools).toBe(false);
-    expect(root.querySelectorAll('.rail .rb')).toHaveLength(1);
+    expect(railLabels(root)).toEqual(['Close layers and measuring']);
     expect(root.querySelector('#page-measure')).toBeNull();
+    expect(root.querySelector('#page-layers')!.hasAttribute('role')).toBe(false);
+  });
+
+  it('shows the Themes page while the map has themes; a row applies its theme', () => {
+    const { map, hub, root } = mountHub();
+    expect(railLabels(root)).not.toContain('Themes');
+    hub.open('themes');
+    expect(hub.page).toBe('layers');
+    map.setThemes([
+      { id: 'relief', name: 'Relief', description: 'Elevation colors' },
+      { id: 'flood', name: 'Flood' },
+    ]);
+    // Between Measure and Layers
+    expect(railLabels(root)).toEqual(['Close layers and measuring', 'Measure', 'Themes', 'Layers']);
+    click(root, '#tab-themes');
+    expect(hub.page).toBe('themes');
+    const rows = [...root.querySelectorAll<HTMLElement>('#page-themes [data-theme]')];
+    expect(rows.map((r) => r.textContent)).toEqual(['Relief', 'Flood']);
+    expect(rows[0].title).toBe('Elevation colors');
+    expect(root.querySelector('#page-themes .row.sel')).toBeNull();
+    rows[1].focus();
+    rows[1].click();
+    expect(map.applyTheme).toHaveBeenCalledWith('flood');
+    const sel = root.querySelector<HTMLElement>('#page-themes .row.sel')!;
+    expect(sel.dataset.theme).toBe('flood');
+    expect(sel.getAttribute('aria-pressed')).toBe('true');
+    // The row keeps focus through the rebuild
+    expect((root.activeElement as HTMLElement).dataset.theme).toBe('flood');
+  });
+
+  it('without themes left the open Themes page turns to Layers', () => {
+    const { map, hub, root } = mountHub();
+    map.setThemes([{ id: 'relief', name: 'Relief' }]);
+    hub.open('themes');
+    expect(hub.page).toBe('themes');
+    map.setThemes([]);
+    expect(hub.page).toBe('layers');
+    expect((root.querySelector('#page-layers') as HTMLElement).hidden).toBe(false);
+    expect(railLabels(root)).toEqual(['Close layers and measuring', 'Measure', 'Layers']);
+  });
+
+  it('without tools the themes still get their page (and the rail its page buttons)', () => {
+    const map = fakeMap();
+    map.themes = [{ id: 'relief', name: 'Relief' }];
+    const { hub, root } = mountHub(map, { tools: false });
+    hub.open();
+    expect(railLabels(root)).toEqual(['Close layers and measuring', 'Themes', 'Layers']);
+    expect(root.querySelector('#page-themes')!.getAttribute('role')).toBe('tabpanel');
   });
 
   it('shows running jobs on the box at rest', () => {

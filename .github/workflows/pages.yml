@@ -15,10 +15,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+  # Build and deploy run as separate jobs: deploy-pages looks the artifact up
+  # by name, and right after the upload in the same job that lookup can come
+  # back empty (actions/deploy-pages#451). A failed deploy can then be re-run
+  # on its own, with the one artifact the build uploaded.
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -48,6 +49,13 @@ jobs:
         with:
           path: dist-demo
 
+  deploy:
+    needs: build
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5

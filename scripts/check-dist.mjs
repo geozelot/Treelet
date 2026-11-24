@@ -3,7 +3,9 @@
 //   - every bundle exists
 //   - no root-absolute asset URLs ("/assets/…"), which resolve against the
 //     consumer's site root and break npm/CDN installs
-//   - the tile worker is inlined (blob: URL) in both library bundles
+//   - the tile worker is inlined (blob: URL) in both library bundles: its
+//     source, recognized by WORKER_ID (src/workers/tileWorker.ts, used by the
+//     worker only), is in the bundle
 //   - the ES bundle imports in Node without a DOM (SSR safety)
 
 import { readFileSync, existsSync } from 'node:fs';
@@ -13,6 +15,8 @@ import { dirname, resolve } from 'node:path';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const dist = (f) => resolve(root, 'dist', f);
 const failures = [];
+/** Kept in sync with WORKER_ID in src/workers/tileWorker.ts. */
+const WORKER_ID = 'treelet-tile-worker';
 
 const bundles = ['treelet.es.js', 'treelet.cdn.standalone.js', 'treelet.worker.js', 'types/index.d.ts'];
 for (const f of bundles) {
@@ -23,7 +27,11 @@ for (const f of ['treelet.es.js', 'treelet.cdn.standalone.js']) {
   if (!existsSync(dist(f))) continue;
   const code = readFileSync(dist(f), 'utf8');
   if (/["'`]\/assets\//.test(code)) failures.push(`dist/${f} references a root-absolute /assets/ URL`);
-  if (!code.includes('createObjectURL')) failures.push(`dist/${f} does not inline the tile worker`);
+  if (!code.includes(WORKER_ID) || !code.includes('createObjectURL')) failures.push(`dist/${f} does not inline the tile worker`);
+}
+
+if (existsSync(dist('treelet.worker.js')) && !readFileSync(dist('treelet.worker.js'), 'utf8').includes(WORKER_ID)) {
+  failures.push('dist/treelet.worker.js is not the tile worker');
 }
 
 if (existsSync(dist('treelet.es.js'))) {

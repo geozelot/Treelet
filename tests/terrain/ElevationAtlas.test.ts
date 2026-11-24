@@ -6,7 +6,7 @@
 // ============================================================================
 
 import { describe, it, expect, vi } from 'vitest';
-import { ElevationAtlas, ELEVATION_NODATA } from '../../src/terrain/ElevationAtlas';
+import { ElevationAtlas, ELEVATION_NODATA, HALO_EDGES } from '../../src/terrain/ElevationAtlas';
 import { packTileKey } from '../../src/tiles/TileIndex';
 
 const S = 8;
@@ -21,6 +21,18 @@ function texel(atlas: ElevationAtlas, key: number, i: number, j: number): number
   const slot = atlas.get(key)!;
   return atlas.data[slot.layer * S * S + j * S + i];
 }
+
+describe('ElevationAtlas change log', () => {
+  it('reports changes only as far back as the trimmed log still holds them all', () => {
+    const atlas = new ElevationAtlas(S, 2);
+    // Rewrites of a resident tile and evicting writes, until the log is trimmed
+    for (let i = 0; i < 5000; i++) atlas.write(4, i % 3, 0, tile(() => i), i, i);
+    const first = (atlas as unknown as { changeLog: Array<{ version: number }> }).changeLog[0].version;
+    expect(atlas.changedSince(first - 1)).toBeNull(); // entries of `first` may be cut
+    expect(atlas.changedSince(first)).not.toBeNull();
+    expect(atlas.changedSince(atlas.version)).toEqual([]);
+  });
+});
 
 describe('ElevationAtlas allocation', () => {
   it('evicts the least recently used unpinned tile and reports it', () => {
@@ -155,5 +167,96 @@ describe('ElevationAtlas edge stitching', () => {
     atlas.write(2, 3, 1, tile(() => 10), 10, 10); // easternmost column at z2
     atlas.write(2, 0, 1, tile(() => 30), 30, 30); // westernmost
     expect(texel(atlas, packTileKey(2, 3, 1), S - 1, 4)).toBeCloseTo(20, 6);
+  });
+});
+
+describe('ElevationAtlas halos (the neighbours\' texels one step past each border)', () => {
+  const { TOP, BOTTOM, LEFT, RIGHT } = HALO_EDGES;
+  const halo = (atlas: ElevationAtlas, key: number, edge: number, i: number) =>
+    atlas.halo[atlas.get(key)!.layer * 4 * S + edge * S + i];
+
+  /** Every halo equals the neighbour's current row or column one step in from the shared edge. */
+  function expectHalosCurrent(atlas: ElevationAtlas): void {
+    const last = S - 1;
+    for (const slot of atlas.slots()) {
+      const { z, x, y } = slot;
+      const sides: Array<[number, number, number, (i: number) => [number, number]]> = [
+        [TOP, x, y - 1, (i) => [i, last - 1]],
+        [BOTTOM, x, y + 1, (i) => [i, 1]],
+        [LEFT, x - 1, y, (i) => [last - 1, i]],
+        [RIGHT, x + 1, y, (i) => [1, i]],
+      ];
+      for (const [edge, nx, ny, at] of sides) {
+        const nKey = packTileKey(z, nx, ny);
+        if (!atlas.has(nKey) || atlas.get(nKey)!.empty) continue;
+        for (let i = 0; i < S; i++) {
+          const [ci, cj] = at(i);
+          expect(halo(atlas, slot.key, edge, i)).toBe(texel(atlas, nKey, ci, cj));
+        }
+      }
+    }
+  }
+
+  it('holds nodata without a neighbour, and the neighbour\'s second column once it loads', () => {
+    const atlas = new ElevationAtlas(S, 8);
+    const a = packTileKey(4, 5, 5);
+    const b = packTileKey(4, 6, 5);
+    atlas.write(4, 5, 5, tile((i) => 100 + i), 100, 107);
+    for (const edge of [TOP, BOTTOM, LEFT, RIGHT]) expect(halo(atlas, a, edge, 3)).toBe(ELEVATION_NODATA);
+    atlas.write(4, 6, 5, tile((i) => 200 + i), 200, 207);
+    for (let j = 0; j < S; j++) {
+      expect(halo(atlas, a, RIGHT, j)).toBe(201);     // b's column 1
+      expect(halo(atlas, b, LEFT, j)).toBe(106);      // a's column S − 2
+    }
+    expect(halo(atlas, a, LEFT, 3)).toBe(ELEVATION_NODATA);
+    atlas.write(4, 5, 4, tile((_i, j) => 300 + j), 300, 307); // north of a
+    for (let i = 0; i < S; i++) {
+      expect(halo(atlas, a, TOP, i)).toBe(306);
+      expect(halo(atlas, packTileKey(4, 5, 4), BOTTOM, i)).toBe(texel(atlas, a, i, 1));
+    }
+    expect(atlas.hasPendingUploads).toBe(true);
+  });
+
+  it('stays current when stitching moves texels inside the band (overzoomed tiles, any load order)', () => {
+    const atlas = new ElevationAtlas(S, 16);
+    // A 3 × 3 block with a wide stitch band, loaded centre last
+    const order: Array<[number, number]> = [[0, 0], [2, 2], [1, 0], [0, 1], [2, 1], [1, 2], [2, 0], [0, 2], [1, 1]];
+    for (const [dx, dy] of order) {
+      atlas.write(5, 10 + dx, 10 + dy, tile((i, j) => 50 * dx + 30 * dy + i * 3 + j * 2), 0, 500, 2);
+      expectHalosCurrent(atlas);
+    }
+    // Reloading an edge tile re-stitches its neighbours
+    atlas.write(5, 11, 10, tile(() => 400), 400, 400, 2);
+    expectHalosCurrent(atlas);
+  });
+
+  it('is cleared when a layer is reused by another tile', () => {
+    const atlas = new ElevationAtlas(S, 2);
+    atlas.write(4, 5, 5, tile(() => 100), 100, 100);
+    atlas.write(4, 6, 5, tile(() => 110), 110, 110);
+    const far = packTileKey(4, 12, 12);
+    atlas.write(4, 12, 12, tile(() => 5), 5, 5); // evicts the first tile and takes its layer
+    expect(atlas.has(packTileKey(4, 5, 5))).toBe(false);
+    for (const edge of [TOP, BOTTOM, LEFT, RIGHT]) {
+      for (let i = 0; i < S; i++) expect(halo(atlas, far, edge, i)).toBe(ELEVATION_NODATA);
+    }
+  });
+
+  it('gives the same slope from both sides of a shared edge', () => {
+    const atlas = new ElevationAtlas(S, 4);
+    const last = S - 1;
+    const h = (c: number) => 0.5 * c * c + 4 * Math.sin(c); // c: texel column across both tiles
+    const a = packTileKey(6, 20, 20);
+    const b = packTileKey(6, 21, 20);
+    atlas.write(6, 20, 20, tile((i) => h(i)), 0, 100);
+    // Before the neighbour: one-sided at the edge
+    const alone = atlas.sampleSurface(a, 1, 0.5, 10)!;
+    expect(alone.g![0]).toBeCloseTo((h(last) - h(last - 1)) / 10, 5);
+    atlas.write(6, 21, 20, tile((i) => h(i + last)), 0, 100);
+    const fromA = atlas.sampleSurface(a, 1, 0.5, 10)!;
+    const fromB = atlas.sampleSurface(b, 0, 0.5, 10)!;
+    expect(fromA.g![0]).toBeCloseTo((h(last + 1) - h(last - 1)) / 20, 5);
+    expect(fromB.g![0]).toBeCloseTo(fromA.g![0], 9);
+    expect(fromB.h).toBeCloseTo(fromA.h, 9);
   });
 });

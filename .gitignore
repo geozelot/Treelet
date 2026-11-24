@@ -6,3 +6,4 @@ dist-demo
 .idea
 .claude
 .gitignore
+docs/api

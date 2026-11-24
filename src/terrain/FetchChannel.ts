@@ -14,6 +14,7 @@
 // notified through `onSettled` and decides when to pump again.
 // ============================================================================
 
+import { isAbortError } from '../core/abort';
 export type FetchOutcome = 'ok' | 'empty' | 'error' | 'cancelled' | 'stale';
 
 interface FailureEntry {
@@ -104,16 +105,18 @@ export interface FetchChannelOptions {
   now?: () => number;
 }
 
-function isAbortError(err: unknown): boolean {
-  return typeof err === 'object' && err !== null && (err as { name?: string }).name === 'AbortError';
-}
+
+/**
+ * Request ids, unique across channels: the elevation and the drape channel
+ * share the worker pool, which routes (and cancels) requests by id.
+ */
+let nextRequestId = 1;
 
 /** One tile pipeline's in-flight set, concurrency accounting and backoff. */
 export class FetchChannel {
   readonly failures = new FailureTracker();
   private readonly inFlight = new Map<number, InFlight>();
   private inFlightWeight = 0;
-  private nextId = 1;
   private readonly now: () => number;
 
   constructor(private readonly options: FetchChannelOptions) {
@@ -156,7 +159,7 @@ export class FetchChannel {
     weight = 1,
   ): void {
     if (this.inFlight.has(key)) return;
-    const id = this.nextId++;
+    const id = nextRequestId++;
     const entry: InFlight = { id, weight, lastNeeded: this.now(), cancel: () => cancel(id) };
     this.inFlight.set(key, entry);
     this.inFlightWeight += weight;

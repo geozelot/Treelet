@@ -32,8 +32,49 @@ export function applyAlphaNodata(pixels: ArrayLike<number>, elevations: Float32A
 export interface ResampleResult {
   min: number;
   max: number;
+  /**
+   * Robust low / high: the range without the few most extreme texels
+   * (ROBUST_TRIM of the valid ones on each side), so isolated spikes in
+   * the source data don't set a tile's elevation range.
+   */
+  low: number;
+  high: number;
   /** Number of output texels with valid data. */
   valid: number;
+}
+
+/** Fraction of a tile's valid texels left out at each end of its robust range (≈ 13 of 256²). */
+export const ROBUST_TRIM = 0.0002;
+const ROBUST_BINS = 4096;
+
+/**
+ * Low and high of `data` without the `trim` fraction of extreme values on
+ * each side (a histogram between min and max, resolved to within one bin),
+ * skipping ELEVATION_NODATA. Returns [min, max] when there is nothing to trim.
+ */
+export function robustRange(data: Float32Array, min: number, max: number, valid: number, trim = ROBUST_TRIM): [number, number] {
+  const k = Math.floor(valid * trim);
+  if (k < 1 || !(max > min)) return [min, max];
+  const counts = new Uint32Array(ROBUST_BINS);
+  const scale = (ROBUST_BINS - 1) / (max - min);
+  for (let i = 0; i < data.length; i++) {
+    const v = data[i];
+    if (v === ELEVATION_NODATA || v !== v) continue;
+    counts[Math.floor((v - min) * scale)]++;
+  }
+  let lowBin = 0;
+  for (let seen = 0; lowBin < ROBUST_BINS; lowBin++) {
+    seen += counts[lowBin];
+    if (seen > k) break;
+  }
+  let highBin = ROBUST_BINS - 1;
+  for (let seen = 0; highBin > 0; highBin--) {
+    seen += counts[highBin];
+    if (seen > k) break;
+  }
+  const low = min + lowBin / scale;
+  const high = Math.max(low, min + (highBin + 1) / scale);
+  return [low, Math.min(max, high)];
 }
 
 /**
@@ -131,7 +172,8 @@ export function resampleElevation(
     min = 0;
     max = 0;
   }
-  return { min, max, valid };
+  const [low, high] = robustRange(out, min, max, valid);
+  return { min, max, low, high, valid };
 }
 
 // ---------------------------------------------------------------------------

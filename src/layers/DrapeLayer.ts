@@ -2,7 +2,7 @@
 // treelet.js - Drape Layer
 //
 // A drape layer binds a raster imagery source and per-layer display settings
-// (opacity, blend mode, hillshade strength) to the terrain. Fetching and
+// (opacity, blend mode) to the terrain. Fetching and
 // GPU residency are handled by TerrainRenderer + DrapeAtlas — the
 // layer itself is a thin configuration + identity object.
 // ============================================================================
@@ -10,14 +10,27 @@
 import type { TileSource } from '../sources/TileSource';
 import type { DrapePart } from '../workers/protocol';
 import type { Layer } from './Layer';
+import type { CoatBlendMode } from '../analysis/types';
+import { isBlendMode } from '../analysis/registry';
 import type {
   DrapeLayerOptions,
   ResolvedDrapeLayerDisplay,
 } from './types';
 
+/**
+ * A coat blend mode from layer options; anything else (such as 0.3's
+ * 'hillshade') is reported and drawn as 'normal'.
+ */
+export function validBlendMode(mode: unknown, layerName: string): CoatBlendMode {
+  if (mode === undefined) return 'normal';
+  if (isBlendMode(mode)) return mode;
+  const hint = mode === 'hillshade' ? ' (0.3\'s hillshade blend is now a hillshade coat: addAnalysisLayer({ analysis: \'hillshade\' }))' : '';
+  console.warn(`treelet: layer "${layerName}" has an unknown blend mode "${String(mode)}"; using normal${hint}`);
+  return 'normal';
+}
+
 /** Auto-incrementing ID counter for drape layers. */
 let nextDrapeLayerId = 0;
-let lodOffsetWarned = false;
 
 /** Most source zoom levels finer than the terrain tile one slot composites (4×4 tiles). */
 const MAX_SLOT_ZOOM_ROOM = 2;
@@ -27,7 +40,7 @@ const MAX_SLOT_ZOOM_ROOM = 2;
  *
  * Each drape layer:
  *   - References a tile source (XYZ, WMTS, or WMS)
- *   - Carries per-layer display settings (opacity, blend mode, hillshade)
+ *   - Carries per-layer display settings (opacity, blend mode)
  *   - Picks the source zoom for each terrain tile (as fine as its slot holds)
  *
  * Multiple drape layers may be registered; TerrainRenderer activates one at
@@ -42,11 +55,6 @@ export class DrapeLayer implements Layer {
   readonly attribution: string;
   readonly minZoom: number;
   readonly maxZoom: number;
-  /**
-   * @deprecated Ignored: drape tiles fetch as much detail as their slot holds
-   * (see `mapDisplay.drapeSlotSize`). Kept for compatibility.
-   */
-  readonly lodOffset: number;
 
   /** Per-layer display settings. */
   readonly display: ResolvedDrapeLayerDisplay;
@@ -67,22 +75,13 @@ export class DrapeLayer implements Layer {
     this.attribution = options.layerAttribution ?? options.layerSource.attribution ?? '';
     this.minZoom = options.minZoom ?? 0;
     this.maxZoom = Math.min(options.maxZoom ?? 22, 22);
-    this.lodOffset = Math.max(1, Math.min(3, options.lodOffset ?? 1));
-    if (this.lodOffset > 1 && !lodOffsetWarned) {
-      lodOffsetWarned = true;
-      console.warn(
-        'treelet: DrapeLayerOptions.lodOffset is deprecated and ignored. Drape tiles now fetch as much ' +
-        'detail as their slot holds; raise mapDisplay.drapeSlotSize (e.g. 512) for sharper imagery.',
-      );
-    }
 
     // Resolve display settings with defaults
     const ld = options.layerDisplay;
     this.display = {
       visible: ld?.visible ?? true,
-      opacity: ld?.opacity ?? 1.0,
-      blendMode: ld?.blendMode ?? 'hillshade',
-      hillshadeStrength: ld?.hillshadeStrength ?? 0.5,
+      opacity: Math.max(0, Math.min(1, Number.isFinite(ld?.opacity) ? ld!.opacity! : 1)),
+      blendMode: validBlendMode(ld?.blendMode, this.layerName),
     };
     this.visible = this.display.visible;
   }
@@ -159,6 +158,7 @@ export class DrapeLayer implements Layer {
    * z/x/y: one tile (or a crop of a coarser one past the source's maxZoom),
    * or a grid of finer tiles. `z` is the zoom of the result (the tile's own
    * zoom for crops); null when the source can't cover the tile.
+   * @internal
    */
   drapeParts(z: number, x: number, y: number, slotSize: number): { z: number; parts: DrapePart[] } | null {
     const ez = this.sourceZoomFor(z, slotSize);

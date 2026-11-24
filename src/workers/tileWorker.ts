@@ -15,6 +15,7 @@
 // Every request can be cancelled by id.
 // ============================================================================
 
+import { abortError as makeAbortError } from '../core/abort';
 import * as Comlink from 'comlink';
 import {
   RawRGBDecoder,
@@ -29,7 +30,19 @@ import {
   type ElevationRequest,
   type ElevationResponse,
   type TileRequestInit,
+  type RegionAnalysisRequest,
+  type RegionAnalysisResponse,
+  type RegionOutputs,
+  type RegionProgress,
+  type RegionStats,
+  type RegionSpec,
 } from './protocol';
+import { loadRegionTiles, assembleRegion, type AssembledRegion } from '../analysis/compute/region';
+import { drive, type Grid } from '../analysis/compute/drive';
+import { viewshedSteps } from '../analysis/compute/viewshed';
+import { sunHoursSteps } from '../analysis/compute/sunHours';
+import { skyViewSteps, tpiSteps } from '../analysis/compute/skyView';
+import { cellSizeAt } from '../analysis/region';
 
 // ---------------------------------------------------------------------------
 // Decoders
@@ -83,8 +96,8 @@ function resolveDecoder(type: string, source?: string): ElevationDecoder {
 // Cancellation helpers
 // ---------------------------------------------------------------------------
 
-function abortError(): DOMException {
-  return new DOMException('Request cancelled', 'AbortError');
+function abortError(): Error {
+  return makeAbortError('treelet: request cancelled');
 }
 
 /** Reject as soon as `signal` aborts, otherwise settle with `promise`. */
@@ -113,7 +126,8 @@ interface SharedLoad<T> {
 
 /**
  * Load `url` once for all concurrent requesters. The underlying fetch is
- * aborted only when every requester has cancelled.
+ * aborted only when every requester has cancelled; the entry leaves
+ * `inflight` when the load settles or its last requester cancels.
  */
 function sharedLoad<T>(
   inflight: Map<string, SharedLoad<T>>,
@@ -121,6 +135,8 @@ function sharedLoad<T>(
   loader: (signal: AbortSignal) => Promise<T>,
   signal: AbortSignal,
 ): Promise<T> {
+  // An abort event never fires again: a cancelled requester must not hold a ref
+  if (signal.aborted) return Promise.reject(abortError());
   let entry = inflight.get(url);
   if (!entry) {
     const controller = new AbortController();
@@ -157,11 +173,14 @@ function sharedLoad<T>(
 // Caches
 // ---------------------------------------------------------------------------
 
-/** Byte-bounded LRU (Map insertion order = recency). */
+/**
+ * Size-bounded LRU (Map insertion order = recency). `sizeOf` sets the unit:
+ * bytes, or 1 to bound the entry count. The newest entry is always kept.
+ */
 class LruCache<V> {
   private readonly map = new Map<string, V>();
-  private bytes = 0;
-  constructor(private readonly maxBytes: number, private readonly sizeOf: (v: V) => number) {}
+  private size = 0;
+  constructor(private readonly maxSize: number, private readonly sizeOf: (v: V) => number) {}
 
   get(key: string): V | undefined {
     const v = this.map.get(key);
@@ -175,15 +194,15 @@ class LruCache<V> {
   set(key: string, value: V): void {
     const old = this.map.get(key);
     if (old !== undefined) {
-      this.bytes -= this.sizeOf(old);
+      this.size -= this.sizeOf(old);
       this.map.delete(key);
     }
     this.map.set(key, value);
-    this.bytes += this.sizeOf(value);
+    this.size += this.sizeOf(value);
     for (const [k, v] of this.map) {
-      if (this.bytes <= this.maxBytes || this.map.size <= 1) break;
+      if (this.size <= this.maxSize || this.map.size <= 1) break;
       this.map.delete(k);
-      this.bytes -= this.sizeOf(v);
+      this.size -= this.sizeOf(v);
     }
   }
 }
@@ -200,6 +219,11 @@ const elevationCache = new LruCache<DecodedElevation | EmptyTile>(
   (v) => (v instanceof EmptyTile ? 64 : v.data.byteLength),
 );
 const elevationInflight = new Map<string, SharedLoad<DecodedElevation | EmptyTile>>();
+
+/** Key of a decoded raster: it depends on the decoder too, since two layers may share a URL. */
+function elevationKey(decoderType: string, decoderSource: string | undefined, url: string): string {
+  return `${decoderType}:${decoderSource ? hashString(decoderSource) : ''}:${url}`;
+}
 
 /** Encoded drape images (Blobs are immutable, so sharing them is safe). */
 const drapeBlobCache = new LruCache<Blob | EmptyTile>(
@@ -295,10 +319,106 @@ async function loadDecodedElevation(
 }
 
 // ---------------------------------------------------------------------------
+// Region grids (analysis worker)
+// ---------------------------------------------------------------------------
+
+/** An assembled region grid and the coverage it was assembled with. */
+type LoadedRegion = AssembledRegion & {
+  zoom: number;
+  /** Tiles the source doesn't have (nodata). */
+  missing: number;
+  /** Tiles that kept failing (nodata holes). */
+  failed: number;
+};
+
+/**
+ * Assembled grids kept for follow-up analyses, bounded by count (one grid
+ * can be tens of MB). Only grids without failed tiles are kept: a grid with
+ * holes goes to the jobs that waited for it, and the next job loads the
+ * region again (retrying the tiles that failed).
+ */
+const MAX_REGIONS = 2;
+const regionCache = new LruCache<LoadedRegion>(MAX_REGIONS, () => 1);
+
+/** Region loads in flight, shared by every job that needs the same grid (see sharedLoad). */
+const regionInflight = new Map<string, SharedLoad<LoadedRegion>>();
+/** Progress callbacks of the jobs waiting on each in-flight region load (same keys). */
+const regionListeners = new Map<string, Set<RegionProgress>>();
+
+/** Load the tiles of a region and assemble its grid; caches it when no tile failed. */
+async function assembleRegionGrid(spec: RegionSpec, signal: AbortSignal): Promise<LoadedRegion> {
+  const loaded = await loadRegionTiles(spec.tiles, async (ref) => {
+    const cacheKey = elevationKey(spec.decoderType, spec.decoderSource, ref.url);
+    const decoded = elevationCache.get(cacheKey) ?? await sharedLoad(
+      elevationInflight,
+      cacheKey,
+      (s) => loadDecodedElevation(cacheKey, ref.url, spec.decoderType, spec.decoderSource, spec.init, s),
+      signal,
+    );
+    return decoded instanceof EmptyTile ? null : decoded;
+  }, {
+    signal,
+    onTile: (done, total) => {
+      // While this load runs unaborted it owns the key's listeners; once
+      // aborted, a newer load of the same key may own them
+      if (signal.aborted) return;
+      const listeners = regionListeners.get(spec.key);
+      if (listeners) for (const l of listeners) l('loading', done / total);
+    },
+  });
+  const region: LoadedRegion = {
+    ...assembleRegion(spec.window, spec.tiles, loaded.tiles),
+    zoom: spec.zoom,
+    missing: loaded.missing,
+    failed: loaded.failed,
+  };
+  if (region.failed === 0) regionCache.set(spec.key, region);
+  return region;
+}
+
+/**
+ * The grid of a region: cached, or loaded once for every job that needs it
+ * at the same time. Progress reaches each waiting job; the load is aborted
+ * only when all of them are cancelled.
+ */
+async function loadRegion(spec: RegionSpec, signal: AbortSignal, onProgress: RegionProgress): Promise<LoadedRegion> {
+  const cached = regionCache.get(spec.key);
+  if (cached) return cached;
+
+  let listeners = regionListeners.get(spec.key);
+  if (!listeners) {
+    listeners = new Set();
+    regionListeners.set(spec.key, listeners);
+  }
+  const own = listeners;
+  own.add(onProgress);
+  // Runs on cancellation too (synchronously), so a cancelled job hears no more progress
+  const leave = () => {
+    own.delete(onProgress);
+    if (own.size === 0 && regionListeners.get(spec.key) === own) regionListeners.delete(spec.key);
+  };
+  signal.addEventListener('abort', leave, { once: true });
+  try {
+    return await sharedLoad(regionInflight, spec.key, (s) => assembleRegionGrid(spec, s), signal);
+  } finally {
+    signal.removeEventListener('abort', leave);
+    leave();
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
+/**
+ * Names this script. Only the worker uses it, so finding it in a library
+ * bundle shows the worker is inlined there (scripts/check-dist.mjs).
+ */
+const WORKER_ID = 'treelet-tile-worker';
+
 const api = {
+  /** Which worker this is (see WORKER_ID). */
+  id: WORKER_ID,
   /**
    * Fetch, decode and resample one elevation tile into an atlas slot.
    * Resolves `{ status: 'empty' }` for tiles the server reports as missing;
@@ -308,8 +428,7 @@ const api = {
     const controller = new AbortController();
     requestControllers.set(req.id, controller);
     try {
-      // Decoded rasters depend on the decoder too: two layers may share a URL.
-      const cacheKey = `${req.decoderType}:${req.decoderSource ? hashString(req.decoderSource) : ''}:${req.url}`;
+      const cacheKey = elevationKey(req.decoderType, req.decoderSource, req.url);
       let decoded = elevationCache.get(cacheKey);
       if (!decoded) {
         decoded = await sharedLoad(
@@ -328,7 +447,7 @@ const api = {
         (req.region?.h ?? 1) * decoded.h,
       ));
       return Comlink.transfer(
-        { status: 'ok' as const, data: out, min: stats.min, max: stats.max, texelsPerPixel },
+        { status: 'ok' as const, data: out, min: stats.min, max: stats.max, low: stats.low, high: stats.high, texelsPerPixel },
         [out.buffer],
       );
     } finally {
@@ -396,6 +515,73 @@ const api = {
       return Comlink.transfer({ status: 'ok' as const, levels, imageSize }, levels.map((l) => l.buffer as ArrayBuffer));
     } finally {
       requestControllers.delete(req.id);
+    }
+  },
+
+  /**
+   * Load the elevation grid of a region (or reuse it) and run an analysis
+   * on it. Progress is reported per stage; cancel(id) aborts.
+   */
+  async analyzeRegion(req: RegionAnalysisRequest, onProgress?: RegionProgress): Promise<RegionAnalysisResponse> {
+    const controller = new AbortController();
+    requestControllers.set(req.id, controller);
+    // Progress goes to a proxied callback; never let a closed one break the job
+    const report: RegionProgress = (stage, fraction) => {
+      try { void onProgress?.(stage, fraction); } catch { /* released */ }
+    };
+    try {
+      const region = await loadRegion(req.region, controller.signal, report);
+      const cellSize = cellSizeAt(req.centerLat, region.zoom, region.tileSize);
+      const grid: Grid = { data: region.data, width: region.width, height: region.height, cellSize };
+      const outputs: RegionOutputs = {};
+      const stats: RegionStats = {};
+      const progress = (f: number) => report('computing', f);
+      const task = req.task;
+      if (task?.kind === 'viewshed') {
+        const { tileX, tileY, ...rest } = task.options;
+        const T = region.tileSize;
+        const r = await drive(viewshedSteps(grid, { ...rest, x: tileX * T - region.px0, y: tileY * T - region.py0 }), controller.signal, progress);
+        outputs.visible = r.visible;
+        if (r.clearance) outputs.clearance = r.clearance;
+        stats.visibleCells = r.visibleCells;
+        stats.analysedCells = r.analysedCells;
+        stats.observerElevation = r.observerElevation;
+      } else if (task?.kind === 'sunhours') {
+        const r = await drive(sunHoursSteps(grid, task.options), controller.signal, progress);
+        outputs.hours = r.hours;
+        outputs.firstSun = r.firstSun;
+        outputs.lastSun = r.lastSun;
+        stats.daylight = r.daylight;
+      } else if (task?.kind === 'skyview') {
+        outputs.skyview = await drive(skyViewSteps(grid, task.options), controller.signal, progress);
+      } else if (task?.kind === 'tpi') {
+        outputs.tpi = await drive(tpiSteps(grid, task.options), controller.signal, progress);
+      }
+      const response: RegionAnalysisResponse = {
+        width: region.width,
+        height: region.height,
+        tileSize: region.tileSize,
+        zoom: region.zoom,
+        px0: region.px0,
+        py0: region.py0,
+        cellSize,
+        min: region.min,
+        max: region.max,
+        missing: region.missing,
+        failed: region.failed,
+        outputs,
+        stats,
+      };
+      const transfers = Object.values(outputs).filter((a): a is Float32Array => a !== undefined).map((a) => a.buffer as ArrayBuffer);
+      if (req.returnGrid) {
+        response.grid = region.data.slice();
+        transfers.push(response.grid.buffer as ArrayBuffer);
+      }
+      return Comlink.transfer(response, transfers);
+    } finally {
+      requestControllers.delete(req.id);
+      // The progress callback arrived as a proxy with its own port: close it
+      (onProgress as unknown as { [Comlink.releaseProxy]?: () => void } | undefined)?.[Comlink.releaseProxy]?.();
     }
   },
 

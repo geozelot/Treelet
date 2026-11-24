@@ -50,13 +50,46 @@ export interface TreeletOptions {
 }
 
 export interface GuiDisplayOptions {
+  /**
+   * Show the controls (compass, info box, hub). The credits show either way:
+   * at the foot of the info box's column, or as a tag in a bottom corner
+   * when there is no info box. Default true.
+   */
   enabled?: boolean;
+  /** Corner of the compass. Default 'top-right'. */
   compassPosition?: UICorner;
+  /**
+   * Zoom, rotate and tilt buttons beside the compass (hidden on narrow maps,
+   * where gestures do this). Default true.
+   */
+  navigation?: boolean;
+  /**
+   * Corner of the hub: the tree box that opens into the Layers page (the
+   * coat stack and the terrain) and the Measure page. Default 'bottom-right'.
+   */
   layerPosition?: UICorner;
   /**
-   * Frosted-glass compass and layer controls, including the menus that open
-   * from them: translucent, with the map blurred behind. Costs some GPU time
-   * while the map redraws, so it is off by default. Default false.
+   * Corner of the info box that opens into the Legend page (legends of the
+   * visible analyses, the terrain under the pointer) and the Map page (the
+   * view, its center and extent to copy), with the map's credits at its
+   * foot; or `false` for none (the credits then show as a tag in a bottom
+   * corner). Default 'bottom-left'.
+   */
+  infoPosition?: UICorner | false;
+  /**
+   * The terrain under the pointer (elevation, slope, aspect and the value of
+   * the topmost other analysis coat; after a tap on touch screens) on the
+   * info box's Legend page. Default true.
+   */
+  readout?: boolean;
+  /**
+   * The hub's Measure page: distance, area, profile, line of sight and
+   * viewshed, the live result and the elevation profile. Default true.
+   */
+  tools?: boolean;
+  /**
+   * Frosted-glass controls: translucent, with the map blurred behind. Costs
+   * some GPU time while the map redraws, so it is off by default. Default false.
    */
   glass?: boolean;
 }
@@ -75,11 +108,6 @@ export interface MapDisplayOptions {
    * of GPU memory while a drape layer is active. Default 256.
    */
   tileCacheSize?: number;
-  /**
-   * @deprecated Use `tileCacheSize`. Holds `(atlasSize / slotSize)²` tiles,
-   * so the former default 4096 equals `tileCacheSize: 256`.
-   */
-  atlasSize?: number;
   /** Elevation tile slot resolution in pixels (power-of-two). Default 256. */
   slotSize?: number;
   /**
@@ -124,39 +152,69 @@ export interface ResolvedTreeletOptions {
   minZoom: number;
   maxZoom: number;
   guiDisplay: Required<GuiDisplayOptions>;
-  mapDisplay: Required<Omit<MapDisplayOptions, 'atlasSize'>>;
+  mapDisplay: Required<MapDisplayOptions>;
   workerCount: number;
   workerUrl: string | URL | null;
 }
 
 // === Enums / Unions ===
 
-/** Virtual BaseDrape visualization mode derived from the base layer's elevation data. */
-export type BaseDrapeMode = 'wireframe' | 'elevation' | 'slope' | 'aspect' | 'contours';
+export type { ColorRamp } from '../analysis/types';
 
-/** Internal shader mode index type (not user-facing). */
-export type ShaderMode = 'base' | 'elevation' | 'slope' | 'aspect' | 'texture';
-
-/** Color ramp for elevation-based visualizations. `cyclic` suits circular data such as aspect. */
-export type ColorRamp = 'hypsometric' | 'viridis' | 'inferno' | 'grayscale' | 'cyclic';
-
-export type BlendMode = 'normal' | 'hillshade' | 'softlight';
+/** How a coat (imagery or analysis) combines with the coats below it. */
+export type { CoatBlendMode as BlendMode } from '../analysis/types';
 
 /** Corner position for UI components. */
 export type UICorner = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right';
 
 // === Events ===
 
+/** Events of a map (`map.on(name, handler)`) and their data. */
 export interface TreeletEventMap {
+  /** The fractional zoom changed. */
   zoom: { zoom: number };
+  /** The camera moved (at most once per frame). */
   move: { center: LngLat };
+  /** A camera movement settled (debounced). */
   moveend: { center: LngLat; zoom: number };
+  /** An elevation tile loaded, or was evicted from the cache. */
   tileload: { coord: TileCoord };
   tileunload: { coord: TileCoord };
+  /** A tile request failed (it is retried with backoff). */
   tileerror: { coord: TileCoord; layer: 'elevation' | 'drape'; error: string };
+  /** A layer of any kind was added or removed. */
   layeradd: { id: string };
   layerremove: { id: string };
+  /**
+   * The layers changed: added, removed, shown, hidden or reordered, the
+   * active base or drape layer, or an overlay's data.
+   */
   layerchange: Record<string, never>;
+  /**
+   * A layer's values changed: analysis parameters or ramp, opacity, blend
+   * mode, a base layer's exaggeration, or an overlay's style. Fires often
+   * while a slider is dragged or an animation runs; the layers themselves
+   * are unchanged.
+   */
+  layerupdate: { id: string };
+  /** The mesh's look changed: wireframe on or off, colored or white. */
+  meshchange: { wireframe: boolean; white: boolean };
+  /** The visible elevation range (used by 'auto' ramp domains) changed. */
+  rangechange: { min: number; max: number };
+  /** A region analysis (viewshed, sun hours…) started, progressed or ended. */
+  analysisstart: { id: string; kind: string; label: string };
+  analysisprogress: { id: string; kind: string; label: string; stage: 'loading' | 'computing'; progress: number };
+  analysisend: { id: string; kind: string; label: string; status: 'done' | 'cancelled' | 'error'; error?: string };
+  /** The sun moved (sun time, map center or manual direction). */
+  sunchange: { azimuth: number; altitude: number; time: Date | null };
+  /** pickLocation() is waiting for a click on the terrain (prompt), or stopped waiting. */
+  pickstart: { prompt: string };
+  pickend: Record<string, never>;
+  /** A measuring tool started, finished drawing or stopped. */
+  toolchange: { mode: 'distance' | 'area' | 'profile' | 'sight' | null; drawing: boolean };
+  /** A tool's result changed (`final` once drawing ends; `result` null when it was cleared). */
+  measure: { mode: 'distance' | 'area' | 'profile' | 'sight' | null; final: boolean; result: import('../tools/ToolController').ToolResult | null };
+  /** The map started (after `start()`). */
   ready: Record<string, never>;
 }
 
@@ -169,11 +227,23 @@ export interface VisibleExtent {
 
 // === Inspection ===
 
-/** Result of a terrain pick at a screen position. */
-export interface TerrainPick {
-  lngLat: LngLat;
-  /** Elevation in meters (unexaggerated). */
+/** The terrain surface at a point, from the finest loaded tile (true scale, unexaggerated). */
+export interface TerrainSample {
+  /** Elevation in meters. */
   elevation: number;
+  /** Slope angle in degrees. */
+  slope: number;
+  /** Downslope bearing in degrees clockwise from north, or null on flat ground. */
+  aspect: number | null;
+  /** Total curvature in 1/km (positive convex, negative concave) at the loaded tile's resolution. */
+  curvature: number;
+  /** Unit normal (x east, y north, z up). */
+  normal: [number, number, number];
+}
+
+/** Result of a terrain pick at a screen position. */
+export interface TerrainPick extends TerrainSample {
+  lngLat: LngLat;
 }
 
 /** One sample of an elevation profile. */
@@ -185,11 +255,35 @@ export interface ProfileSample {
   elevation: number | null;
 }
 
+/** Result of `lineOfSight(from, to)`. */
+export interface LineOfSightResult {
+  visible: boolean;
+  /** Geodesic distance between the ends in meters. */
+  distance: number;
+  /** Smallest gap between the sight line and the terrain in meters (negative where blocked). */
+  clearance: number;
+  /** Observer eye and target elevations in meters. */
+  eyeElevation: number;
+  targetElevation: number;
+  /** The first point where terrain rises above the sight line, or null. */
+  obstruction: { lngLat: LngLat; distance: number; elevation: number } | null;
+  /** The terrain profile with the sight line's height (`sight`, meters) at each sample. */
+  profile: Array<ProfileSample & { sight: number }>;
+}
+
 /** Runtime statistics for monitoring and debugging. */
 export interface TreeletStats {
   /** Tile instances drawn in the last frame. */
   tiles: number;
   drawCalls: number;
+  /** Coats drawn (at most 6), raster coats bound (at most 4), overlay layers. */
+  coats: number;
+  rasters: number;
+  overlays: number;
+  /** Whether a shadow map is kept (a shadows coat is visible). */
+  shadows: boolean;
+  /** Smoothed CPU time per rendered frame in milliseconds (update + draw calls). */
+  frameTime: number;
   /** Elevation slots in use / total. */
   atlasUsed: number;
   atlasCapacity: number;

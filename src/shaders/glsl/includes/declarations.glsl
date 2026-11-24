@@ -5,6 +5,10 @@ precision highp float;
 precision highp int;
 precision highp sampler2DArray;
 
+// MAX_COATS, MAX_RASTERS, IMAGERY_KIND, the BLEND_* codes,
+// RASTER_NODATA_THRESHOLD and SHADOW_NIGHT_SUN_Z are generated from their
+// TypeScript sources (shaderConstants() in TerrainMaterial.ts).
+
 // ==== Varyings from vertex shader ====
 in vec2 vTileUV;
 in float vMorph;
@@ -14,6 +18,7 @@ flat in vec4 vElev;
 flat in vec4 vParent;
 flat in vec4 vDrape;
 in vec3 vCamVec;
+in vec2 vWorldLocal;
 
 // ==== Distance haze (sRGB color; camera distances where it starts / is opaque) ====
 uniform vec3 uFogColor;
@@ -22,40 +27,37 @@ uniform vec2 uFogRange;
 // ==== Elevation ====
 uniform float uElevationScale;
 
-// ==== Shader mode: 0=base, 1=elevation, 2=slope, 3=aspect, 4=texture ====
-uniform int uMode;
-
-// ==== Color ramp: 0=hypsometric, 1=viridis, 2=inferno, 3=grayscale, 4=cyclic ====
-uniform int uColorRamp;
-
-// ==== Elevation range (meters) ====
-uniform float uMinElevation;
-uniform float uMaxElevation;
-
-// ==== Slope range (degrees) ====
-uniform float uSlopeMin;
-uniform float uSlopeMax;
-
-// ==== Lighting ====
+// ==== Lighting (unit vector toward the sun; x east, y north, z up) ====
 uniform vec3 uSunDirection;
 
-// ==== Wireframe: base mode renders flat white instead of normals ====
+// ==== Wireframe: render flat white instead of the coats ====
 uniform bool uBaseWhite;
 
-// ==== Isoline overlay ====
-uniform bool uIsolineEnabled;
-uniform float uIsolineInterval;
-uniform float uIsolineThickness;
-uniform vec3 uIsolineColor;
+// ==== Coat stack (bottom first): kind 0 = imagery, others = registered analyses ====
+uniform int uCoatCount;
+uniform int uCoatKind[MAX_COATS];
+uniform int uCoatBlend[MAX_COATS];      // BLEND_NORMAL, BLEND_MULTIPLY, BLEND_SCREEN, BLEND_SOFTLIGHT
+uniform float uCoatOpacity[MAX_COATS];
+uniform float uCoatRamp[MAX_COATS];     // ramp texture row, or -1 for color kinds
+uniform vec4 uCoatP0[MAX_COATS];
+uniform vec4 uCoatP1[MAX_COATS];
+uniform int uCoatRaster[MAX_COATS];     // raster slot the coat draws, or -1
+
+// ==== Rasters (value grids or color images) sampled by world position ====
+// Value rasters are R32F (nodata below RASTER_NODATA_THRESHOLD), sampled with
+// texelFetch and a nodata-aware bilinear filter; color rasters are RGBA8 with
+// premultiplied alpha. One sampler per slot, uRaster0 … uRaster<MAX_RASTERS-1>:
+// @RASTER_SAMPLERS
+uniform vec4 uRasterXform[MAX_RASTERS]; // NW corner relative to the render origin (xy), texels per world unit (zw)
+uniform vec4 uRasterInfo[MAX_RASTERS];  // width, height, color (1) or value (0), unused
+
+// ==== Ramp texture: one RGBA row per coat (sRGB, nearest-filtered) ====
+uniform sampler2D uRampTex;
+uniform vec2 uRampSize;
 
 // ==== Drape texture array (sRGB, mipmapped) ====
 uniform sampler2DArray uDrapeAtlas;
-uniform float uDrapeOpacity;
 uniform int uHasDrape;
-
-// ==== Drape blend mode: 0=normal, 1=hillshade, 2=softlight ====
-uniform int uDrapeBlendMode;
-uniform float uHillshadeStrength;
 
 // ==== Drape placeholder color (theme-aware, sRGB) ====
 uniform vec3 uDrapePlaceholder;

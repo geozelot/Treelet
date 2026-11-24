@@ -175,7 +175,7 @@ describe('BaseLayer attribution', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Display + terrainDisplay defaults
+// Display defaults
 // ---------------------------------------------------------------------------
 
 describe('BaseLayer display defaults', () => {
@@ -198,36 +198,6 @@ describe('BaseLayer display defaults', () => {
     expect(layer.display.exaggeration).toBe(2.5);
     expect(layer.display.visible).toBe(false);
     expect(layer.visible).toBe(false);
-  });
-
-  it('resolves the terrainDisplay defaults', () => {
-    const layer = new BaseLayer({
-      layerName: 'Test',
-      layerSource: makeMockSource(),
-    });
-    expect(layer.terrainDisplay.isoplethInterval).toBe(100);
-    expect(layer.terrainDisplay.isolineStrength).toBe(1.5);
-    expect(layer.terrainDisplay.isolineColor).toEqual([0.12, 0.08, 0.04]);
-    expect(layer.terrainDisplay.rampInterpolationRange).toEqual([0, 4000]);
-    expect(layer.terrainDisplay.rampDefaultElevation).toBe('hypsometric');
-    expect(layer.terrainDisplay.rampDefaultSlope).toBe('viridis');
-    expect(layer.terrainDisplay.rampDefaultAspect).toBe('cyclic');
-  });
-
-  it('overrides selected terrainDisplay fields while keeping the rest at defaults', () => {
-    const layer = new BaseLayer({
-      layerName: 'Test',
-      layerSource: makeMockSource(),
-      terrainDisplay: {
-        isoplethInterval: 50,
-        rampInterpolationRange: 'auto',
-      },
-    });
-    expect(layer.terrainDisplay.isoplethInterval).toBe(50);
-    expect(layer.terrainDisplay.rampInterpolationRange).toBe('auto');
-    // Unspecified fields still use defaults
-    expect(layer.terrainDisplay.isolineStrength).toBe(1.5);
-    expect(layer.terrainDisplay.rampDefaultElevation).toBe('hypsometric');
   });
 });
 

@@ -61,24 +61,6 @@ function isPowerOfTwo(n: number): boolean {
   return Number.isInteger(n) && n > 0 && (n & (n - 1)) === 0;
 }
 
-/**
- * Tile capacity of the deprecated `atlasSize` option: an atlasSize² texture
- * cut into slotSize² slots.
- */
-export function tilesForAtlasSize(atlasSize: number, slotSize: number): number {
-  const hint = `atlasSize is deprecated: set mapDisplay.tileCacheSize (number of tiles, default ${DEFAULT_TILE_CACHE_SIZE}) instead`;
-  if (!isPowerOfTwo(atlasSize) || atlasSize < slotSize) {
-    throw new Error(`treelet: atlasSize must be a power-of-two >= slotSize (${slotSize}), got ${atlasSize}. ${hint}`);
-  }
-  const tiles = (atlasSize / slotSize) ** 2;
-  if (tiles < MIN_TILE_CACHE_SIZE || tiles > MAX_TILE_CACHE_SIZE) {
-    throw new Error(
-      `treelet: atlasSize ${atlasSize} with slotSize ${slotSize} holds ${tiles} tiles; ` +
-      `${MIN_TILE_CACHE_SIZE}–${MAX_TILE_CACHE_SIZE} are supported. ${hint}`,
-    );
-  }
-  return tiles;
-}
 
 /**
  * Validate tile cache and geometry parameters.
@@ -120,6 +102,9 @@ function defaultWorkerCount(): number {
   return Math.max(1, Math.min(4, cores - 1));
 }
 
+/** Below this map width (CSS px) the controls are compact: full-width columns, one open at a time. */
+export const COMPACT_WIDTH = 600;
+
 /** Default options with all fields resolved. */
 export const DEFAULT_OPTIONS: ResolvedTreeletOptions = {
   initCenter: { lng: 0, lat: 0 },
@@ -129,7 +114,11 @@ export const DEFAULT_OPTIONS: ResolvedTreeletOptions = {
   guiDisplay: {
     enabled: true,
     compassPosition: 'top-right',
+    navigation: true,
     layerPosition: 'bottom-right',
+    infoPosition: 'bottom-left',
+    readout: true,
+    tools: true,
     glass: false,
   },
   mapDisplay: {

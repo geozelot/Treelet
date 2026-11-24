@@ -68,6 +68,12 @@ export class TreeletToolbar extends BaseElement {
   private statusKey = '';
   private subscribed = false;
   private readonly refresh = (): void => this.renderStatus();
+  /** The pending pick is the viewshed's, started here (not the app's). */
+  private ownPick = false;
+  private readonly onPickEnd = (): void => {
+    this.ownPick = false;
+    this.renderStatus();
+  };
   private readonly onMeasure = (e: { result: ToolResult | null; final?: boolean }): void => {
     this.result = e.result;
     this.renderStatus();
@@ -123,7 +129,7 @@ export class TreeletToolbar extends BaseElement {
     map.on('toolchange', this.refresh);
     map.on('measure', this.onMeasure);
     map.on('pickstart', this.refresh);
-    map.on('pickend', this.refresh);
+    map.on('pickend', this.onPickEnd);
   }
 
   private unsubscribe(): void {
@@ -133,7 +139,7 @@ export class TreeletToolbar extends BaseElement {
     map.off('toolchange', this.refresh);
     map.off('measure', this.onMeasure);
     map.off('pickstart', this.refresh);
-    map.off('pickend', this.refresh);
+    map.off('pickend', this.onPickEnd);
   }
 
   private onClick = (e: Event): void => {
@@ -146,9 +152,12 @@ export class TreeletToolbar extends BaseElement {
       e.stopPropagation();
       const current = map.getTool().mode;
       if (tool === 'viewshed') {
-        // A second press while waiting for the observer cancels (picking stops any tool)
-        if (map.isPicking()) { map.cancelPick(); return; }
+        // A second press while waiting for the observer cancels (picking stops any tool);
+        // another pick (the app's) is replaced by the viewshed's
+        if (map.isPicking() && this.ownPick) { map.cancelPick(); return; }
         runRegionAnalysis(map, 'viewshed');
+        this.ownPick = map.isPicking();
+        this.renderStatus();
       } else if (current === tool) {
         map.clearTool();
       } else {
@@ -171,7 +180,7 @@ export class TreeletToolbar extends BaseElement {
     const t = this.map.getTool();
     const picking = this.map.isPicking();
     this.shadow.querySelectorAll<HTMLElement>('.tool').forEach((b) => {
-      const on = b.dataset.tool === t.mode || (b.dataset.tool === 'viewshed' && picking);
+      const on = b.dataset.tool === t.mode || (b.dataset.tool === 'viewshed' && picking && this.ownPick);
       b.setAttribute('aria-pressed', String(on));
     });
     if (!t.mode) {

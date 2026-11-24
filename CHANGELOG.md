@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.0
+## 1.0.0 - 2026-11-24
 
 The API is frozen for 1.x: methods, options, events and types reachable from the package entry are public (see the [API reference](https://geozelot.github.io/Treelet/api/)); everything else may change in minor releases. Upgrading from 0.3? See [Migrating from 0.3](#migrating-from-03) below.
 
@@ -12,7 +12,7 @@ The API is frozen for 1.x: methods, options, events and types reachable from the
   - `BaseLayerOptions.terrainDisplay` → the parameters of the analysis layers.
   - `DrapeLayerOptions.layerDisplay.blendMode: 'hillshade'` and `hillshadeStrength`, `setDrapeBlendMode`, `setHillshadeStrength` → a `'hillshade'` analysis coat (every new map has one; its opacity is the strength). Drape `blendMode` now takes the coat blend modes (default `'normal'`); `'hillshade'` and other unknown modes are reported and drawn as `'normal'`. `'softlight'` now blends the imagery over the coats below it (in 0.3 it blended the terrain's light into the imagery).
   - An active drape outside its `minZoom` / `maxZoom` shows the coats below it (0.3 fell back to the elevation ramp).
-  - `getActiveDrapeId()` returns the drape id or `null` (never `'__base_drape__'`); `isBaseDrapeActive()`, `getBaseDrapeMode()`, `BASE_DRAPE_ID`, `BaseDrapeMode` and `ShaderMode` are removed.
+  - `getActiveDrapeId()` returns the drape id or `null` (never `'__base_drape__'`); `isBaseDrapeActive()`, `getBaseDrapeMode()`, `getDrapeBlendMode()`, `getHillshadeStrength()`, `BASE_DRAPE_ID` and the types `BaseDrapeMode`, `ShaderMode` and `TerrainDisplay` are removed.
   - The deprecated `DrapeLayerOptions.lodOffset` is removed.
 - The deprecated `mapDisplay.atlasSize` is removed (it is ignored with a warning); set `mapDisplay.tileCacheSize`, a tile count.
 - `setDrapeOpacity` / `getDrapeOpacity` are removed: `setLayerOpacity` / `getLayerOpacity` take any layer (an inactive drape keeps its opacity and blend mode for when it is shown).
@@ -20,7 +20,7 @@ The API is frozen for 1.x: methods, options, events and types reachable from the
 - A new map starts with a hillshade coat over neutral gray instead of the elevation ramp; add `addAnalysisLayer({ analysis: 'elevation' })` for the 0.3 look.
 - **New controls.** Every control follows one grid (rows of 24, 2 apart; the selected choice is a fill plus a 2px accent line; values are scrub rows):
   - The compass is a reset-orientation box with optional navigation wings (zoom, rotate, tilt; `guiDisplay.navigation`). Its slide-out panel is gone: the view and the center / extent copy moved to the info box's Map page.
-  - The tree (`<treelet-hub>`, `guiDisplay.layerPosition`) opens into a column with the **Layers** page (the coat stack, top first, each coat on its own page with its settings rendered from the parameter schema, order and removal; *Add layer* for analyses and imagery; running region analyses; the terrain's source, exaggeration, light and mesh), the **Themes** page (while the map has themes) and the **Measure** page (the tools, their result, the elevation profile).
+  - The tree (`<treelet-hub>`, `guiDisplay.layerPosition`) opens into a column with the **Layers** page (running region analyses; the coat stack, top first, each coat on its own page with its settings rendered from the parameter schema, order and removal; *Add layer* for analyses and imagery; the terrain's source, exaggeration, light and mesh) and the **Measure** page (the tools, their result, the elevation profile).
   - The info box (`<treelet-info>`, `guiDisplay.infoPosition`) opens into a column with the **Legend** page (legends, the terrain under the pointer) and the **Map** page, with the map's credits at its foot.
   - On maps narrower than 600 px the columns span the width and one is open at a time.
   - `TreeletCompass.attach` takes `{ compassPosition, navigation, glass }`; its `panel` and `updateTileCount` are gone. `TreeletPanel.attach(map, { glass })` (no longer `vPos`, `hPos`). `TreeletAttribution.attach(map, side?, options?)`: without a side it is a row for a column's footer.
@@ -29,12 +29,12 @@ The API is frozen for 1.x: methods, options, events and types reachable from the
 
 - Analysis layers: `addAnalysisLayer`, `removeAnalysisLayer`, `setAnalysisParams`, `setAnalysisRamp`, `getLegend`, `getLegends`; stack control with `getLayerStack`, `moveLayer`, `setLayerVisible`, `setLayerOpacity`, `setLayerBlendMode`; `deactivateDrapeLayer`.
 - Color ramps as data: built-in names (plus `'diverging'`) or custom `{ stops }` / `{ breaks, colors }` classes, usable on every value analysis (e.g. avalanche slope classes). Ramps live in a texture row per coat, so legends, panel previews and the shader always agree.
-- `<treelet-legend>`: ramp bars with their range, or class swatches, for the visible analyses (on the info box's Legend page).
+- `<treelet-legend>`: ramp bars with their range, or class swatches, for the analyses drawn (on the info box's Legend page); `getLegends()` leaves out coats outside their zoom range or at opacity 0.
 - `registerAnalysis(descriptor)`: a custom analysis is a GLSL snippet plus a parameter schema; the panel renders its settings.
 - Contours: index lines (every Nth line bolder).
 - `'rangechange'` event when the visible elevation range used by `'auto'` ramps changes; a descriptor's `domain(params, visible)` is evaluated again as it changes, so any range derived from the visible one follows the view.
 - The visible elevation range (`getVisibleElevationRange()`, `'auto'` ramps, new water levels, the shadow map's reach) uses each tile's range without its few most extreme texels, so isolated spikes in the source data (as in some AWS Terrarium tiles) don't stretch it.
-- `'layerupdate'` event (`{ id }`) when a layer's values change (analysis parameters or ramp, opacity, blend mode, an overlay's style); `'layerchange'` stays for layers added, removed, shown, hidden or reordered. The layer panel updates values in place, so a dragged slider keeps working.
+- `'layerupdate'` event (`{ id }`) when a layer's values change (analysis parameters or ramp, opacity, blend mode, a base layer's exaggeration, an overlay's style), and `'meshchange'` (`{ wireframe, white }`) for the wireframe; `'layerchange'` stays for layers added, removed, shown, hidden or reordered. The layer panel updates values in place, so a dragged slider keeps working.
 - Parameter `limits`: values set from code are clamped to them (with a warning), not to the panel's slider range, so e.g. a 5 m contour interval or a bathymetric elevation range works as in 0.3; the panel's sliders widen to show such values. `registerAnalysis` checks the descriptor's ramp and blend mode.
 - `getAnalysisValue(handle, lngLat)`: the value a coat colors at a position (from the descriptor's `cpu` twin, or the raster); the readout shows it for the topmost analysis coat besides elevation, slope and aspect.
 - Slope: `aspectMask: [from, to]` draws only slopes facing a compass sector (through north with `[315, 45]`); built-in class presets `'avalanche'` (nothing below 30°, then 30–35–40–45° in the usual avalanche-map colors) and `'aspect8'` (eight compass sectors). Ramp colors may carry alpha: a class with alpha 0 draws nothing and is left out of the legend.
@@ -42,7 +42,7 @@ The API is frozen for 1.x: methods, options, events and types reachable from the
 - `'curvature'` analysis (`mode: 'profile' | 'plan' | 'total'`, 1/km, convex positive) on a diverging ramp. The surface the shader and the CPU see now includes the true-scale gradient and second derivatives (`s.g`, `s.c`), computed at the rendered tile's resolution.
 - Cursor readout: `<treelet-readout>` (on the info box's Legend page; `guiDisplay.readout`) shows elevation, slope and aspect under the mouse (after a tap on touch screens). `pick(x, y)` returns `slope`, `aspect`, `curvature` and `normal` along with the elevation; `sampleTerrain(lngLat)` gives the same for a position; `getVisibleElevationRange()` the elevation range on screen.
 - `getStats().frameTime` is the smoothed CPU time per rendered frame.
-- Region analyses in a dedicated worker: `computeViewshed(observer, options)` (eye and target height, radius, field of view, Earth curvature with refraction k = 0.13, optional vertical clearance), `computeSunHours({ date })` (terrain shadows swept along the sun's azimuth every few minutes; hours plus first and last sun), `computeSkyView()` (exact horizons over the whole region, or up to a radius) and `computeTpi({ radius, innerRadius })`. Each loads the elevation tiles of a region at the finest zoom within a tile budget (`maxTiles`, default 64), assembles them into one grid in the worker, and shows the result as a coat with a legend. Jobs report progress (`analysisstart` / `analysisprogress` / `analysisend` events, `getAnalysisJobs()`), can be cancelled (`cancelAnalysis(id)`, an `AbortSignal`), and appear in the hub's column (`<treelet-jobs>`: in the Layers page's Overlay group, at the foot of the other pages) with a progress bar and a cancel button, as do a pending pick's prompt and failures (the tree box at rest shows a progress line). `getElevationGrid()` returns a region's elevations.
+- Region analyses in a dedicated worker: `computeViewshed(observer, options)` (eye and target height, radius, field of view, Earth curvature with refraction k = 0.13, optional vertical clearance), `computeSunHours({ date })` (terrain shadows swept along the sun's azimuth every few minutes; hours plus first and last sun), `computeSkyView()` (exact horizons over the whole region, or up to a radius) and `computeTpi({ radius, innerRadius })`. Each loads the elevation tiles of a region at the finest zoom within a tile budget (`maxTiles`, default 64), assembles them into one grid in the worker, and shows the result as a coat with a legend. Jobs report progress (`analysisstart` / `analysisprogress` / `analysisend` events, `getAnalysisJobs()`), can be cancelled (`cancelAnalysis(id)`, an `AbortSignal`), and appear in the hub's column (`<treelet-jobs>`: in the Layers page's Overlay group, at the foot of the Measure page, beside the tree box while it is closed) with a progress bar and a cancel button, as do a pending pick's prompt and failures (the tree box at rest shows a progress line). A run that can't start (no base layer, no terrain in view, no raster slot left) is reported as a job that ends at once with `'error'`. `getElevationGrid()` returns a region's elevations.
 - Raster coats: `addRasterLayer({ data, width, height, bounds, crs? })` draws your own value grids (ramp, legend, nodata) or RGBA images; up to 4 at once. `getRasterInfo`, `getRasterValue`. EPSG:4326 grids are resampled to Mercator rows once.
 - Sun position from a date: `setSunTime(date)` places the sun (NOAA solar position) over the map center and keeps it there as the map moves; `getSunPosition(date?, lngLat?)`. The *Light* page (the hub's Layers page) switches between a manual sun and a day and time.
 - *Add layer* on the Layers page (and the viewshed tool) runs the region analyses over the view (the viewshed asks for a click on the observer; `REGION_ANALYSIS_INPUT` says which kinds need a point); a new run replaces the previous result in its place in the stack (and a run of the kind still going). `pickLocation()` waits for a click on the terrain (and stops a measuring tool); Escape cancels it.
@@ -52,12 +52,12 @@ The API is frozen for 1.x: methods, options, events and types reachable from the
 - Tools on the map: `startTool('distance' | 'area' | 'profile' | 'sight')` with click / drag / double-click / Enter / Backspace / Escape and long press on touch; `'measure'` and `'toolchange'` events; `finishTool`, `clearTool`, `getTool`.
 - Elevation profile (`<treelet-profile>`, `showProfile(path | lineOfSight)`) on the hub's Measure page: SVG chart, hover marks the point on the terrain, statistics, CSV and PNG export. The profile of the measuring tool's own result leaves out the statistics the tool shows above it, and closes when that result is cleared or drawn anew.
 - Measuring tools on the hub's Measure page (`<treelet-toolbar>`, `guiDisplay.tools`): distance, area, profile, line of sight and viewshed, with the live result and Profile / Finish / Clear.
-- Themes: `setThemes([{ id, name, description?, apply(map), clear?(map) }])`, `applyTheme(id | null)`, `getThemes()`, `getActiveTheme()` and the `'themechange'` event. A theme is a named setup of imagery, coats and view; `clear` takes it down before the next one is applied. The hub's Themes page lists them (the demo's presets moved there).
 - Hillshade `mode: 'multi'`: four lights around the sun azimuth, each weighted by cos² of the angle between its azimuth and the slope's aspect (multidirectional oblique weighting, Mark 1992), so ridges and valleys running toward the sun keep their relief.
 - `'shadows'` analysis: terrain-cast shadows from a 2048² shadow map of the terrain seen from the sun (same vertex program as the terrain, so morphing and exaggeration match), fitted with a margin around the visible terrain, snapped to texels, 3 × 3 filtered, faded at its edge, redrawn only when the sun moves, the view leaves the fitted area or finer terrain loads (at most every 150 ms). Combined with `setSunTime`, shows the shadows of a given moment.
 - One way to handle any layer: `removeLayer(handle)` removes a base, drape, analysis, raster or overlay layer; `setLayerVisible` / `setLayerOpacity` also take overlays (and `setLayerVisible(base, true)` activates a base layer).
 - `getStats()` reports `coats`, `rasters`, `overlays` and `shadows` as well.
 - API reference generated with TypeDoc (`npm run docs:api`), published with the demo; CI checks that every type the public API references is exported and that the library's GLSL parses (with undeclared names as errors).
+- Also new: `computeAnalysis(kind, options)` with `getRegionAnalyses()` and `REGION_ANALYSES`; `cancelPick()`, `isPicking()`, `getContainer()`; the getters `getAnalysisParams`, `getAnalysisRamp`, `getLayerBlendMode`, `getSunTime`, `getWireframe`, `getWireframeWhite`, `getOverlayLayers`; `hideProfile()`. The elements `TreeletHub`, `TreeletInfo` and `TreeletJobs` are exported with the others, and the low-level helpers of the analyses (`sampleSurfaceGrid`, the built-ins' CPU functions, `BUILTIN_RAMP_NAMES`, `rampNamesFor`, `cssColor`, `getDecoder`) are listed in the README's Low-level API.
 
 ### Fixed
 
@@ -107,15 +107,16 @@ map.setLayerOpacity(map.getAnalysisLayers().find((l) => l.descriptor.id === 'hil
 | `setBaseDrapeMode(mode)`, `activateBaseDrape()` | `addAnalysisLayer({ analysis: mode })` (`'wireframe'` is `setWireframe(true)`) |
 | `getBaseDrapeMode()`, `isBaseDrapeActive()` | `getLayerStack()`, `getAnalysisLayers()` |
 | `setColorRamp(ramp)` | `setAnalysisRamp(handle, ramp)` on the coat |
-| `setElevationRange(min, max)`, `setSlopeRange(min, max)` | `setAnalysisParams(handle, { range: [min, max] })` (clamped to the parameter's limits, not the slider range) |
+| `setElevationRange(range)`, `setSlopeRange(min, max)` | `setAnalysisParams(handle, { range: [min, max] })` (`'auto'` for elevation; clamped to the parameter's limits, not the slider range) |
 | `setIsolineInterval / Thickness / Color` | `setAnalysisParams(handle, { interval / thickness / color })` |
-| `BaseLayerOptions.terrainDisplay` | the analysis layers' `params` |
-| `DrapeLayerOptions.layerDisplay.blendMode: 'hillshade'`, `hillshadeStrength`, `setDrapeBlendMode`, `setHillshadeStrength` | the `'hillshade'` coat (its opacity is the strength); drapes blend with `'normal' \| 'multiply' \| 'screen' \| 'softlight'` |
+| `BaseLayerOptions.terrainDisplay` | the analysis layers' `params` and `ramp` |
+| `DrapeLayerOptions.layerDisplay.blendMode: 'hillshade'`, `hillshadeStrength`, `setHillshadeStrength`, `getHillshadeStrength` | the `'hillshade'` coat (its opacity is the strength: `setLayerOpacity` / `getLayerOpacity`); drapes blend with `'normal' \| 'multiply' \| 'screen' \| 'softlight'` |
+| `setDrapeBlendMode(mode)`, `getDrapeBlendMode()` | `setLayerBlendMode(handle, mode)`, `getLayerBlendMode(handle)` |
 | `getActiveDrapeId() === '__base_drape__'`, `BASE_DRAPE_ID` | `getActiveDrapeId() === null` |
 | `setDrapeOpacity`, `getDrapeOpacity` | `setLayerOpacity`, `getLayerOpacity` |
 | `mapDisplay.atlasSize` | `mapDisplay.tileCacheSize` (tiles; the old default 4096 = 256 tiles) |
 | `DrapeLayerOptions.lodOffset` | `mapDisplay.drapeSlotSize` |
-| `BaseDrapeMode`, `ShaderMode` types | `ColorRamp`, `Ramp`, analysis kinds as strings |
+| `BaseDrapeMode`, `ShaderMode`, `TerrainDisplay` types | `ColorRamp`, `Ramp`, analysis kinds as strings, `AnalysisLayerOptions` |
 
 A new map shows shaded relief over neutral gray; add `addAnalysisLayer({ analysis: 'elevation' })` for the 0.3 default look.
 

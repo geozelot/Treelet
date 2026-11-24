@@ -106,12 +106,17 @@ export interface FetchChannelOptions {
 }
 
 
+/**
+ * Request ids, unique across channels: the elevation and the drape channel
+ * share the worker pool, which routes (and cancels) requests by id.
+ */
+let nextRequestId = 1;
+
 /** One tile pipeline's in-flight set, concurrency accounting and backoff. */
 export class FetchChannel {
   readonly failures = new FailureTracker();
   private readonly inFlight = new Map<number, InFlight>();
   private inFlightWeight = 0;
-  private nextId = 1;
   private readonly now: () => number;
 
   constructor(private readonly options: FetchChannelOptions) {
@@ -154,7 +159,7 @@ export class FetchChannel {
     weight = 1,
   ): void {
     if (this.inFlight.has(key)) return;
-    const id = this.nextId++;
+    const id = nextRequestId++;
     const entry: InFlight = { id, weight, lastNeeded: this.now(), cancel: () => cancel(id) };
     this.inFlight.set(key, entry);
     this.inFlightWeight += weight;

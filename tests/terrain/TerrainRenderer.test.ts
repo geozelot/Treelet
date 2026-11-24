@@ -32,7 +32,7 @@ interface Internals {
   material: { uniforms: Record<string, { value: unknown }> };
 }
 
-function setup() {
+function setup(loadElevation: (req: { url: string }) => Promise<unknown> = () => new Promise(() => {})) {
   const gl = { MAX_ARRAY_TEXTURE_LAYERS: 1, getParameter: () => 2048, isContextLost: () => true };
   const renderer = { getContext: () => gl, capabilities: { maxTextureSize: 4096, getMaxAnisotropy: () => 1 } };
   const requested: Array<{ z: number; x: number; y: number }> = [];
@@ -47,7 +47,7 @@ function setup() {
     getOverzoomRegion: () => null,
   };
   // Requests never complete: the tests write tiles into the atlas themselves
-  const workerPool = { loadElevation: vi.fn(() => new Promise(() => {})), cancel: vi.fn() };
+  const workerPool = { loadElevation: vi.fn(loadElevation), cancel: vi.fn() };
   const tr = new TerrainRenderer({
     tileGrid: new TileGrid(W),
     workerPool,
@@ -64,7 +64,7 @@ function setup() {
     morphWidth: 0.25,
     requestRender: () => {},
   } as never);
-  return { tr, internals: tr as unknown as Internals, requested };
+  return { tr, internals: tr as unknown as Internals, requested, base };
 }
 
 /** Looking straight down from 8 world units above (100, 50); every tile passes the side planes. */
@@ -118,6 +118,35 @@ describe('TerrainRenderer while tiles load', () => {
     // The nearest tile's region comes first: three levels above the finest tile under the camera
     const [fx, fy] = tileAt(finest - 3, 100, 50);
     expect(requested[0]).toEqual({ z: finest - 3, x: fx, y: fy });
+    tr.dispose();
+  });
+
+  it("a fill-in the source doesn't have leaves the ancestor's real heights in place", async () => {
+    // Every request answers 'empty' (a sparse pyramid: the intermediate level is missing)
+    const { tr, internals } = setup(async () => ({ status: 'empty' }));
+    const [ax, ay] = tileAt(8, 100, 50);
+    internals.atlas.write(8, ax, ay, flat(1000), 1000, 1000);
+    const ancestor = internals.atlas.get(packTileKey(8, ax, ay))!.layer;
+    tr.update(view());
+    const finest = Math.max(...internals.tilePool._selected.map((t) => t.z));
+    await settle();
+    await settle();
+    tr.update(view());
+    const [fx, fy] = tileAt(finest - 3, 100, 50);
+    expect(internals.atlas.has(packTileKey(finest - 3, fx, fy))).toBe(false); // not stored as a flat tile
+    const under = internals.tilePool._selected.find((t) => t.z === finest && t.x === tileAt(finest, 100, 50)[0] && t.y === tileAt(finest, 100, 50)[1])!;
+    expect(instanceOf(internals, under)!.elevLayer).toBe(ancestor);
+    tr.dispose();
+  });
+
+  it('reports every elevation as changed when the finest level it samples from changes', () => {
+    const { tr, base } = setup();
+    tr.update(view());
+    const version = tr.elevationVersion;
+    expect(tr.elevationChangesSince(version)).toEqual([]);
+    base.source.maxZoom = 11; // the levels the CPU reads from change
+    tr.update(view());
+    expect(tr.elevationChangesSince(version)).toBeNull();
     tr.dispose();
   });
 

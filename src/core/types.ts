@@ -50,7 +50,11 @@ export interface TreeletOptions {
 }
 
 export interface GuiDisplayOptions {
-  /** Show the controls (compass, info box, hub). The credits show either way. Default true. */
+  /**
+   * Show the controls (compass, info box, hub). The credits show either way:
+   * at the foot of the info box's column, or as a tag in a bottom corner
+   * when there is no info box. Default true.
+   */
   enabled?: boolean;
   /** Corner of the compass. Default 'top-right'. */
   compassPosition?: UICorner;
@@ -163,24 +167,6 @@ export type { CoatBlendMode as BlendMode } from '../analysis/types';
 /** Corner position for UI components. */
 export type UICorner = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right';
 
-/**
- * A thematic map: a named setup of imagery, coats and view (Relief,
- * Avalanche terrain, Flood…). `map.setThemes()` lists them in the hub's
- * Themes page; `map.applyTheme(id)` switches.
- */
-export interface MapTheme {
-  /** Unique id (`applyTheme(id)`). */
-  id: string;
-  /** Name in the Themes page. */
-  name: string;
-  /** One line about the theme (the row's tooltip). */
-  description?: string;
-  /** Sets the theme up: picks the imagery, adds its coats, moves the view… */
-  apply: (map: import('./Treelet').Treelet) => void;
-  /** Takes it down again before the next theme is applied (removes its coats…). */
-  clear?: (map: import('./Treelet').Treelet) => void;
-}
-
 // === Events ===
 
 /** Events of a map (`map.on(name, handler)`) and their data. */
@@ -206,10 +192,13 @@ export interface TreeletEventMap {
   layerchange: Record<string, never>;
   /**
    * A layer's values changed: analysis parameters or ramp, opacity, blend
-   * mode, or an overlay's style. Fires often while a slider is dragged or
-   * an animation runs; the layers themselves are unchanged.
+   * mode, a base layer's exaggeration, or an overlay's style. Fires often
+   * while a slider is dragged or an animation runs; the layers themselves
+   * are unchanged.
    */
   layerupdate: { id: string };
+  /** The mesh's look changed: wireframe on or off, colored or white. */
+  meshchange: { wireframe: boolean; white: boolean };
   /** The visible elevation range (used by 'auto' ramp domains) changed. */
   rangechange: { min: number; max: number };
   /** A region analysis (viewshed, sun hours…) started, progressed or ended. */
@@ -225,8 +214,6 @@ export interface TreeletEventMap {
   toolchange: { mode: 'distance' | 'area' | 'profile' | 'sight' | null; drawing: boolean };
   /** A tool's result changed (`final` once drawing ends; `result` null when it was cleared). */
   measure: { mode: 'distance' | 'area' | 'profile' | 'sight' | null; final: boolean; result: import('../tools/ToolController').ToolResult | null };
-  /** The themes were replaced, or another theme was applied (`id` null: none is). */
-  themechange: { id: string | null };
   /** The map started (after `start()`). */
   ready: Record<string, never>;
 }

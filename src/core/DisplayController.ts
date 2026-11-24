@@ -198,13 +198,17 @@ export class DisplayController {
     return legendFor(layer.id, layer.layerName, resolveRamp(layer.ramp ?? layer.descriptor.ramp!), domain, layer.unit);
   }
 
-  /** Legends of the visible value analyses, top of the stack first. */
+  /**
+   * Legends of the value analyses drawn now, top of the stack first (a coat
+   * hidden, outside its zoom range, at opacity 0 or past the coat limit has none).
+   */
   getLegends(): LegendSpec[] {
     const out: LegendSpec[] = [];
     const stack = this.layerRegistry.getStack();
+    const drawn = new Set(this.terrainRenderer.drawnCoatIds());
     for (let i = stack.length - 1; i >= 0; i--) {
       const layer = stack[i];
-      if (!layer.visible || !('descriptor' in layer)) continue;
+      if (!layer.visible || !('descriptor' in layer) || !drawn.has(layer.id)) continue;
       const legend = this.getLegend(layer.id);
       if (legend) out.push(legend);
     }
@@ -272,7 +276,8 @@ export class DisplayController {
   // Exaggeration
   // =========================================================================
 
-  setExaggeration(handleOrValue: LayerHandle | string | number, value?: number): void {
+  /** Set a base layer's exaggeration (the active one's for a plain number); returns that layer's id, or null. */
+  setExaggeration(handleOrValue: LayerHandle | string | number, value?: number): string | null {
     let baseLayer: BaseLayer | null | undefined;
     let newValue: number;
 
@@ -283,13 +288,11 @@ export class DisplayController {
       baseLayer = this.layerRegistry.getBaseLayer(handleOrValue);
       newValue = value ?? 1.0;
     }
-    if (!Number.isFinite(newValue)) return;
-
-    if (baseLayer) {
-      // Applied to the material every frame from the active layer's display state.
-      (baseLayer.display as { exaggeration: number }).exaggeration = Math.max(0, Math.min(100, newValue));
-      this.sceneManager.requestRender();
-    }
+    if (!Number.isFinite(newValue) || !baseLayer) return null;
+    // Applied to the material every frame from the active layer's display state.
+    (baseLayer.display as { exaggeration: number }).exaggeration = Math.max(0, Math.min(100, newValue));
+    this.sceneManager.requestRender();
+    return baseLayer.id;
   }
 
   getExaggeration(): number {

@@ -8,10 +8,61 @@
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 100%; height: 100%; overflow: hidden; font-family: system-ui, sans-serif; }
     #map { width: 100%; height: 100%; position: relative; }
+
+    /* Demo presets: a few setups that show what the library can do, made
+       with its public API in main.ts (they are not part of the library).
+       Drawn like the map's controls: a box with one row of segments and a
+       note under it, top-left (the compass and its wings hold the top-right
+       corner). */
+    #presets {
+      position: absolute; top: 12px; left: 12px; z-index: 1000; color-scheme: light dark;
+      display: flex; flex-direction: column; gap: 2px; padding: 6px;
+      max-width: calc(100% - 24px - 100px);
+      background: light-dark(rgba(250, 250, 250, 0.72), rgba(24, 24, 24, 0.66));
+      border: 1px solid light-dark(rgba(0, 0, 0, 0.10), rgba(255, 255, 255, 0.08)); border-radius: 10px;
+      box-shadow: 0 4px 16px light-dark(rgba(0, 0, 0, 0.10), rgba(0, 0, 0, 0.4));
+      -webkit-backdrop-filter: blur(14px) saturate(1.5); backdrop-filter: blur(14px) saturate(1.5);
+    }
+    @media (max-width: 599px) { #presets { max-width: calc(100% - 24px - 66px); } }
+    #presets .seg { display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; }
+    /* The note wraps within the row's width (it doesn't widen the box) */
+    #presets .note {
+      width: 0; min-width: 100%; margin: 0; padding: 2px 8px 0;
+      font: 11px/16px system-ui, -apple-system, 'Segoe UI', sans-serif;
+      color: light-dark(rgba(0, 0, 0, 0.62), rgba(255, 255, 255, 0.60));
+    }
+    #presets code { font: inherit; color: light-dark(#333, #e8e8e8); }
+    #presets button {
+      position: relative; flex: none; height: 24px; padding: 0 8px; border: 0; border-radius: 5px; cursor: pointer;
+      font: 11px/24px system-ui, -apple-system, 'Segoe UI', sans-serif; white-space: nowrap;
+      background: light-dark(rgba(0, 0, 0, 0.05), rgba(255, 255, 255, 0.07));
+      color: light-dark(rgba(0, 0, 0, 0.62), rgba(255, 255, 255, 0.60));
+    }
+    #presets button:hover { color: light-dark(#333, #e8e8e8); }
+    #presets button:focus-visible { outline: 2px solid light-dark(#7a9400, #a5c500); outline-offset: -2px; }
+    #presets button[aria-pressed="true"] {
+      background: light-dark(rgba(0, 0, 0, 0.10), rgba(255, 255, 255, 0.14)); color: light-dark(#333, #e8e8e8);
+    }
+    #presets button[aria-pressed="true"]::after {
+      content: ''; position: absolute; left: 6px; right: 6px; bottom: 0; height: 2px; background: light-dark(#7a9400, #a5c500);
+    }
   </style>
 </head>
 <body>
-  <div id="map"></div>
+  <div id="map">
+    <div id="presets" role="group" aria-label="Demo presets" aria-describedby="presets-note">
+      <div class="seg">
+        <button type="button" data-preset="relief" aria-pressed="true">Relief</button>
+        <button type="button" data-preset="avalanche" aria-pressed="false">Avalanche</button>
+        <button type="button" data-preset="flood" aria-pressed="false">Flood</button>
+        <button type="button" data-preset="viewshed" aria-pressed="false">Viewshed</button>
+        <button type="button" data-preset="sun" aria-pressed="false">Sun hours</button>
+        <button type="button" data-preset="peaks" aria-pressed="false">Peaks</button>
+        <button type="button" data-preset="shadows" aria-pressed="false">Shadows</button>
+      </div>
+      <p class="note" id="presets-note">Demo presets: examples set up with the public API (<code>demo/main.ts</code>), not part of the library.</p>
+    </div>
+  </div>
   <script type="module" src="./main.ts"></script>
 </body>
 </html>

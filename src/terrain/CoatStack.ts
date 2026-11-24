@@ -75,6 +75,8 @@ export class CoatStack {
   private autoRange: [number, number] = [DEFAULT_VISIBLE_RANGE[0], DEFAULT_VISIBLE_RANGE[1]];
   private zoom = NaN;
   private limitWarned = false;
+  /** Coats whose domain() or pack() failed (reported once). */
+  private readonly failed = new Set<string>();
 
   constructor() {
     this.data = new Uint8Array(RAMP_WIDTH * MAX_COATS * 4);
@@ -106,6 +108,11 @@ export class CoatStack {
     return this.inputs.some((c) => typeof c.domain !== 'object');
   }
 
+  /** Ids of the coats drawn (in their zoom range, opacity above 0, within MAX_COATS), bottom first. */
+  get drawnIds(): string[] {
+    return this.drawn.map((i) => this.inputs[i].id);
+  }
+
   /** Whether a drawn coat reads the terrain shadow map. */
   get needsShadows(): boolean {
     return this.drawn.some((i) => this.inputs[i].shadowMap === true);
@@ -135,13 +142,19 @@ export class CoatStack {
     let changed = false;
     for (let i = 0; i < this.inputs.length; i++) {
       if (typeof this.inputs[i].domain === 'object') continue;
-      const d = this.resolveDomain(this.inputs[i]);
-      if (sameDomain(d, this.domains[i])) continue;
-      this.domains[i] = d;
-      const row = this.drawn.indexOf(i);
-      if (row >= 0) {
-        this.packedCoats[row] = this.packOne(i, row);
-        changed = true;
+      // A custom analysis' domain() or pack() failing for this range keeps the coat as it was
+      try {
+        const d = this.resolveDomain(this.inputs[i]);
+        if (sameDomain(d, this.domains[i])) continue;
+        const row = this.drawn.indexOf(i);
+        const packed = row >= 0 ? this.packOne(i, row, d) : null;
+        this.domains[i] = d;
+        if (packed) {
+          this.packedCoats[row] = packed;
+          changed = true;
+        }
+      } catch (err) {
+        this.warnOnce(this.inputs[i].id, err);
       }
     }
     return changed;
@@ -177,9 +190,9 @@ export class CoatStack {
     for (let row = 0; row < this.drawn.length; row++) this.packedCoats.push(this.packOne(this.drawn[row], row));
   }
 
-  private packOne(i: number, row: number): PackedCoat {
+  private packOne(i: number, row: number, valueDomain = this.domains[i]): PackedCoat {
     const c = this.inputs[i];
-    const domain = rampRowDomain(c.ramp, this.domains[i]);
+    const domain = rampRowDomain(c.ramp, valueDomain);
     const { p0, p1 } = c.pack(domain);
     let rampRow = -1;
     if (c.ramp) {
@@ -192,6 +205,12 @@ export class CoatStack {
       rampRow = row;
     }
     return { kind: c.kind, blendMode: c.blendMode, opacity: c.opacity, rampRow, raster: c.raster ?? -1, p0, p1 };
+  }
+
+  private warnOnce(id: string, err: unknown): void {
+    if (this.failed.has(id)) return;
+    this.failed.add(id);
+    console.warn(`treelet: coat "${id}" failed to follow the visible range:`, (err as Error)?.message ?? err);
   }
 
   dispose(): void {

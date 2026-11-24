@@ -16,7 +16,6 @@ export type {
   ColorRamp,
   BlendMode,
   UICorner,
-  MapTheme,
   TreeletEventMap,
   TerrainPick,
   TerrainSample,

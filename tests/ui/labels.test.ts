@@ -24,4 +24,17 @@ describe('TreeletLabels', () => {
     expect(spans().find((s) => s.textContent === 'Alpha')!.hidden).toBe(true);
     expect(el.count).toBe(2);
   });
+
+  it('new labels take the hidden elements before new ones are made', () => {
+    const el = document.createElement('treelet-labels') as TreeletLabels;
+    document.body.appendChild(el);
+    const spans = () => [...el.shadowRoot!.querySelectorAll('span')];
+    el.show([label('A'), label('B'), label('C')]);
+    el.show([label('C', 5), label('A', 6)]); // reordered, B gone
+    expect(spans().filter((s) => !s.hidden).map((s) => s.textContent).sort()).toEqual(['A', 'C']);
+    el.show([label('C'), label('A'), label('D'), label('E')]); // D takes B's element, E a new one
+    expect(spans()).toHaveLength(4);
+    expect(spans().map((s) => s.textContent)).toEqual(['A', 'D', 'C', 'E']);
+    expect(el.count).toBe(4);
+  });
 });

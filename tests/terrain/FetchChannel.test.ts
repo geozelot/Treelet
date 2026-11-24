@@ -101,13 +101,25 @@ describe('FetchChannel', () => {
     const { ch, onSettled } = makeChannel(now);
     const cancel = vi.fn();
     let resolve!: (o: FetchOutcome) => void;
-    ch.launch(9, () => new Promise((r) => { resolve = r; }), cancel);
+    let runId = -1;
+    ch.launch(9, (id) => { runId = id; return new Promise((r) => { resolve = r; }); }, cancel);
     ch.cancel(9);
-    expect(cancel).toHaveBeenCalledWith(1);
+    expect(cancel).toHaveBeenCalledWith(runId); // the id the request ran with
     expect(ch.size).toBe(0);
     resolve('ok');
     await flush();
     expect(onSettled).not.toHaveBeenCalled();
+  });
+
+  it('gives request ids no other channel uses (they share the worker pool)', () => {
+    const now = { t: 0 };
+    const ids: number[] = [];
+    const a = makeChannel(now).ch;
+    const b = makeChannel(now).ch;
+    for (const [ch, key] of [[a, 1], [b, 1], [a, 2], [b, 2]] as const) {
+      ch.launch(key, (id) => { ids.push(id); return new Promise(() => {}); }, () => {});
+    }
+    expect(new Set(ids).size).toBe(4);
   });
 
   it('tracks weighted load and cancels requests that are no longer needed', async () => {

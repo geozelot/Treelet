@@ -27,9 +27,10 @@ import type { CameraState } from '../scene/CameraController';
 /** Pages of the info column. */
 export type InfoPage = 'legend' | 'map';
 
-/** Format a bearing value: 0-360 range with degree symbol. */
+/** A bearing in [0, 360) with one decimal (rounded first: -0.04° is 0.0°, not 360.0°). */
 function formatBearing(rotation: number): string {
-  return `${(((rotation % 360) + 360) % 360).toFixed(1)}°`;
+  const tenths = Math.round(rotation * 10);
+  return `${((((tenths % 3600) + 3600) % 3600) / 10).toFixed(1)}°`;
 }
 
 function copyButtons(what: 'center' | 'extent', shape: string): string {
@@ -77,6 +78,8 @@ export class TreeletInfo extends BaseElement {
     this.map = map;
     this.toggleAttribute('glass', options.glass === true);
     const glass = { glass: options.glass === true };
+    // The pages are built once; with or without the readout now, they are built again
+    if (this.dock && (options.readout !== false) !== (this.readout !== null)) this.rebuild();
     if (!this.dock) {
       this.dock = new DockFrame(this, this.shadow, {
         label: 'Legend and map',
@@ -107,7 +110,10 @@ export class TreeletInfo extends BaseElement {
     this.legend!.attach(map, glass);
     this.readout?.attach(map, glass);
     this.credits!.attach(map, undefined, glass);
-    if (this.readout) this.readout.active = false;
+    // Sampling and legends only while the Legend page is shown (also when attached again while it is)
+    const shown = this.isOpen && this.page === 'legend';
+    if (this.readout) this.readout.active = shown;
+    this.legend!.active = shown;
   }
 
   /** Open the column, on `page` or the page shown last. */
@@ -150,8 +156,23 @@ export class TreeletInfo extends BaseElement {
     return !!this.dock?.isOpen && this.dock.page === 'map';
   }
 
+  /** Drop the column and its pages (the next attach builds them again). */
+  private rebuild(): void {
+    if (this.wasOpen) {
+      this.wasOpen = false;
+      this.dispatchEvent(new Event('close'));
+    }
+    this.dock = null;
+    this.legend = null;
+    this.readout = null;
+    this.credits = null;
+    this.stats.clear();
+    this.shadow.innerHTML = '';
+  }
+
   private onDockChange(open: boolean, page: string): void {
     if (this.readout) this.readout.active = open && page === 'legend';
+    if (this.legend) this.legend.active = open && page === 'legend';
     if (open && page === 'map') this.renderView();
     if (open !== this.wasOpen) {
       this.wasOpen = open;

@@ -39,6 +39,37 @@ describe('line of sight', () => {
   });
 });
 
+describe('the sun', () => {
+  it('a non-finite direction or altitude is ignored (the sun time stays)', () => {
+    const time = new Date(2024, 11, 21, 10, 30);
+    const display = { setSunAzimuth: vi.fn(), setSunAltitude: vi.fn() };
+    const map = bareMap({ sunTime: time, displayController: display });
+    map.setSunAzimuth(NaN).setSunAltitude(Infinity);
+    expect(map.getSunTime()).toEqual(time);
+    expect(display.setSunAzimuth).not.toHaveBeenCalled();
+    expect(display.setSunAltitude).not.toHaveBeenCalled();
+  });
+});
+
+describe('display events', () => {
+  it("exaggeration is reported as the base layer's 'layerupdate', the mesh as 'meshchange'", () => {
+    const display = {
+      setExaggeration: vi.fn(() => 'base-0'),
+      setWireframe: vi.fn(), setWireframeWhite: vi.fn(),
+      getWireframe: () => true, getWireframeWhite: () => false,
+    };
+    const map = bareMap({ displayController: display });
+    map.setExaggeration(2);
+    expect(map.emit).toHaveBeenCalledWith('layerupdate', { id: 'base-0' });
+    map.setWireframe(true);
+    expect(map.emit).toHaveBeenLastCalledWith('meshchange', { wireframe: true, white: false });
+    display.setExaggeration.mockReturnValue(null as never); // no base layer
+    (map.emit as ReturnType<typeof vi.fn>).mockClear();
+    map.setExaggeration(3);
+    expect(map.emit).not.toHaveBeenCalled();
+  });
+});
+
 describe('pickLocation', () => {
   it('Escape cancels the pick and nothing else (the key is marked used)', async () => {
     const container = document.createElement('div');
@@ -100,6 +131,18 @@ describe('narrow maps', () => {
     resize(400);
     expect(info.close).toHaveBeenCalled();
     expect([hub.isOpen, hub.hidden, info.hidden]).toEqual([true, false, true]);
+  });
+
+  it("a full-width column on the compass's edge starts past it", () => {
+    const hub = dock(true, 'right');
+    hub.dataset.v = 'top';
+    const map = bareMap({
+      options: { guiDisplay: { compassPosition: 'top-right', navigation: true } },
+      compass: {}, compact: true, hub, info: null,
+    });
+    (map as unknown as { layoutControls(w: number, h: number): void }).layoutControls(400, 800);
+    expect(hub.style.setProperty).toHaveBeenCalledWith('--dock-inset', '78px'); // 12 + the compass (60) and its gap (6)
+    expect(hub.style.setProperty).toHaveBeenCalledWith('--dock-max', '710px');
   });
 
   it('with only the info column open, the tree box steps aside', () => {

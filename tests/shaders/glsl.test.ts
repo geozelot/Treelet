@@ -16,6 +16,7 @@ import { createTerrainMaterial, buildFragmentShader, setTerrainAtlas, setTerrain
 import { registerBuiltinAnalyses } from '../../src/analysis/builtins';
 import { analysisShaderSource, registerAnalysis } from '../../src/analysis/registry';
 import { createPointMaterial } from '../../src/overlays/materials';
+import { HALO_EDGES } from '../../src/terrain/ElevationAtlas';
 
 const VERTEX_PREFIX = `#version 300 es
 #define attribute in
@@ -108,6 +109,8 @@ describe('GLSL check', () => {
     const fs = buildFragmentShader(analysisShaderSource());
     expect(fs).toContain('uniform highp sampler2DArray uElevHalo;');
     expect(fs).toContain('texelFetch(uElevHalo, ivec3(p.y, HALO_LEFT, layer), 0).r');
+    // The halo's row numbers come from the atlas' edge order
+    for (const [edge, row] of Object.entries(HALO_EDGES)) expect(fs).toContain(`#define HALO_${edge} ${row}`);
     const atlas = {} as never;
     const halo = {} as never;
     setTerrainAtlas(m, atlas, halo);

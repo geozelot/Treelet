@@ -16,6 +16,7 @@ import type { Treelet } from '../core/Treelet';
 import type { TerrainPick } from '../core/types';
 import type { StackLayer } from '../layers/LayerRegistry';
 import { formatValue } from '../analysis/ramps';
+import { formatElevation } from '../tools/format';
 
 /** Kinds the three readout lines already show. */
 const SHOWN_KINDS = new Set(['elevation', 'slope', 'aspect']);
@@ -36,7 +37,7 @@ export function compassPoint(bearing: number): string {
 
 /** The lines a readout shows for a terrain sample. */
 export function formatReadout(pick: TerrainPick): Array<[label: string, value: string]> {
-  const elevation = `${Math.round(pick.elevation).toLocaleString('en-US').replace(/,/g, '\u2009')} m`;
+  const elevation = formatElevation(pick.elevation);
   const slope = `${pick.slope.toFixed(1)}°`;
   const aspect = pick.aspect === null ? 'flat' : `${Math.round(pick.aspect)}° ${compassPoint(pick.aspect)}`;
   return [['Elevation', elevation], ['Slope', slope], ['Aspect', aspect]];
@@ -60,6 +61,8 @@ export class TreeletReadout extends BaseElement {
   /** Sampling only while the readout is shown (its page is open). */
   private shown = true;
   private lastPick: TerrainPick | null = null;
+  /** Screens without hover (touch): the readout shows tapped points. */
+  private readonly hoverNone = typeof matchMedia === 'function' ? matchMedia('(hover: none)') : null;
 
   constructor() {
     super();
@@ -157,9 +160,9 @@ export class TreeletReadout extends BaseElement {
   private onPointerMove = (e: PointerEvent): void => {
     if (e.pointerType !== 'mouse' || this.pinned || !this.shown) return;
     if (!this.onMapSurface(e)) {
-      // Over a control: nothing of the terrain to show
+      // Over a control: nothing of the terrain to show (once: the dashes stay)
       this.pending = null;
-      this.render(null);
+      if (this.lastPick !== null) this.render(null);
       return;
     }
     this.pending = this.position(e);
@@ -185,8 +188,8 @@ export class TreeletReadout extends BaseElement {
       }
       return;
     }
-    // A tap on a control is the control's, not a terrain sample
-    this.touchStart = this.onMapSurface(e) ? { x: e.clientX, y: e.clientY, id: e.pointerId } : null;
+    // A tap on a control is the control's, not a terrain sample (nor is one while the readout is hidden)
+    this.touchStart = this.shown && this.onMapSurface(e) ? { x: e.clientX, y: e.clientY, id: e.pointerId } : null;
   };
 
   private onPointerUp = (e: PointerEvent): void => {
@@ -217,7 +220,7 @@ export class TreeletReadout extends BaseElement {
       rows.push([layer.layerName, value === null ? EMPTY : `${formatValue(value)}${unit}`]);
     }
     // Touch screens sample where they are tapped
-    const touchOnly = typeof matchMedia === 'function' && matchMedia('(hover: none)').matches;
+    const touchOnly = this.hoverNone?.matches ?? false;
     const title = this.pinned || touchOnly ? 'Tapped point' : 'Cursor';
     this.rowsEl.innerHTML = `<div class="grp"><span class="t">${title}</span></div>`
       + rows.map(([label, value]) =>

@@ -228,6 +228,12 @@ export class TerrainRenderer {
   private readonly missingElevCovered: SelectedTile[] = [];
   private readonly missingParents: number[] = [];
   private readonly missingFallback = new Set<number>();
+  /**
+   * Fill-ins asked for while a coarser ancestor with data is drawn: one the
+   * source doesn't have isn't stored as a flat tile (it would be preferred
+   * to the ancestor's real heights).
+   */
+  private readonly fillIns = new Set<number>();
   /** Missing drapes; tiles showing the bare placeholder come before those with a coarse fallback. */
   private readonly missingDrape: Array<{ tile: SelectedTile; slot: SlotInfo }> = [];
   private readonly missingDrapeCovered: Array<{ tile: SelectedTile; slot: SlotInfo }> = [];
@@ -426,6 +432,10 @@ export class TerrainRenderer {
       maxLevel = Math.max(maxLevel, Math.min(d.finestTileZoom(this.drapeSlotSize), d.maxZoom, base.maxZoom, MAX_TILE_ZOOM));
     }
     maxLevel = Math.max(minLevel, Math.floor(maxLevel));
+    // CPU samples start at the finest level (readFinestTile): when it changes
+    // (imagery shown or hidden, a drape's zoom range), heights read elsewhere
+    // (overlays, the camera) must be read again
+    if (maxLevel !== this.lastMaxLevel) this.atlas.invalidate();
     this.lastMaxLevel = maxLevel;
 
     this.computeCullRegion(view, orbitDist);
@@ -603,6 +613,7 @@ export class TerrainRenderer {
     this.missingElevCovered.length = 0;
     this.missingParents.length = 0;
     this.missingFallback.clear();
+    this.fillIns.clear();
     this.missingDrape.length = 0;
     this.missingDrapeCovered.length = 0;
     this.neededElev.clear();
@@ -643,6 +654,7 @@ export class TerrainRenderer {
           const fallback = packTileKey(fz, t.x >> (t.z - fz), t.y >> (t.z - fz));
           if (!anc || !this.elevChannel.failures.isEmpty(fallback)) {
             this.missingFallback.add(fallback);
+            if (anc && !anc.empty) this.fillIns.add(fallback);
             this.neededElev.add(fallback);
           }
         }
@@ -822,7 +834,7 @@ export class TerrainRenderer {
 
     const tryElevation = (z: number, x: number, y: number, key: number): boolean => {
       if (this.atlas.has(key)) return true;
-      if (this.elevChannel.failures.isEmpty(key)) {
+      if (this.elevChannel.failures.isEmpty(key) && !this.fillIns.has(key)) {
         // Known nonexistent: synthesize the flat tile without a request.
         if (this.atlas.writeEmpty(z, x, y)) this.renderDirty = true;
         return true;
@@ -830,7 +842,7 @@ export class TerrainRenderer {
       if (this.elevChannel.load >= elevLimit) return false;
       if (this.atlas.available <= this.elevChannel.size) return false;
       if (!this.elevChannel.canLaunch(key)) return true;
-      this.launchElevation(base, z, x, y, key);
+      this.launchElevation(base, z, x, y, key, this.fillIns.has(key));
       return true;
     };
 
@@ -886,7 +898,7 @@ export class TerrainRenderer {
     }, Math.max(0, next - now) + 5);
   }
 
-  private launchElevation(base: BaseLayer, z: number, x: number, y: number, key: number): void {
+  private launchElevation(base: BaseLayer, z: number, x: number, y: number, key: number, fillIn = false): void {
     const epoch = this.elevEpoch;
     const coord: TileCoord = { z, x, y };
     const size = this.slotSize;
@@ -909,7 +921,8 @@ export class TerrainRenderer {
       });
       if (this.disposed || epoch !== this.elevEpoch) return 'stale';
       if (res.status === 'empty') {
-        if (!this.atlas.writeEmpty(z, x, y)) return 'stale';
+        // A fill-in the source doesn't have: the ancestor's heights stay the stand-in
+        if (!fillIn && !this.atlas.writeEmpty(z, x, y)) return 'stale';
         return 'empty';
       }
       if (!this.atlas.write(z, x, y, res.data, res.min, res.max, res.texelsPerPixel, res.low, res.high)) return 'stale';
@@ -1050,6 +1063,11 @@ export class TerrainRenderer {
     if (this.disposed) return;
     this.coatStack.set(coats);
     this.syncCoats();
+  }
+
+  /** Ids of the coats drawn now (in their zoom range, opacity above 0, within the coat limit). */
+  drawnCoatIds(): string[] {
+    return this.coatStack.drawnIds;
   }
 
   /** Whether the active drape's coat is drawn; imagery that isn't is neither fetched nor sampled. */

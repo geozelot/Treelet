@@ -60,10 +60,10 @@ describe('profile chart', () => {
     expect(svg).toContain('5 km');
     expect(svg).not.toContain('stroke-dasharray');
     const sight = points.map((p) => ({ ...p, sight: 2000 }));
-    const blocked = chartSvg(sight, 500, 150, CSS_PALETTE, { obstructionIndex: 9, hoverIndex: 3 });
+    const blocked = chartSvg(sight, 500, 150, CSS_PALETTE, { obstructionIndex: 9 });
     expect(blocked).toContain('stroke-dasharray="5 3"');
     expect(blocked).toContain('var(--chart-blocked)');
-    expect((blocked.match(/<circle/g) ?? []).length).toBe(2); // obstruction and hover
+    expect((blocked.match(/<circle/g) ?? []).length).toBe(1); // the obstruction
   });
 
   it('exports CSV with a sight column when there is one', () => {
@@ -167,13 +167,22 @@ describe('<treelet-toolbar>', () => {
 
   it('the viewshed button asks for the observer and stays pressed while it waits', () => {
     const { map, root } = mount();
-    (root.querySelector('[data-tool="viewshed"]') as HTMLElement).click();
+    const button = root.querySelector('[data-tool="viewshed"]') as HTMLElement;
+    let picking = false;
+    (map as { isPicking: () => boolean }).isPicking = () => picking;
+    (map.pickLocation as ReturnType<typeof vi.fn>).mockImplementation(() => { picking = true; return new Promise(() => {}); });
+    button.click();
     expect(map.pickLocation).toHaveBeenCalledWith({ prompt: 'Click the terrain to place the observer' });
-    (map as { isPicking: () => boolean }).isPicking = () => true;
     map.emit('pickstart', { prompt: 'Click the terrain to place the observer' });
-    expect(root.querySelector('[data-tool="viewshed"]')!.getAttribute('aria-pressed')).toBe('true');
+    expect(button.getAttribute('aria-pressed')).toBe('true');
     // The prompt shows with the running jobs (<treelet-jobs>), not twice
     expect((root.querySelector('.status') as HTMLElement).hidden).toBe(true);
+    // Another pick (the app's) leaves the button as it is
+    picking = false;
+    map.emit('pickend', {});
+    picking = true;
+    map.emit('pickstart', { prompt: 'Place a marker' });
+    expect(button.getAttribute('aria-pressed')).toBe('false');
   });
 
   it('gives the results of every tool as pairs', () => {

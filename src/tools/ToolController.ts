@@ -163,6 +163,8 @@ export class ToolController {
   private pendingMove: { x: number; y: number; drag: boolean } | null = null;
   /** What each overlay shows (its data serialized), to send only changes. */
   private readonly shown = new Map<string, string>([[LAYER, ''], [PREVIEW, '']]);
+  /** Bumped whenever the points change: the committed geometry is rebuilt only then, not per pointer move. */
+  private pointsRev = 0;
   private cursor = '';
   private listening = false;
 
@@ -206,6 +208,7 @@ export class ToolController {
     this.endInput();
     this.mode = null;
     this.points = [];
+    this.pointsRev++;
     this.finished = false;
     this.result = null;
     this.base = null;
@@ -225,6 +228,7 @@ export class ToolController {
     if (!this.active || this.points.length === 0) return;
     this.cancelDrag(); // the dragged point may be the one removed
     this.points.pop();
+    this.pointsRev++;
     this.commit();
   }
 
@@ -378,6 +382,7 @@ export class ToolController {
       if (s && Math.hypot(s.x - p.x, s.y - p.y) < 4) return;
     }
     this.points.push(pick.lngLat);
+    this.pointsRev++;
     if (this.mode === 'sight' && this.points.length >= 2) {
       this.finish();
       return;
@@ -470,6 +475,7 @@ export class ToolController {
       const pick = this.deps.pick(m.x, m.y);
       if (pick) {
         this.points[d.index] = pick.lngLat;
+        this.pointsRev++;
         d.moved = true;
       }
     }
@@ -637,16 +643,21 @@ export class ToolController {
     }
 
     const coords = pts.map(coord);
-    const features: ReturnType<typeof feature>[] = [];
     const ring = mode === 'area' && pts.length >= 3;
-    if (pts.length >= 2) {
-      features.push(feature({ type: 'LineString', coordinates: ring ? [...coords, coords[0]] : coords }));
-    }
     const endLabel = this.labelForEnd();
-    coords.forEach((c, i) => {
-      features.push(feature({ type: 'Point', coordinates: c }, i === coords.length - 1 && endLabel ? { label: endLabel } : {}));
-    });
-    this.sendOverlay(LAYER, features.length ? { type: 'FeatureCollection', features } : null, BASE_STYLE);
+    // The committed geometry: built and sent only when the points or the end label changed
+    const layerKey = `points|${mode}|${this.pointsRev}|${endLabel ?? ''}`;
+    if (this.shown.get(LAYER) !== layerKey) {
+      const features: ReturnType<typeof feature>[] = [];
+      if (pts.length >= 2) {
+        features.push(feature({ type: 'LineString', coordinates: ring ? [...coords, coords[0]] : coords }));
+      }
+      coords.forEach((c, i) => {
+        features.push(feature({ type: 'Point', coordinates: c }, i === coords.length - 1 && endLabel ? { label: endLabel } : {}));
+      });
+      this.shown.set(LAYER, layerKey);
+      this.deps.setOverlay(LAYER, features.length ? { type: 'FeatureCollection', features } : null, BASE_STYLE);
+    }
 
     // Rubber band to the pointer
     if (hover && pts.length > 0) {

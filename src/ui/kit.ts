@@ -195,8 +195,6 @@ export interface ScrubSpec {
   data?: Record<string, string | number | undefined>;
   /** Keeps keyboard focus on the control across re-renders. */
   focusKey?: string;
-  /** `data-value-for` of the value label. */
-  valueKey?: string;
   ariaLabel?: string;
 }
 
@@ -210,19 +208,18 @@ export function scrubHtml(s: ScrubSpec): string {
     .filter(([, v]) => v !== undefined)
     .map(([k, v]) => ` data-${k}="${escapeHtml(String(v))}"`).join('');
   const focus = s.focusKey === undefined ? '' : ` data-focus-key="${escapeHtml(s.focusKey)}"`;
-  const valueFor = s.valueKey === undefined ? '' : ` data-value-for="${escapeHtml(s.valueKey)}"`;
   const t = fraction(s.value, s.min, s.max);
   return `<div class="scrub" role="slider" tabindex="0" aria-label="${escapeHtml(s.ariaLabel ?? s.label)}"`
     + ` aria-valuemin="${s.min}" aria-valuemax="${s.max}" aria-valuenow="${s.value}" aria-valuetext="${escapeHtml(s.text)}"`
     + ` data-min="${s.min}" data-max="${s.max}" data-step="${s.step}" data-value="${s.value}"${data}${focus}>`
     + `<span class="fl" style="width:${(t * 100).toFixed(2)}%"></span>`
-    + `<span class="k">${escapeHtml(s.label)}</span><span class="v"${valueFor}>${escapeHtml(s.text)}</span></div>`;
+    + `<span class="k">${escapeHtml(s.label)}</span><span class="v">${escapeHtml(s.text)}</span></div>`;
 }
 
 /** A read-only progress row (a running job): the same fill as a scrub. */
-export function progressHtml(label: string, text: string, progress: number, attrs = ''): string {
+export function progressHtml(label: string, text: string, progress: number): string {
   return `<div class="scrub prog" role="progressbar" aria-label="${escapeHtml(label)}" aria-valuemin="0" aria-valuemax="100"`
-    + ` aria-valuenow="${Math.round(progress * 100)}"${attrs}>`
+    + ` aria-valuenow="${Math.round(progress * 100)}">`
     + `<span class="fl" style="width:${(fraction(progress, 0, 1) * 100).toFixed(1)}%"></span>`
     + `<span class="k">${escapeHtml(label)}</span><span class="v">${escapeHtml(text)}</span></div>`;
 }
@@ -334,7 +331,9 @@ export function bindScrubs(root: ShadowRoot | HTMLElement, onValue: ScrubHandler
     if (d.touch && !d.active) applyAt(d.el, e.clientX); // a tap
   });
 
-  root.addEventListener('pointercancel', () => { drag = null; });
+  root.addEventListener('pointercancel', (ev) => {
+    if (drag && (ev as PointerEvent).pointerId === drag.id) drag = null; // another finger's cancel leaves the drag
+  });
 
   root.addEventListener('keydown', (ev) => {
     const e = ev as KeyboardEvent;
@@ -356,6 +355,9 @@ export function bindScrubs(root: ShadowRoot | HTMLElement, onValue: ScrubHandler
     if (next === null) return;
     e.preventDefault();
     e.stopPropagation();
+    // A value past an end (set from code) stays put rather than jumping back the other way
+    const snapped = snapValue(next, min, max, step);
+    if ((next > value && snapped < value) || (next < value && snapped > value)) return;
     apply(el, next);
   });
 }

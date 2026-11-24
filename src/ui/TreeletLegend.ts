@@ -4,9 +4,10 @@
 // <treelet-legend> - legends of the visible value analyses (elevation,
 // slope…), as rows of the info column's Legend page: a group header with
 // the title, then a ramp bar with its range, or one row per class with its
-// swatch. Legends follow layer changes, value updates and the visible
-// range, at most once per frame; unchanged legends aren't rebuilt.
-// (Running region analyses show in the hub's Layers page.)
+// swatch. Legends follow layer changes, value updates, the visible range
+// and the zoom (coats with a zoom range), at most once per frame; unchanged
+// legends aren't rebuilt.
+// (Running region analyses show in the hub's column, <treelet-jobs>.)
 // ============================================================================
 
 import { BaseElement, escapeHtml } from './dom';
@@ -34,8 +35,15 @@ export class TreeletLegend extends BaseElement {
   private legendsHtml = '';
   private legendFrame = 0;
   private subscribed = false;
+  /** Rendered only while shown (the info column sets this); changes meanwhile wait. */
+  private shown = true;
+  private stale = false;
   /** Legends follow layers, values and the visible range, at most once per frame. */
   private readonly scheduleLegends = (): void => {
+    if (!this.shown) {
+      this.stale = true;
+      return;
+    }
     if (this.legendFrame || typeof requestAnimationFrame === 'undefined') {
       if (!this.legendFrame) this.renderLegends();
       return;
@@ -83,6 +91,7 @@ export class TreeletLegend extends BaseElement {
     map.on('layerchange', this.scheduleLegends);
     map.on('layerupdate', this.scheduleLegends);
     map.on('rangechange', this.scheduleLegends);
+    map.on('zoom', this.scheduleLegends); // coats with a zoom range come and go
   }
 
   private unsubscribe(): void {
@@ -92,12 +101,27 @@ export class TreeletLegend extends BaseElement {
     map.off('layerchange', this.scheduleLegends);
     map.off('layerupdate', this.scheduleLegends);
     map.off('rangechange', this.scheduleLegends);
+    map.off('zoom', this.scheduleLegends);
     if (this.legendFrame) cancelAnimationFrame(this.legendFrame);
     this.legendFrame = 0;
   }
 
   refresh(): void {
     this.renderLegends();
+  }
+
+  /** Whether the legend is on screen; while it is not, it waits to render until it is again. */
+  set active(on: boolean) {
+    if (on === this.shown) return;
+    this.shown = on;
+    if (on && this.stale) {
+      this.stale = false;
+      this.renderLegends();
+    }
+  }
+
+  get active(): boolean {
+    return this.shown;
   }
 
   private renderLegends(): void {

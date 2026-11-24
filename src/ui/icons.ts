@@ -4,9 +4,8 @@
 // Two families:
 //  - Logo icons, drawn like the tree and the compass: filled facets at full
 //    and .82 / .75 opacity with one leaf-green part. The info box (Ring i)
-//    and the page buttons of the columns' rails (Layers, Themes, Measure,
-//    Legend, Map). The rail cuts draw thin parts heavier so they hold at
-//    20–24 px.
+//    and the page buttons of the columns' rails (Layers, Measure, Legend,
+//    Map). The rail cuts draw thin parts heavier so they hold at 20–24 px.
 //  - Line icons on a 16 grid (stroke 1.4) or a 10 grid (stroke 1.6) for the
 //    controls in rows (eye, chevrons, plus, close, copy, tools).
 // Every icon is aria-hidden: the button around it carries the label.
@@ -22,12 +21,6 @@ export const INFO_RAIL_SVG = `<svg viewBox="6 6 34 34" aria-hidden="true"><path 
 
 /** Layers page: three stacked sheets, the lowest one green. */
 export const LAYERS_SVG = `<svg viewBox="0 0 32 32" aria-hidden="true"><path fill="currentColor" d="M16 4 28 10 16 16 4 10Z"/><path fill="currentColor" opacity=".82" d="M4 14 16 20 28 14V17L16 23 4 17Z"/><path d="M4 21 16 27 28 21V24L16 30 4 24Z" fill="${LEAF}"/></svg>`;
-
-/**
- * Themes page, Strata: the Legend's tall peak (straight flank, curved
- * flank) cut into three strata like a thematic map, the lowest one green.
- */
-export const THEMES_SVG = `<svg viewBox="1 1.5 30 30" aria-hidden="true"><path fill="currentColor" d="M17.5 3C17.97 5.35 18.61 7.81 19.44 10.3H13.29Z"/><path fill="currentColor" opacity=".82" d="M12.02 12.5H20.22C21.06 14.72 22.04 16.93 23.18 19.1H8.21Z"/><path d="M6.94 21.3H24.4C26 24.03 27.86 26.64 30 29H2.5Z" fill="${LEAF}"/></svg>`;
 
 /** Measure page: a set-square (its inner triangle turns green while a tool runs). */
 export const MEASURE_SVG = `<svg viewBox="0 0 32 32" aria-hidden="true"><path fill="currentColor" fill-rule="evenodd" opacity=".82" d="M5 27V5l22 22H5Zm5-5h6.5L10 15.5V22Z"/><path class="tool-on" fill="none" d="M10 22h6.5L10 15.5V22Z"/></svg>`;
@@ -51,8 +44,6 @@ export const EYE_SVG = line16('<path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5
 export const EYE_OFF_SVG = line16('<path d="M2.5 2.5l11 11"/><path d="M6.3 6.4A2 2 0 0 0 9.6 9.7"/><path d="M4.4 4.9C2.6 6.1 1.5 8 1.5 8s2.5 4.5 6.5 4.5c1.2 0 2.3-.4 3.2-1"/><path d="M7 3.6c.3 0 .7-.1 1-.1 4 0 6.5 4.5 6.5 4.5s-.7 1.3-2 2.5"/>');
 export const CHEV_RIGHT_SVG = line10('<path d="M3.75 2.5 6.25 5l-2.5 2.5"/>');
 export const CHEV_LEFT_SVG = line10('<path d="M6.25 2.5 3.75 5l2.5 2.5"/>');
-export const UP_SVG = line10('<path d="M2.5 6.25 5 3.75l2.5 2.5"/>');
-export const DOWN_SVG = line10('<path d="M2.5 3.75 5 6.25l2.5-2.5"/>');
 export const PLUS_SVG = line10('<path d="M5 2v6M2 5h6"/>');
 export const MINUS_SVG = line10('<path d="M2 5h6"/>');
 export const CLOSE_SVG = line10('<path d="M2.5 2.5l5 5M7.5 2.5l-5 5"/>');

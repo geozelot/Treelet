@@ -37,7 +37,6 @@ import type {
   TreeletStats,
   UICorner,
   TileBounds,
-  MapTheme,
 } from './types';
 import { SceneManager } from '../scene/SceneManager';
 import { CameraTerrain, marchToTerrain, type GroundSampler } from '../scene/CameraTerrain';
@@ -290,9 +289,6 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
   private sunTime: Date | null = null;
   /** The pending pickLocation(), if any. */
   private picking: { finish: (pick: TerrainPick | null) => void } | null = null;
-  /** Thematic maps (the hub's Themes page) and the one applied. */
-  private themes: MapTheme[] = [];
-  private activeTheme: string | null = null;
   /** Draws overlay layers (and the tools' geometry) on the terrain. */
   private readonly overlays: OverlayRenderer;
   private readonly labels: TreeletLabels | null = null;
@@ -320,7 +316,6 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
 
     this.options = resolveOptions(userOptions);
     const md = this.options.mapDisplay;
-    const gd = this.options.guiDisplay;
 
     this.metersToScene = md.worldScale / WEB_MERCATOR_FULL_EXTENT;
     this.horizonDistance = md.horizonDistance;
@@ -379,6 +374,7 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
       defaultBounds: () => this.defaultRegionBounds(),
       sunTime: () => this.sunTime,
       freeRasterSlots: () => this.terrainRenderer.freeRasterSlots(),
+      removeLayer: (id) => { this.removeAnalysisLayer(id); },
     });
     // Overlays: draped lines and points, fills as coats, DOM labels
     defineTreeletElements();
@@ -406,11 +402,8 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
       fills: {
         add: (name, raster, owner) => {
           try {
-            const id = this.layerController.addRasterLayer({ analysis: 'image', layerName: name }, raster).id;
             // Owned by the overlay: drawn with it (shown, zoom range, opacity)
-            this.layerRegistry.getAnalysisLayer(id)!.owner = owner;
-            this.displayController.applyMaterialState();
-            return id;
+            return this.layerController.addRasterLayer({ analysis: 'image', layerName: name }, raster, false, owner).id;
           } catch (err) {
             console.warn(`treelet: overlay "${name}" fills not shown:`, (err as Error).message);
             return null;
@@ -562,8 +555,11 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
       const [v, h] = [dock.dataset.v, dock.dataset.h];
       // The compass is in the way when it is at the other end of the same side (any side when compact)
       const blocked = this.compass && cv !== v && (compact || ch === h);
-      const room = height - 24 - (blocked ? compassExtent : 0);
+      // A full-width column on the compass's own edge starts past the compass
+      const inset = this.compass && compact && cv === v ? compassExtent : 0;
+      const room = height - 24 - (blocked ? compassExtent : 0) - inset;
       dock.style.setProperty('--dock-max', `${Math.max(120, Math.floor(room))}px`);
+      dock.style.setProperty('--dock-inset', `${12 + inset}px`);
     }
   }
 
@@ -1537,19 +1533,26 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
   // Display API (→ DisplayController)
   // =========================================================================
 
-  setExaggeration(handleOrValue: LayerHandle | string | number, value?: number): this { this.displayController.setExaggeration(handleOrValue, value); return this; }
+  /** Vertical exaggeration of the active base layer (or of `handle`'s), 0–100; reported as its 'layerupdate'. */
+  setExaggeration(handleOrValue: LayerHandle | string | number, value?: number): this {
+    const id = this.displayController.setExaggeration(handleOrValue, value);
+    if (id !== null) this.emit('layerupdate', { id });
+    return this;
+  }
   getExaggeration(): number { return this.displayController.getExaggeration(); }
 
-  /** Sun direction in degrees clockwise from north (clears a sun time). */
+  /** Sun direction in degrees clockwise from north (clears a sun time; a non-finite value is ignored). */
   setSunAzimuth(degrees: number): this {
+    if (!Number.isFinite(degrees)) return this;
     this.sunTime = null;
     this.displayController.setSunAzimuth(degrees);
     this.emitSun();
     return this;
   }
   getSunAzimuth(): number { return this.displayController.getSunAzimuth(); }
-  /** Sun altitude in degrees, 5–90 (clears a sun time). */
+  /** Sun altitude in degrees, 5–90 (clears a sun time; a non-finite value is ignored). */
   setSunAltitude(degrees: number): this {
+    if (!Number.isFinite(degrees)) return this;
     this.sunTime = null;
     this.displayController.setSunAltitude(degrees);
     this.emitSun();
@@ -1605,64 +1608,25 @@ export class Treelet extends EventEmitter<TreeletEventMap> {
   }
 
   /** Draw the terrain mesh as a wireframe (colored by the coats, or white). */
-  setWireframe(enabled: boolean): this { this.displayController.setWireframe(enabled); return this; }
+  setWireframe(enabled: boolean): this {
+    this.displayController.setWireframe(enabled);
+    this.emitMesh();
+    return this;
+  }
   getWireframe(): boolean { return this.displayController.getWireframe(); }
-  setWireframeWhite(white: boolean): this { this.displayController.setWireframeWhite(white); return this; }
+  setWireframeWhite(white: boolean): this {
+    this.displayController.setWireframeWhite(white);
+    this.emitMesh();
+    return this;
+  }
+
+  private emitMesh(): void {
+    this.emit('meshchange', { wireframe: this.getWireframe(), white: this.getWireframeWhite() });
+  }
   getWireframeWhite(): boolean { return this.displayController.getWireframeWhite(); }
 
   /** Level-of-detail quality: > 1 finer tiles, < 1 coarser. */
   setLodQuality(quality: number): this { this.terrainRenderer.setLodQuality(requireFinite(quality, 'quality')); return this; }
-
-  // =========================================================================
-  // Themes
-  // =========================================================================
-
-  /**
-   * The thematic maps to offer (the hub's Themes page shows them while the
-   * list is not empty). Replacing the list leaves the map as it is; the
-   * applied theme stays applied when the new list has its id.
-   */
-  setThemes(themes: readonly MapTheme[]): this {
-    const ids = new Set<string>();
-    for (const t of themes) {
-      if (!t || typeof t.id !== 'string' || !t.id || typeof t.name !== 'string' || typeof t.apply !== 'function') {
-        throw new Error('treelet: a theme needs an id, a name and an apply function');
-      }
-      if (ids.has(t.id)) throw new Error(`treelet: two themes have the id "${t.id}"`);
-      ids.add(t.id);
-    }
-    this.themes = [...themes];
-    if (this.activeTheme !== null && !ids.has(this.activeTheme)) this.activeTheme = null;
-    this.emit('themechange', { id: this.activeTheme });
-    return this;
-  }
-
-  /** The thematic maps offered. */
-  getThemes(): MapTheme[] { return [...this.themes]; }
-
-  /** Id of the theme applied last, or null. */
-  getActiveTheme(): string | null { return this.activeTheme; }
-
-  /**
-   * Apply a theme: the applied one's `clear` runs first (also when it is
-   * applied again), then the theme's `apply`. `null` only clears.
-   */
-  applyTheme(id: string | null): this {
-    const theme = id === null ? null : this.themes.find((t) => t.id === id);
-    if (theme === undefined) throw new Error(`treelet: no theme "${id}"`);
-    const previous = this.themes.find((t) => t.id === this.activeTheme);
-    this.activeTheme = null;
-    try {
-      previous?.clear?.(this);
-      if (theme) {
-        theme.apply(this);
-        this.activeTheme = theme.id;
-      }
-    } finally {
-      this.emit('themechange', { id: this.activeTheme });
-    }
-    return this;
-  }
 
   // =========================================================================
   // UI accessor methods

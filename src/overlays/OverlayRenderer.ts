@@ -127,7 +127,6 @@ interface LabelSite {
 
 /** The lines of one width and style opacity: one draw call. */
 interface LineGroup {
-  width: number;
   /** The style's line opacity (the overlay's opacity multiplies it). */
   baseOpacity: number;
   material: LineMaterial;
@@ -550,7 +549,7 @@ export class OverlayRenderer {
       object.renderOrder = order;
       object.frustumCulled = false; // heights change in place; the bounds would go stale
       e.group.add(object);
-      const group: LineGroup = { width: g.width, baseOpacity: g.opacity, material, object, geometry, pos, chunks: chunkBounds(pos) };
+      const group: LineGroup = { baseOpacity: g.opacity, material, object, geometry, pos, chunks: chunkBounds(pos) };
       this.applyGroupOpacity(e, group);
       e.lineGroups.push(group);
     }
@@ -626,9 +625,12 @@ export class OverlayRenderer {
     const local = rects?.map((r) => ({ west: r.west - ax, east: r.east - ax, south: r.south - ay, north: r.north - ay })) ?? null;
     if (local === null || local.length > 0) {
       for (const g of e.lineGroups) {
-        if (updateLineHeights(g, local, (x, y) => groundHeight(x + ax, y + ay) ?? 0)) {
-          (g.geometry.attributes.instanceStart as InterleavedBufferAttribute).data.needsUpdate = true;
-        }
+        // Only the changed parts of the segment buffer go to the GPU
+        const ranges = updateLineHeights(g, local, (x, y) => groundHeight(x + ax, y + ay) ?? 0);
+        if (ranges.length === 0) continue;
+        const data = (g.geometry.attributes.instanceStart as InterleavedBufferAttribute).data;
+        for (let r = 0; r < ranges.length; r += 2) data.addUpdateRange(ranges[r], ranges[r + 1]);
+        data.needsUpdate = true;
       }
       const pts = e.pointObject?.geometry.getAttribute('position');
       if (pts) {
@@ -748,25 +750,26 @@ function chunkBounds(pos: Float32Array): Float32Array {
     let w = Infinity, s = Infinity, e = -Infinity, n = -Infinity;
     const end = Math.min(segments, (c + 1) * CHUNK);
     for (let i = c * CHUNK; i < end; i++) {
-      const o = i * 6;
-      for (const [x, y] of [[pos[o], pos[o + 1]], [pos[o + 3], pos[o + 4]]]) {
+      for (let k = i * 6; k <= i * 6 + 3; k += 3) {
+        const x = pos[k], y = pos[k + 1];
         if (x < w) w = x; if (x > e) e = x;
         if (y < s) s = y; if (y > n) n = y;
       }
     }
-    out.set([w, s, e, n], c * 4);
+    out[c * 4] = w; out[c * 4 + 1] = s; out[c * 4 + 2] = e; out[c * 4 + 3] = n;
   }
   return out;
 }
 
 /**
  * New heights for the segment ends inside `rects` (all ends when null), in
- * place. Returns whether any changed.
+ * place; an end that is the previous segment's end takes its height. Returns
+ * the touched ranges of the segment array ([start, count] pairs, in floats).
  */
-function updateLineHeights(g: LineGroup, rects: readonly WorldRect[] | null, height: (x: number, y: number) => number): boolean {
+function updateLineHeights(g: LineGroup, rects: readonly WorldRect[] | null, height: (x: number, y: number) => number): number[] {
   const pos = g.pos;
   const segments = pos.length / 6;
-  let any = false;
+  const ranges: number[] = [];
   for (let c = 0; c * CHUNK < segments; c++) {
     // The changed areas this chunk touches (its ends are tested against those only)
     let near: WorldRect[] | null = null;
@@ -776,13 +779,23 @@ function updateLineHeights(g: LineGroup, rects: readonly WorldRect[] | null, hei
       if (near.length === 0) continue;
     }
     const end = Math.min(segments, (c + 1) * CHUNK);
+    let any = false;
     for (let i = c * CHUNK; i < end; i++) {
       for (let k = i * 6; k <= i * 6 + 3; k += 3) {
         if (near && !inRects(pos[k], pos[k + 1], near)) continue;
-        pos[k + 2] = height(pos[k], pos[k + 1]);
+        // A line's segments share their joints: the start of one is the end of the last
+        const shared = k === i * 6 && i > 0 && pos[k] === pos[k - 3] && pos[k + 1] === pos[k - 2];
+        pos[k + 2] = shared ? pos[k - 1] : height(pos[k], pos[k + 1]);
         any = true;
       }
     }
+    if (!any) continue;
+    // Contiguous chunks make one range
+    const start = c * CHUNK * 6;
+    const count = (end - c * CHUNK) * 6;
+    const last = ranges.length - 2;
+    if (last >= 0 && ranges[last] + ranges[last + 1] === start) ranges[last + 1] += count;
+    else ranges.push(start, count);
   }
-  return any;
+  return ranges;
 }

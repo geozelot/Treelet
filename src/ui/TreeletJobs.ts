@@ -3,8 +3,8 @@
 //
 // <treelet-jobs> - what the map is busy with, as rows of the hub: running
 // region analyses (progress, cancel), a pending pick (its prompt, cancel)
-// and failures (listed for a few seconds, or until dismissed). The Layers
-// page shows them in its Overlay group, the hub's other pages at their
+// and failures (listed for a few seconds, or until dismissed). The hub's
+// Layers page shows them in its Overlay group, its Measure page at its
 // foot. Hidden while there is nothing to show.
 // ============================================================================
 

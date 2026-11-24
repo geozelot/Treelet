@@ -45,6 +45,22 @@ describe('LayerController.addAnalysisLayer', () => {
   });
 });
 
+describe('LayerController.addRasterLayer', () => {
+  it("an overlay's fill coat has its owner before it is drawn or announced", () => {
+    const registry = new LayerRegistry();
+    const owners: Array<string | null> = [];
+    const ownerOf = (id: string) => registry.getAnalysisLayer(id)?.owner ?? null;
+    const display = { applyMaterialState: vi.fn(() => { for (const l of registry.getAllAnalysisLayers()) owners.push(l.owner); }) };
+    const emit = vi.fn((event: string, data: { id?: string }) => { if (event === 'layeradd') owners.push(ownerOf(data.id!)); });
+    const terrain = { bindRaster: vi.fn(() => ({ range: null })), releaseRaster: vi.fn() };
+    const lc = new LayerController(registry, terrain as unknown as TerrainRenderer, display as unknown as DisplayController, emit, vi.fn(), () => [0, 1]);
+    const raster = { width: 1, height: 1, data: new Uint8Array(4), bounds: { west: 0, south: 0, east: 1, north: 1 } };
+    lc.addRasterLayer({ analysis: 'image', layerName: 'Fills' }, raster as never, false, 'overlay-1');
+    expect(owners.length).toBeGreaterThanOrEqual(2);
+    expect(owners.every((o) => o === 'overlay-1')).toBe(true);
+  });
+});
+
 describe('LayerController: failures leave the stack as it was', () => {
   it('an analysis layer whose material state fails is taken out again', () => {
     const { lc, registry, display, emit } = controller([0, 1000]);

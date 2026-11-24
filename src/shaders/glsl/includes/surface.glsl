@@ -13,12 +13,9 @@
 
 // Halo: per slot, the same-level neighbours' texels one step past each
 // border (S wide, one row per edge; nodata where no neighbour is loaded).
+// Its rows are HALO_TOP, HALO_BOTTOM, HALO_LEFT and HALO_RIGHT (defined from
+// the atlas' edge order, see shaderConstants() in TerrainMaterial.ts).
 uniform highp sampler2DArray uElevHalo;
-
-#define HALO_TOP 0
-#define HALO_BOTTOM 1
-#define HALO_LEFT 2
-#define HALO_RIGHT 3
 
 struct Surface {
   float h;      // elevation in meters

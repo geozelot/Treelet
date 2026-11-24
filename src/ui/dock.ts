@@ -10,6 +10,9 @@
 //   - the page buttons stay by the corner the box opened from (at the
 //     bottom in a bottom corner, at the top in a top corner).
 //
+// The rail comes first in the tab order: from the page buttons, Tab goes
+// into the page.
+//
 // The open page is marked like everything selected: the active fill and a
 // 2px accent line on the side facing the rows. Escape steps back out of a
 // sub-page (the page's content handles that and stops the key), then
@@ -26,8 +29,6 @@ export interface DockPageSpec {
   label: string;
   /** Rail icon (an SVG string). */
   icon: string;
-  /** Hidden until `setPageHidden(id, false)` (a page with nothing to show yet). */
-  hidden?: boolean;
 }
 
 export interface DockSpec {
@@ -52,6 +53,9 @@ const dockStyles = /* css */ `
   :host([data-h="left"]) { left: 12px; justify-content: flex-start; }
   :host([data-h="right"]) { right: 12px; justify-content: flex-end; }
   :host([compact][open]) { left: 12px; right: 12px; }
+  /* A full-width column on the compass's side starts past it (Treelet sets the inset) */
+  :host([compact][open][data-v="top"]) { top: var(--dock-inset, 12px); }
+  :host([compact][open][data-v="bottom"]) { bottom: var(--dock-inset, 12px); }
 
   .box, .pane { pointer-events: auto; }
 
@@ -70,8 +74,8 @@ const dockStyles = /* css */ `
 
   /* The open column */
   .pane { display: flex; align-items: stretch; max-height: var(--dock-max); overflow: hidden; }
-  :host([data-h="right"]) .pane { flex-direction: row; transform-origin: right bottom; }
-  :host([data-h="left"]) .pane { flex-direction: row-reverse; transform-origin: left bottom; }
+  :host([data-h="right"]) .pane { flex-direction: row-reverse; transform-origin: right bottom; }
+  :host([data-h="left"]) .pane { flex-direction: row; transform-origin: left bottom; }
   :host([data-v="top"][data-h="right"]) .pane { transform-origin: right top; }
   :host([data-v="top"][data-h="left"]) .pane { transform-origin: left top; }
   :host([compact]) .pane { flex: 1; min-width: 0; }
@@ -120,21 +124,17 @@ const dockStyles = /* css */ `
 export class DockFrame {
   readonly box: HTMLButtonElement;
   readonly pane: HTMLDivElement;
-  readonly body: HTMLDivElement;
   readonly foot: HTMLDivElement | null;
   private readonly home: HTMLButtonElement;
   private readonly tabs = new Map<string, HTMLButtonElement>();
   private readonly pages = new Map<string, HTMLDivElement>();
   private readonly jobline: HTMLElement;
-  private readonly tablist: HTMLElement | null;
-  /** Pages whose button is hidden. */
-  private readonly hiddenPages = new Set<string>();
   private current: string;
   private opened = false;
 
   constructor(
     private readonly host: HTMLElement,
-    private readonly shadow: ShadowRoot,
+    shadow: ShadowRoot,
     private readonly spec: DockSpec,
     /** Called after the column opened or closed, or the page changed. */
     private readonly onChange: (open: boolean, page: string) => void,
@@ -150,29 +150,25 @@ export class DockFrame {
         ${spec.boxIcon}<span class="jobline" hidden><i></i></span>
       </button>
       <div class="pane surf" id="pane" role="region" aria-label="${name}" hidden>
-        <div class="pbody">
-          ${pages.map((p) => `<div class="page" id="page-${p.id}" data-page="${p.id}" hidden></div>`).join('')}
-          ${spec.footer ? '<div class="foot"></div>' : ''}
-        </div>
         <div class="rail">
           <button type="button" class="rb home" aria-label="Close ${lower}" aria-expanded="true" aria-controls="pane" title="Close">${spec.railIcon}</button>
           ${single ? '' : `<div class="tabs" role="tablist" aria-label="Pages" aria-orientation="vertical">
             ${pages.map((p) => `<button type="button" class="rb" role="tab" id="tab-${p.id}" data-page="${p.id}" aria-selected="false" aria-controls="page-${p.id}" aria-label="${p.label}" title="${p.label}" tabindex="-1">${p.icon}</button>`).join('')}
           </div>`}
         </div>
+        <div class="pbody">
+          ${pages.map((p) => `<div class="page" id="page-${p.id}" data-page="${p.id}"${single ? '' : ` role="tabpanel" aria-labelledby="tab-${p.id}"`} hidden></div>`).join('')}
+          ${spec.footer ? '<div class="foot"></div>' : ''}
+        </div>
       </div>`;
     this.box = shadow.querySelector('.box') as HTMLButtonElement;
     this.pane = shadow.querySelector('.pane') as HTMLDivElement;
-    this.body = shadow.querySelector('.pbody') as HTMLDivElement;
     this.foot = shadow.querySelector('.foot');
     this.home = shadow.querySelector('.rb.home') as HTMLButtonElement;
     this.jobline = shadow.querySelector('.jobline') as HTMLElement;
-    this.tablist = shadow.querySelector('.tabs');
     shadow.querySelectorAll<HTMLButtonElement>('.rb[role="tab"]').forEach((b) => this.tabs.set(b.dataset.page!, b));
     shadow.querySelectorAll<HTMLDivElement>('.page').forEach((p) => this.pages.set(p.dataset.page!, p));
-    for (const p of pages) if (p.hidden) this.hiddenPages.add(p.id);
-    this.current = this.fallbackPage();
-    this.syncTabs();
+    this.current = pages[pages.length - 1].id;
     this.syncPage();
 
     this.box.addEventListener('click', (e) => this.open(undefined, e.detail === 0));
@@ -207,18 +203,14 @@ export class DockFrame {
 
   /** Open the column (on `page`, or the page shown last). */
   open(page?: string, focus = false): void {
-    if (page && this.shown(page)) this.current = page;
+    if (page && this.pages.has(page)) this.current = page;
     const was = this.opened;
     this.opened = true;
     this.host.toggleAttribute('open', true);
     this.pane.hidden = false;
     this.box.setAttribute('aria-expanded', 'true');
     this.syncPage();
-    if (focus) {
-      // The page's button, or the close button when the rail shows no page buttons
-      const tab = this.tabs.get(this.current);
-      (tab && !this.tablist?.hidden ? tab : this.home).focus();
-    }
+    if (focus) (this.tabs.get(this.current) ?? this.home).focus();
     if (!was || page) this.onChange(true, this.current);
   }
 
@@ -235,7 +227,7 @@ export class DockFrame {
 
   /** Show a page (opening the column when closed). */
   show(page: string): void {
-    if (!this.shown(page)) return;
+    if (!this.pages.has(page)) return;
     if (!this.opened) { this.open(page); return; }
     if (page === this.current) return;
     this.current = page;
@@ -250,54 +242,6 @@ export class DockFrame {
     fill.style.width = `${Math.round(Math.max(0, Math.min(1, progress ?? 0)) * 100)}%`;
   }
 
-  /**
-   * Hide or show a page and its rail button. Hiding the open page turns to
-   * the page by the corner; one page left hides the rail's page buttons.
-   */
-  setPageHidden(page: string, hidden: boolean): void {
-    if (!this.pages.has(page) || this.hiddenPages.has(page) === hidden) return;
-    if (hidden) this.hiddenPages.add(page);
-    else this.hiddenPages.delete(page);
-    this.syncTabs();
-    if (hidden && page === this.current) {
-      this.current = this.fallbackPage();
-      this.syncPage();
-      if (this.opened) this.onChange(true, this.current);
-    }
-  }
-
-  /** Whether a page exists and is not hidden. */
-  private shown(page: string): boolean {
-    return this.pages.has(page) && !this.hiddenPages.has(page);
-  }
-
-  /** The page by the corner (the last one not hidden). */
-  private fallbackPage(): string {
-    const ids = this.visibleIds();
-    return ids[ids.length - 1] ?? this.spec.pages[this.spec.pages.length - 1].id;
-  }
-
-  private visibleIds(): string[] {
-    return this.spec.pages.map((p) => p.id).filter((id) => !this.hiddenPages.has(id));
-  }
-
-  /** Page buttons of hidden pages hide; with one page left the buttons go. */
-  private syncTabs(): void {
-    if (!this.tablist) return;
-    for (const [id, tab] of this.tabs) tab.hidden = this.hiddenPages.has(id);
-    const tabbed = this.visibleIds().length > 1;
-    this.tablist.hidden = !tabbed;
-    for (const [id, el] of this.pages) {
-      if (tabbed) {
-        el.setAttribute('role', 'tabpanel');
-        el.setAttribute('aria-labelledby', `tab-${id}`);
-      } else {
-        el.removeAttribute('role');
-        el.removeAttribute('aria-labelledby');
-      }
-    }
-  }
-
   private syncPage(): void {
     for (const [id, el] of this.pages) el.hidden = id !== this.current;
     for (const [id, tab] of this.tabs) {
@@ -307,9 +251,11 @@ export class DockFrame {
     }
   }
 
-  /** Arrow keys move along the page buttons (and show the page). */
+  /** Arrow keys move along the page buttons as they are shown (and show the page). */
   private onTabKey(e: KeyboardEvent): void {
-    const ids = this.visibleIds();
+    const ids = this.spec.pages.map((p) => p.id);
+    // In a top corner the buttons are shown bottom to top
+    if (this.host.dataset.v === 'top') ids.reverse();
     const i = ids.indexOf(this.current);
     let next = -1;
     if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') next = Math.max(0, i - 1);

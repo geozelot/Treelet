@@ -3,7 +3,7 @@
 // ramp texture rows, including 'auto' domains that follow the visible range.
 // ============================================================================
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { CoatStack, rampRowDomain, type CoatInput } from '../../src/terrain/CoatStack';
 import { MAX_COATS } from '../../src/analysis/registry';
 import { RAMP_WIDTH, BUILTIN_RAMPS, classIndexOf } from '../../src/analysis/ramps';
@@ -92,6 +92,24 @@ describe('CoatStack', () => {
     expect(stack.needsAutoRange).toBe(true);
     expect(stack.setAutoRange(1200, 3000)).toBe(true);
     expect(stack.packed[0].p0).toEqual([1200, 1700, 0, 0]);
+  });
+
+  it("a custom domain() that fails for a range keeps the coat as it was (reported once)", () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const stack = new CoatStack();
+    const domain = (v: [number, number]): [number, number] => {
+      if (v[0] < 0) throw new Error('no bathymetry');
+      return v;
+    };
+    stack.set([coat({ id: 'custom', domain })]);
+    stack.setAutoRange(100, 900);
+    const before = stack.packed[0];
+    expect(() => stack.setAutoRange(-50, 900)).not.toThrow();
+    expect(() => stack.setAutoRange(-60, 900)).not.toThrow();
+    expect(stack.packed[0]).toBe(before);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(stack.setAutoRange(200, 900)).toBe(true); // a range it takes again
+    warn.mockRestore();
   });
 
   it('rewrites a ramp row only when its ramp or domain changed', () => {

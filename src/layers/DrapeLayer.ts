@@ -17,7 +17,6 @@ import type {
   ResolvedDrapeLayerDisplay,
 } from './types';
 
-/** Auto-incrementing ID counter for drape layers. */
 /**
  * A coat blend mode from layer options; anything else (such as 0.3's
  * 'hillshade') is reported and drawn as 'normal'.
@@ -30,6 +29,7 @@ export function validBlendMode(mode: unknown, layerName: string): CoatBlendMode 
   return 'normal';
 }
 
+/** Auto-incrementing ID counter for drape layers. */
 let nextDrapeLayerId = 0;
 
 /** Most source zoom levels finer than the terrain tile one slot composites (4×4 tiles). */

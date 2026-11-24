@@ -157,7 +157,6 @@ export function chartSvg(
   palette: ChartPalette,
   options: {
     obstructionIndex?: number;
-    hoverIndex?: number;
     fontFamily?: string;
     /** Draw the terrain and sight line from decimateProfile() (for the screen). */
     decimate?: boolean;
@@ -217,14 +216,6 @@ export function chartSvg(
     }
   }
 
-  // Hover marker
-  const hi = options.hoverIndex;
-  if (hi !== undefined && hi >= 0 && hi < points.length) {
-    const p = points[hi];
-    const x = s.x(p.distance).toFixed(1);
-    parts.push(`<line x1="${x}" x2="${x}" y1="${MARGIN.top}" y2="${bottom}" stroke="${palette.hover}" stroke-width="1" stroke-opacity="0.5"/>`);
-    if (p.elevation !== null) parts.push(`<circle cx="${x}" cy="${s.y(p.elevation).toFixed(1)}" r="3.5" fill="${palette.line}" stroke="${palette.background === 'transparent' ? 'white' : palette.background}" stroke-width="1.5"/>`);
-  }
   parts.push('</svg>');
   return parts.join('');
 }

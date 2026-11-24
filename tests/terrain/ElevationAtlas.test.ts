@@ -6,7 +6,7 @@
 // ============================================================================
 
 import { describe, it, expect, vi } from 'vitest';
-import { ElevationAtlas, ELEVATION_NODATA } from '../../src/terrain/ElevationAtlas';
+import { ElevationAtlas, ELEVATION_NODATA, HALO_EDGES } from '../../src/terrain/ElevationAtlas';
 import { packTileKey } from '../../src/tiles/TileIndex';
 
 const S = 8;
@@ -21,6 +21,18 @@ function texel(atlas: ElevationAtlas, key: number, i: number, j: number): number
   const slot = atlas.get(key)!;
   return atlas.data[slot.layer * S * S + j * S + i];
 }
+
+describe('ElevationAtlas change log', () => {
+  it('reports changes only as far back as the trimmed log still holds them all', () => {
+    const atlas = new ElevationAtlas(S, 2);
+    // Rewrites of a resident tile and evicting writes, until the log is trimmed
+    for (let i = 0; i < 5000; i++) atlas.write(4, i % 3, 0, tile(() => i), i, i);
+    const first = (atlas as unknown as { changeLog: Array<{ version: number }> }).changeLog[0].version;
+    expect(atlas.changedSince(first - 1)).toBeNull(); // entries of `first` may be cut
+    expect(atlas.changedSince(first)).not.toBeNull();
+    expect(atlas.changedSince(atlas.version)).toEqual([]);
+  });
+});
 
 describe('ElevationAtlas allocation', () => {
   it('evicts the least recently used unpinned tile and reports it', () => {
@@ -159,7 +171,7 @@ describe('ElevationAtlas edge stitching', () => {
 });
 
 describe('ElevationAtlas halos (the neighbours\' texels one step past each border)', () => {
-  const TOP = 0, BOTTOM = 1, LEFT = 2, RIGHT = 3;
+  const { TOP, BOTTOM, LEFT, RIGHT } = HALO_EDGES;
   const halo = (atlas: ElevationAtlas, key: number, edge: number, i: number) =>
     atlas.halo[atlas.get(key)!.layer * 4 * S + edge * S + i];
 

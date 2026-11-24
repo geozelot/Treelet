@@ -71,6 +71,7 @@ function setup(
     },
     layerController,
     freeRasterSlots: () => freeSlots,
+    removeLayer: (id: string) => { layerController.removeAnalysisLayer(id); },
     emit: vi.fn((event: string, data: Record<string, unknown>) => { events.push([event, data]); }),
     toWorld: (ll: { lng: number; lat: number }) => ({ x: ll.lng * 100, y: ll.lat * 100 }),
     defaultBounds: () => innsbruck,
@@ -137,6 +138,14 @@ describe('AnalysisController', () => {
     expect(layerController.addRasterLayer).toHaveBeenCalledTimes(1);
   });
 
+  it('bad arguments reject the promise (nothing is thrown at the call)', async () => {
+    const { ac } = setup();
+    let pending: Promise<unknown> | undefined;
+    expect(() => { pending = ac.computeSunHours({ date: '2024-06-21' as unknown as Date }); }).not.toThrow();
+    await expect(pending).rejects.toThrow();
+    await expect(ac.computeViewshed(undefined as unknown as { lng: number; lat: number })).rejects.toThrow();
+  });
+
   it('replaceLayer removes the earlier result once the new one is shown, in its place', async () => {
     const stack = [{ id: 'hillshade', descriptor: { raster: false } }, { id: 'analysis-3', descriptor: { raster: true } }, { id: 'contours', descriptor: { raster: false } }];
     const { ac, layerController, layers } = setup(undefined, { freeSlots: 2, stack });
@@ -160,9 +169,22 @@ describe('AnalysisController', () => {
     const { ac, workerPool, events } = setup(undefined, { freeSlots: 0 });
     await expect(ac.computeSkyView()).rejects.toThrow(/raster slot/);
     expect(workerPool.analyzeRegion).not.toHaveBeenCalled();
-    expect(events).toEqual([]);
+    // A job that can't run is reported and ends at once (the controls list the failure)
+    expect(events.map(([e, d]) => [e, d.status])).toEqual([['analysisstart', undefined], ['analysisend', 'error']]);
+    expect(ac.getJobs()).toEqual([]);
     // Without a layer it runs
     await expect(ac.computeSkyView({ addLayer: false })).resolves.toMatchObject({ layer: null });
+  });
+
+  it('runs at the same time count the raster slots the others will take', async () => {
+    const { ac, workerPool } = setup(undefined, { freeSlots: 1 });
+    let release!: () => void;
+    const first = workerPool.analyzeRegion.getMockImplementation()!;
+    workerPool.analyzeRegion.mockImplementationOnce((...args: unknown[]) => new Promise((r) => { release = () => r((first as (...a: unknown[]) => unknown)(...args)); }));
+    const a = ac.computeSkyView();
+    await expect(ac.computeTpi()).rejects.toThrow(/raster slot/); // the sky view holds the last one
+    release();
+    await expect(a).resolves.toBeDefined();
   });
 
   it("'done' means the result is shown; failing to show it ends the job with 'error'", async () => {
@@ -221,7 +243,7 @@ describe('AnalysisController', () => {
     expect(grid.data[0]).toBe(700);
     expect([grid.width, grid.height, grid.min, grid.max]).toEqual([4, 2, 500, 2500]);
 
-    const none = new AnalysisController({ ...({} as AnalysisControllerDeps), layerRegistry: { getActiveBaseLayer: () => null } } as unknown as AnalysisControllerDeps);
+    const none = new AnalysisController({ ...({} as AnalysisControllerDeps), emit: vi.fn(), layerRegistry: { getActiveBaseLayer: () => null } } as unknown as AnalysisControllerDeps);
     await expect(none.computeTpi()).rejects.toThrow(/active base layer/);
   });
 });

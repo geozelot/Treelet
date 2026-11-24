@@ -22,6 +22,7 @@ import type { CoatBlendMode, Vec4 } from '../analysis/types';
 import { MAX_COATS, IMAGERY_KIND, BLEND_MODES } from '../analysis/registry';
 import { RASTER_NODATA_THRESHOLD } from '../analysis/grid';
 import { SHADOW_NIGHT_SUN_Z } from '../terrain/ShadowMap';
+import { HALO_EDGES } from '../terrain/ElevationAtlas';
 
 // ==== Import modular GLSL ====
 import declarations from './glsl/includes/declarations.glsl?raw';
@@ -58,6 +59,7 @@ export function shaderConstants(): string {
     ...BLEND_MODES.map((mode, i) => `#define BLEND_${mode.toUpperCase()} ${i}`),
     `#define RASTER_NODATA_THRESHOLD ${glslFloat(RASTER_NODATA_THRESHOLD)}`,
     `#define SHADOW_NIGHT_SUN_Z ${glslFloat(SHADOW_NIGHT_SUN_Z)}`,
+    ...Object.entries(HALO_EDGES).map(([edge, row]) => `#define HALO_${edge} ${row}`),
   ].join('\n');
 }
 

@@ -14,8 +14,9 @@
 //                its schema), its ramp, Move up / Move down / Remove
 //   Light page - Sun: Manual (direction, altitude) or Date (day, time)
 //
-// Values change in place: a 'layerupdate' or 'sunchange' from elsewhere
-// patches the page on the next frame (after a drag ends); the panel's own
+// Values change in place: a 'layerupdate', 'sunchange' or 'rangechange'
+// from elsewhere updates the page on the next frame (after a press ends;
+// a moving sun only patches its rows); the panel's own
 // changes don't re-render it, so a dragged scrub keeps working. Escape on a
 // sub-page goes back (focus returns to the row that opened it).
 // ============================================================================
@@ -30,17 +31,18 @@ import type { BaseLayer } from '../layers/BaseLayer';
 import type { AnalysisLayer } from '../layers/AnalysisLayer';
 import type { StackLayer } from '../layers/LayerRegistry';
 import type { ParamSpec, RGB } from '../analysis/types';
-import { listAnalyses, getAnalysis } from '../analysis/registry';
+import { listAnalyses, getAnalysis, BLEND_MODES } from '../analysis/registry';
 import { runRegionAnalysis } from './regionAnalysis';
 import type { RegionAnalysisKind } from '../core/AnalysisController';
 import { BUILTIN_RAMPS, isRampName, rampGradientCss, rampNamesFor } from '../analysis/ramps';
 
-const BLEND_MODES: { id: BlendMode; label: string }[] = [
-  { id: 'normal',    label: 'Normal' },
-  { id: 'multiply',  label: 'Multiply' },
-  { id: 'screen',    label: 'Screen' },
-  { id: 'softlight', label: 'Soft light' },
-];
+/** Names of the blend modes (every mode of the registry needs one). */
+const BLEND_LABELS: Record<BlendMode, string> = {
+  normal: 'Normal',
+  multiply: 'Multiply',
+  screen: 'Screen',
+  softlight: 'Soft light',
+};
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -87,6 +89,9 @@ function sunText(azimuth: number, altitude: number): string {
 }
 
 const MINUTES_PER_DAY = 24 * 60;
+
+/** Segments that switch a mode (and set its defaults): a press on the selected one does nothing. */
+const MODE_ACTIONS = new Set(['suntime', 'auto', 'optional']);
 
 /** One segment of a segment group; the delegated click handler reads its data attributes. */
 interface Segment {
@@ -150,8 +155,8 @@ function activeIn(root: ShadowRoot): HTMLElement | null {
   }
 }
 
-/** Key of a control's value label (actions keep a parameter named like a panel control apart). */
-function valueKey(id: string, action: string, param: string): string {
+/** Focus key of a scrub row (the action keeps a parameter named like a panel control apart). */
+function scrubKey(id: string, action: string, param: string): string {
   return `${id}:${action}:${param}`;
 }
 
@@ -208,6 +213,8 @@ export class TreeletPanel extends BaseElement {
   private sunPending = false;
   /** The layers changed while a pointer was down: the page is rebuilt once it is up. */
   private layoutPending = false;
+  /** The mesh mode changed elsewhere. */
+  private meshPending = false;
 
   /** Persistent containers: only the page's markup is replaced on re-render. */
   private panelEl: HTMLDivElement | null = null;
@@ -256,6 +263,8 @@ export class TreeletPanel extends BaseElement {
     map.on('layerchange', this.onLayerChange);
     map.on('layerupdate', this.onLayerUpdate);
     map.on('sunchange', this.onSunChange);
+    map.on('rangechange', this.onRangeChange);
+    map.on('meshchange', this.onMeshChange);
   }
 
   private unsubscribe(): void {
@@ -265,6 +274,8 @@ export class TreeletPanel extends BaseElement {
     map.off('layerchange', this.onLayerChange);
     map.off('layerupdate', this.onLayerUpdate);
     map.off('sunchange', this.onSunChange);
+    map.off('rangechange', this.onRangeChange);
+    map.off('meshchange', this.onMeshChange);
     if (this.updateFrame) cancelAnimationFrame(this.updateFrame);
     this.updateFrame = 0;
   }
@@ -272,6 +283,21 @@ export class TreeletPanel extends BaseElement {
   private readonly onLayerChange = (): void => this.refresh();
   private readonly onLayerUpdate = (e: { id: string }): void => this.layerUpdated(e.id);
   private readonly onSunChange = (): void => this.sunChanged();
+  private readonly onMeshChange = (): void => {
+    if (this.ownChange || !this.map) return;
+    this.meshPending = true;
+    this.scheduleUpdate();
+  };
+  /** The visible elevations changed: a coat page whose scrubs span them (a water level, Auto) follows. */
+  private readonly onRangeChange = (): void => {
+    const v = this.view;
+    if (v.kind !== 'coat' || !this.map) return;
+    const layer = this.map.getLayerStack().find((l) => l.id === v.id);
+    if (layer && isAnalysis(layer) && layer.descriptor.params.some((p) => ('bounds' in p && p.bounds === 'elevation') || ('auto' in p && p.auto))) {
+      this.pendingUpdates.add(v.id);
+      this.scheduleUpdate();
+    }
+  };
 
   /**
    * Show the map's layers again (after layers were added, removed or
@@ -327,12 +353,41 @@ export class TreeletPanel extends BaseElement {
     const v = this.view;
     const layout = this.layoutPending;
     const coat = v.kind === 'coat' && this.pendingUpdates.has(v.id);
+    const base = this.map.getBaseLayers().find((l) => l.visible)?.id;
+    const terrain = v.kind === 'main' && (this.meshPending || (base !== undefined && this.pendingUpdates.has(base)));
     const sun = this.sunPending;
     this.layoutPending = false;
+    this.meshPending = false;
     this.pendingUpdates.clear();
     this.sunPending = false;
-    if (layout || coat) this.render();
-    else if (sun) this.showSun();
+    if (layout || coat) {
+      this.render();
+      return;
+    }
+    if (sun) this.showSun();
+    if (terrain) this.showTerrain();
+  }
+
+  /** The Terrain rows of the layers in place: exaggeration and mesh (set from code). */
+  private showTerrain(): void {
+    const map = this.map!;
+    const panel = this.panelEl!;
+    const exag = panel.querySelector<HTMLElement>('.scrub[data-action="exaggeration"]');
+    const value = map.getExaggeration();
+    if (exag) {
+      // Outside the scrub's range: rebuilt with a range that shows it
+      if (value < Number(exag.dataset.min) || value > Number(exag.dataset.max)) {
+        this.render();
+        return;
+      }
+      setScrub(exag, value, `${value.toFixed(1)}×`);
+    }
+    const mode = !map.getWireframe() ? 'solid' : map.getWireframeWhite() ? 'white' : 'wire';
+    panel.querySelectorAll<HTMLElement>('[data-action="wireframe"]').forEach((b) => {
+      const on = b.dataset.value === mode;
+      b.setAttribute('aria-pressed', String(on));
+      b.classList.toggle('sel', on);
+    });
   }
 
   /**
@@ -423,6 +478,8 @@ export class TreeletPanel extends BaseElement {
     const id = control.dataset.layerId ?? '';
     const key = control.dataset.param ?? '';
     const value = control.dataset.value ?? '';
+    // The selected mode again keeps what was set in it (a Date mode its day, a sector its ends)
+    if (MODE_ACTIONS.has(action) && control.getAttribute('aria-pressed') === 'true') return;
     const coatChange = (change: () => void) => {
       this.own(change);
       this.render();
@@ -504,8 +561,10 @@ export class TreeletPanel extends BaseElement {
         return;
       // --- Terrain ---
       case 'wireframe':
-        map.setWireframe(value !== 'solid');
-        map.setWireframeWhite(value === 'white');
+        this.own(() => {
+          map.setWireframe(value !== 'solid');
+          map.setWireframeWhite(value === 'white');
+        });
         this.render();
         return;
       case 'suntime':
@@ -563,7 +622,13 @@ export class TreeletPanel extends BaseElement {
   /** Escape on a sub-page goes back (and stays in the panel). */
   private handleKeyDown = (ev: Event): void => {
     const e = ev as KeyboardEvent;
-    if (e.key !== 'Escape' || this.view.kind === 'main') return;
+    if (e.key !== 'Escape') return;
+    // In a field (the day) Escape is the field's: it closes its picker, not the page or the column
+    if (e.target instanceof HTMLInputElement) {
+      e.stopPropagation();
+      return;
+    }
+    if (this.view.kind === 'main') return;
     e.preventDefault();
     e.stopPropagation();
     this.go({ kind: 'main' });
@@ -677,7 +742,12 @@ export class TreeletPanel extends BaseElement {
     const slot = this.panelEl.querySelector('.jobs-slot');
     if (slot && this.jobsEl) slot.replaceWith(this.jobsEl);
     if (key && (focusKey !== undefined || focused)) {
-      this.panelEl.querySelector<HTMLElement>(`[data-focus-key="${CSS.escape(key)}"]`)?.focus();
+      const el = this.panelEl.querySelector<HTMLElement>(`[data-focus-key="${CSS.escape(key)}"]`);
+      // Now disabled (Move up at the top): the next control of its row keeps focus
+      const target = el && (el as HTMLButtonElement).disabled
+        ? el.parentElement?.querySelector<HTMLElement>('button:not(:disabled)') ?? this.panelEl.querySelector<HTMLElement>('.row.back')
+        : el;
+      target?.focus();
     }
   }
 
@@ -808,11 +878,11 @@ export class TreeletPanel extends BaseElement {
     if (!time) {
       parts.push(scrubHtml({
         label: 'Direction', value: azimuth, min: 0, max: 360, step: 1, text: `${Math.round(azimuth)}°`,
-        data: { action: 'azimuth', 'layer-id': 'sun', param: 'azimuth' }, focusKey: valueKey('sun', 'azimuth', 'azimuth'),
+        data: { action: 'azimuth', 'layer-id': 'sun', param: 'azimuth' }, focusKey: scrubKey('sun', 'azimuth', 'azimuth'),
       }));
       parts.push(scrubHtml({
         label: 'Altitude', value: altitude, min: 5, max: 90, step: 1, text: `${Math.round(altitude)}°`,
-        data: { action: 'altitude', 'layer-id': 'sun', param: 'altitude' }, focusKey: valueKey('sun', 'altitude', 'altitude'),
+        data: { action: 'altitude', 'layer-id': 'sun', param: 'altitude' }, focusKey: scrubKey('sun', 'altitude', 'altitude'),
       }));
       return parts.join('');
     }
@@ -823,7 +893,7 @@ export class TreeletPanel extends BaseElement {
       <input type="date" class="date" data-action="sunday" data-layer-id="sun" data-focus-key="sun:day" value="${day}" aria-label="Day"></div>`);
     parts.push(scrubHtml({
       label: 'Time', value: hour, min: 0, max: 24 - 0.25, step: 0.25, text: formatHour(hour),
-      data: { action: 'sunhour', 'layer-id': 'sun', param: 'sunhour' }, focusKey: valueKey('sun', 'sunhour', 'sunhour'),
+      data: { action: 'sunhour', 'layer-id': 'sun', param: 'sunhour' }, focusKey: scrubKey('sun', 'sunhour', 'sunhour'),
     }));
     parts.push(`<div class="row"><span class="k">Sun</span><span class="v" data-value-for="sun:position">${sunText(azimuth, altitude)}</span></div>`);
     return parts.join('');
@@ -842,10 +912,10 @@ export class TreeletPanel extends BaseElement {
       this.backRow(layer.layerName),
       scrubHtml({
         label: 'Opacity', value: opacity, min: 0, max: 1, step: 0.05, text: `${Math.round(opacity * 100)}%`,
-        data: { action: 'opacity', 'layer-id': id, param: 'opacity' }, focusKey: valueKey(id, 'opacity', 'opacity'),
+        data: { action: 'opacity', 'layer-id': id, param: 'opacity' }, focusKey: scrubKey(id, 'opacity', 'opacity'),
       }),
       choices('Blend', BLEND_MODES.map((m) => ({
-        action: 'blend', layerId: id, value: m.id, label: m.label, active: blend === m.id, focusKey: `blend-${id}-${m.id}`,
+        action: 'blend', layerId: id, value: m, label: BLEND_LABELS[m], active: blend === m, focusKey: `blend-${id}-${m}`,
       }))),
     ];
     if (isAnalysis(layer)) {
@@ -882,7 +952,7 @@ export class TreeletPanel extends BaseElement {
         [min, max] = widen(min, max, [v], spec.step);
         return scrubHtml({
           label: spec.label, value: v, min, max, step: spec.step, text: withUnit(v, spec.step, unit),
-          data: { action: 'param', 'layer-id': id, param: spec.key, unit }, focusKey: valueKey(id, 'param', spec.key),
+          data: { action: 'param', 'layer-id': id, param: spec.key, unit }, focusKey: scrubKey(id, 'param', spec.key),
         });
       }
       case 'span': {
@@ -930,7 +1000,7 @@ export class TreeletPanel extends BaseElement {
           label: names[i], ariaLabel: `${spec.label} ${names[i].toLowerCase()}`, value: v, min: smin, max: smax, step,
           text: withUnit(v, step, unit),
           data: { action: 'span', 'layer-id': id, param: spec.key, span: i, unit, wrap: spec.wrap ? '' : undefined },
-          focusKey: `${valueKey(id, 'span', spec.key)}:${i}`,
+          focusKey: `${scrubKey(id, 'span', spec.key)}:${i}`,
         });
         parts.push(`<div class="duo">${end(0, lo)}${end(1, hi)}</div>`);
         return parts.join('');

@@ -79,8 +79,12 @@ export interface SlotInfo {
   lruNext: number;
 }
 
-/** Edge order in the raw-edge store. */
-const TOP = 0, BOTTOM = 1, LEFT = 2, RIGHT = 3;
+/**
+ * Edge order of the raw-edge store and of the halo rows. The surface shader
+ * gets it as HALO_TOP… (shaderConstants), so the two can't drift apart.
+ */
+export const HALO_EDGES = { TOP: 0, BOTTOM: 1, LEFT: 2, RIGHT: 3 } as const;
+const { TOP, BOTTOM, LEFT, RIGHT } = HALO_EDGES;
 
 /** Upper bound on the stitch band width in texels. */
 const MAX_STITCH_BAND = 8;
@@ -205,7 +209,9 @@ export class ElevationAtlas {
   changedSince(version: number): number[] | null {
     if (version < this.clearedAt) return null;
     const log = this.changeLog;
-    if (log.length > 0 && log[0].version > version + 1) return null;
+    // Complete only when the log reaches back to `version` itself: trimming can split
+    // the entries of one version (an eviction and the write it made room for)
+    if (log.length > 0 && log[0].version > version) return null;
     const out: number[] = [];
     for (let i = log.length - 1; i >= 0 && log[i].version > version; i--) out.push(log[i].key);
     return out;
@@ -379,6 +385,15 @@ export class ElevationAtlas {
   }
 
   /** Forget every tile. GPU data is not touched: no instance references it anymore. */
+  /**
+   * Report every elevation as changed without changing any (the levels the
+   * CPU samples from changed): observers sample everything again.
+   */
+  invalidate(): void {
+    this._version++;
+    this.clearedAt = this._version;
+  }
+
   clear(): void {
     this._version++;
     this.clearedAt = this._version;

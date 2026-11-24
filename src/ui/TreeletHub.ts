@@ -1,27 +1,25 @@
 // ============================================================================
 // treelet.js - TreeletHub Web Component
 //
-// <treelet-hub> - the tree box. It opens into a column with these pages:
+// <treelet-hub> - the tree box. It opens into a column with two pages:
 //
 //   Layers  - the coat stack and the terrain (<treelet-panel>)
-//   Themes  - the thematic maps of `map.setThemes()` (only while there
-//             are any)
 //   Measure - the measuring tools and their results (<treelet-toolbar>),
 //             and the elevation profile (<treelet-profile>)
 //
 // Running analyses, a pending pick and failures (<treelet-jobs>) show in
-// the Layers page's Overlay group, and at the foot of the other pages.
+// the Layers page's Overlay group, at the foot of the Measure page, and
+// beside the box while the column is closed.
 //
-// The page buttons sit on the rail by the box's corner (Measure, Themes,
-// then Layers by the corner); the tree at the rail's far end closes the
-// column. While region analyses run, the box at rest shows their progress
-// as a thin line.
+// The page buttons sit on the rail by the box's corner (Measure above
+// Layers); the tree at the rail's far end closes the column. While region
+// analyses run, the box at rest shows their progress as a thin line.
 // ============================================================================
 
-import { BaseElement, escapeHtml } from './dom';
+import { BaseElement } from './dom';
 import { DockFrame } from './dock';
 import { TREE_SVG } from './treeSvg';
-import { LAYERS_SVG, MEASURE_SVG, THEMES_SVG } from './icons';
+import { LAYERS_SVG, MEASURE_SVG } from './icons';
 import type { TreeletPanel } from './TreeletPanel';
 import type { TreeletJobs } from './TreeletJobs';
 import { resultPairs, type TreeletToolbar } from './TreeletToolbar';
@@ -31,7 +29,7 @@ import type { Treelet } from '../core/Treelet';
 import type { UICorner } from '../core/types';
 
 /** Pages of the hub. */
-export type HubPage = 'layers' | 'themes' | 'measure';
+export type HubPage = 'layers' | 'measure';
 
 const hubStyles = /* css */ `
   .box > svg { width: 34px; height: 28px; }
@@ -40,6 +38,16 @@ const hubStyles = /* css */ `
   /* The jobs at the foot of a page (hidden with nothing to show) */
   .foot { padding-top: 0; }
   .foot > treelet-jobs { margin-top: 4px; }
+  /* At rest, beside the box: a column-wide surface above it (below it in a top corner) */
+  treelet-jobs.peek {
+    position: absolute; width: 264px; max-width: calc(100vw - 24px); padding: 6px; pointer-events: auto;
+    background: var(--surface-bg); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow);
+    -webkit-backdrop-filter: var(--surface-filter); backdrop-filter: var(--surface-filter);
+  }
+  :host([data-v="bottom"]) treelet-jobs.peek { bottom: 62px; }
+  :host([data-v="top"]) treelet-jobs.peek { top: 62px; }
+  :host([data-h="right"]) treelet-jobs.peek { right: 0; }
+  :host([data-h="left"]) treelet-jobs.peek { left: 0; }
   :host([tool-active]) .tool-on { fill: var(--accent); }
 `;
 
@@ -50,14 +58,13 @@ export class TreeletHub extends BaseElement {
   private panel: TreeletPanel | null = null;
   private toolbar: TreeletToolbar | null = null;
   private profile: TreeletProfile | null = null;
-  /** The jobs at the foot of the pages other than Layers (which has its own). */
+  /** The jobs at the foot of the Measure page (the Layers page has its own), or beside the box at rest. */
   private jobs: TreeletJobs | null = null;
   private subscribed = false;
   private wasOpen = false;
   private profileHover: ((p: ProfilePoint | null) => void) | null = null;
   private profileClose: (() => void) | null = null;
   private readonly onJobs = (): void => this.showJobs();
-  private readonly onThemes = (): void => this.renderThemes();
   private readonly onTool = (): void => {
     this.toggleAttribute('tool-active', !!this.map && (this.map.getTool().mode !== null || this.map.isPicking()));
   };
@@ -75,31 +82,32 @@ export class TreeletHub extends BaseElement {
    * @param options.glass  - frosted surfaces
    */
   attach(map: Treelet, options: { corner?: UICorner; tools?: boolean; glass?: boolean } = {}): void {
-    if (this.map !== map) this.unsubscribe();
+    if (this.map !== map) {
+      this.unsubscribe();
+      // Another map's profile (and its hooks) goes
+      this.profile?.hide();
+      this.profileHover = null;
+      this.profileClose = null;
+    }
     this.map = map;
     this.toggleAttribute('glass', options.glass === true);
     const glass = { glass: options.glass === true };
+    const tools = options.tools !== false;
+    // The pages are built once; with or without a Measure page now, they are built again
+    if (this.dock && tools !== (this.toolbar !== null)) this.rebuild();
     if (!this.dock) {
-      const tools = options.tools !== false;
       this.dock = new DockFrame(this, this.shadow, {
         label: 'Layers and measuring',
         boxIcon: TREE_SVG,
         railIcon: TREE_SVG,
         pages: [
           ...(tools ? [{ id: 'measure', label: 'Measure', icon: MEASURE_SVG }] : []),
-          { id: 'themes', label: 'Themes', icon: THEMES_SVG, hidden: true },
           { id: 'layers', label: 'Layers', icon: LAYERS_SVG },
         ],
         footer: true,
       }, (open, page) => this.onDockChange(open, page), hubStyles);
       this.jobs = document.createElement('treelet-jobs') as TreeletJobs;
-      this.dock.foot!.appendChild(this.jobs);
-      this.dock.foot!.hidden = this.dock.page === 'layers';
-
-      this.dock.pageEl('themes').addEventListener('click', (e) => {
-        const row = (e.target as Element).closest<HTMLElement>('[data-theme]');
-        if (row && this.map) this.map.applyTheme(row.dataset.theme!);
-      });
+      this.placeJobs(false, this.dock.page);
 
       this.panel = document.createElement('treelet-panel') as TreeletPanel;
       this.dock.pageEl('layers').appendChild(this.panel);
@@ -124,14 +132,14 @@ export class TreeletHub extends BaseElement {
     if (this.isConnected) this.subscribe();
     this.showJobs();
     this.onTool();
-    this.renderThemes();
   }
 
   connectedCallback(): void {
+    // Moved in the page: listen again, and catch up on what changed meanwhile
     if (this.map && this.dock) {
       this.subscribe();
       this.showJobs();
-      this.renderThemes();
+      this.onTool();
     }
   }
 
@@ -186,9 +194,42 @@ export class TreeletHub extends BaseElement {
     this.profile?.hide();
   }
 
+  /** Drop the column and its pages (the next attach builds them again). */
+  private rebuild(): void {
+    if (this.wasOpen) {
+      this.wasOpen = false;
+      this.dispatchEvent(new Event('close'));
+    }
+    this.dock = null;
+    this.panel = null;
+    this.toolbar = null;
+    this.profile = null;
+    this.jobs = null;
+    this.shadow.innerHTML = '';
+  }
+
+  /**
+   * Where the hub's jobs show: at the foot of the open column (not on the
+   * Layers page, which has its own), or beside the box at rest (a pending
+   * pick's prompt, progress with cancel, failures).
+   */
+  private placeJobs(open: boolean, page: string): void {
+    const jobs = this.jobs;
+    const foot = this.dock?.foot;
+    if (!jobs || !foot) return;
+    if (open) {
+      if (jobs.parentNode !== foot) foot.appendChild(jobs);
+      jobs.classList.remove('peek');
+      foot.hidden = page === 'layers';
+    } else {
+      if (jobs.parentNode !== this.shadow) this.shadow.appendChild(jobs);
+      jobs.classList.add('peek');
+    }
+  }
+
   private onDockChange(open: boolean, page: string): void {
     if (!open) this.panel?.resetSettings();
-    if (this.dock?.foot) this.dock.foot.hidden = page === 'layers';
+    this.placeJobs(open, page);
     if (open !== this.wasOpen) {
       this.wasOpen = open;
       this.dispatchEvent(new Event(open ? 'open' : 'close'));
@@ -205,7 +246,6 @@ export class TreeletHub extends BaseElement {
     map.on('toolchange', this.onTool);
     map.on('pickstart', this.onTool);
     map.on('pickend', this.onTool);
-    map.on('themechange', this.onThemes);
   }
 
   private unsubscribe(): void {
@@ -218,36 +258,6 @@ export class TreeletHub extends BaseElement {
     map.off('toolchange', this.onTool);
     map.off('pickstart', this.onTool);
     map.off('pickend', this.onTool);
-    map.off('themechange', this.onThemes);
-  }
-
-  /**
-   * The Themes page: one row per theme, the applied one selected (a row
-   * applies its theme, again when it is selected). The page and its rail
-   * button are hidden while there are no themes.
-   */
-  private renderThemes(): void {
-    const dock = this.dock;
-    if (!dock || !this.map) return;
-    const themes = this.map.getThemes?.() ?? [];
-    const active = this.map.getActiveTheme?.() ?? null;
-    dock.setPageHidden('themes', themes.length === 0);
-    const page = dock.pageEl('themes');
-    let focused: string | undefined;
-    try {
-      focused = (this.shadow.activeElement as HTMLElement | null)?.dataset?.theme;
-    } catch { /* focus moved while the page was rebuilt */ }
-    page.innerHTML = themes.length === 0 ? '' : '<div class="grp"><span class="t">Themes</span></div>'
-      + themes.map((t) => {
-        const on = t.id === active;
-        const tip = t.description ? ` title="${escapeHtml(t.description)}"` : '';
-        return `<button type="button" class="row${on ? ' sel' : ''}" data-theme="${escapeHtml(t.id)}" aria-pressed="${on}"${tip}>`
-          + `<span class="t">${escapeHtml(t.name)}</span></button>`;
-      }).join('');
-    // A row that had focus keeps it
-    if (focused !== undefined) {
-      [...page.querySelectorAll<HTMLElement>('[data-theme]')].find((b) => b.dataset.theme === focused)?.focus();
-    }
   }
 
   /** The mean progress of the running jobs on the box at rest. */

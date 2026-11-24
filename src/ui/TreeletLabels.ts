@@ -50,37 +50,46 @@ export class TreeletLabels extends BaseElement {
     this.shadow.innerHTML = `<style>${labelStyles}</style>`;
   }
 
-  /** Show exactly these labels (centered above their anchors). */
   /**
    * Show these labels (and hide the rest). A label keeps its element from
    * one call to the next (matched by text and style), so a label dropping
    * out doesn't restyle every later one; only positions change.
    */
   show(labels: readonly PlacedLabel[]): void {
-    const used = new Set<HTMLSpanElement>();
-    const free = (key: string) => this.spans.find((s, i) => this.keys[i] === key && !used.has(s));
+    // The elements by text and style (indices, in order), taken as labels claim them
+    const byKey = new Map<string, number[]>();
+    for (let i = 0; i < this.spans.length; i++) {
+      const list = byKey.get(this.keys[i]);
+      if (list) list.push(i);
+      else byKey.set(this.keys[i], [i]);
+    }
+    const used = new Uint8Array(this.spans.length);
     const unmatched: Array<[PlacedLabel, string]> = [];
     for (const l of labels) {
       const key = `${l.text}|${l.size}|${l.color}|${l.halo}`;
-      const span = free(key);
-      if (span) {
-        used.add(span);
-        this.place(span, l);
-      } else {
+      const i = byKey.get(key)?.shift();
+      if (i === undefined) {
         unmatched.push([l, key]);
+        continue;
       }
+      used[i] = 1;
+      this.place(this.spans[i], l);
     }
+    // The rest take the free elements in order (new ones when there are none left)
+    let next = 0;
+    const claimed: number[] = [];
     for (const [l, key] of unmatched) {
-      let i = this.spans.findIndex((s) => !used.has(s));
-      if (i < 0) {
+      while (next < used.length && used[next]) next++;
+      let i = next++;
+      if (i >= used.length) {
         const span = document.createElement('span');
         this.shadow.appendChild(span);
         this.spans.push(span);
         this.keys.push('');
         i = this.spans.length - 1;
       }
+      claimed.push(i);
       const span = this.spans[i];
-      used.add(span);
       this.keys[i] = key;
       span.textContent = l.text;
       span.style.fontSize = `${l.size}px`;
@@ -89,7 +98,8 @@ export class TreeletLabels extends BaseElement {
       span.style.textShadow = `0 0 2px ${h}, 0 0 2px ${h}, 0 0 3px ${h}`;
       this.place(span, l);
     }
-    for (const s of this.spans) if (!used.has(s)) s.hidden = true;
+    for (const i of claimed) if (i < used.length) used[i] = 1;
+    for (let i = 0; i < used.length; i++) if (!used[i]) this.spans[i].hidden = true;
   }
 
   private place(span: HTMLSpanElement, l: PlacedLabel): void {

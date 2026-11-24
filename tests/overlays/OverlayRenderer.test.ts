@@ -221,6 +221,20 @@ describe('OverlayRenderer', () => {
     expect(placed.map((l) => l.text)).toEqual(['One']);
   });
 
+  it('a redrape sends only the changed part of the line buffer to the GPU', () => {
+    const { r, scene, terrainChanged } = setup({ texelWorld: () => 0.05 }); // densified into many chunks
+    r.set('o1', { name: 'T', data: { type: 'FeatureCollection', features: [data.features[2]] } });
+    r.update(false, 0);
+    const [line] = objects(scene).lines;
+    const buffer = (line.geometry.attributes.instanceStart as unknown as { data: { array: Float32Array; updateRanges: Array<{ start: number; count: number }> } }).data;
+    buffer.updateRanges.length = 0;
+    terrainChanged([{ west: 90, south: -1, east: 100, north: 1 }]); // the trail's east end
+    r.update(false, 250);
+    expect(buffer.updateRanges.length).toBeGreaterThan(0);
+    const sent = buffer.updateRanges.reduce((n, u) => n + u.count, 0);
+    expect(sent).toBeLessThan(buffer.array.length / 2);
+  });
+
   it('many changed tiles: every vertex is sampled again, without testing each against each tile', () => {
     const { r, deps, terrainChanged } = setup();
     const height = deps.groundHeight as ReturnType<typeof vi.fn>;

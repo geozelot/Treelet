@@ -61,7 +61,8 @@ function fakeMap(opts: { baseLayers?: number; stack?: unknown[]; legends?: unkno
     getActiveDrapeId: () => null,
     getLegend: () => ({ domain: [0, 4000] }),
     getLegends: () => opts.legends ?? [],
-    getVisibleElevationRange: () => [800, 2600] as [number, number],
+    visibleRange: [800, 2600] as [number, number],
+    getVisibleElevationRange() { return this.visibleRange; },
     getRegionAnalyses: () => ['viewshed', 'sunhours', 'skyview', 'tpi'],
     computeAnalysis: vi.fn(() => Promise.resolve({})),
     pickLocation: vi.fn(() => Promise.resolve({ lngLat: { lng: 11.4, lat: 47.3 }, elevation: 2000, slope: 0, aspect: null, curvature: 0, normal: [0, 0, 1] })),
@@ -101,18 +102,6 @@ function fakeMap(opts: { baseLayers?: number; stack?: unknown[]; legends?: unkno
     getTool: () => ({ mode: null, drawing: false, result: null }),
     isPicking: () => false,
     showProfile: vi.fn(),
-    themes: [] as Array<{ id: string; name: string; description?: string }>,
-    activeTheme: null as string | null,
-    getThemes() { return [...this.themes]; },
-    getActiveTheme() { return this.activeTheme; },
-    setThemes(themes: Array<{ id: string; name: string; description?: string }>) {
-      this.themes = themes;
-      this.emit('themechange', { id: this.activeTheme });
-    },
-    applyTheme: vi.fn(function (this: { activeTheme: string | null; emit: (e: string, d: unknown) => void }, id: string | null) {
-      this.activeTheme = id;
-      this.emit('themechange', { id });
-    }),
   };
   return map;
 }
@@ -551,6 +540,103 @@ describe('jobs', () => {
   });
 });
 
+describe('panel modes and ranges', () => {
+  it('pressing the selected mode again keeps what was set in it', () => {
+    const map = fakeMap({ stack: [fakeAnalysis('analysis-8', 'slope', { params: { range: [10, 40], aspectMask: [90, 180] } })] });
+    map.sunTime = new Date(2024, 11, 21, 10, 30);
+    const { proot } = mountPanel(map);
+    click(proot, '[data-view="light"]');
+    click(proot, '[data-action="suntime"][data-value="date"]'); // already Date
+    expect(map.setSunTime).not.toHaveBeenCalled();
+    click(proot, '.row.back');
+    openCoat(proot, 'analysis-8');
+    click(proot, '[data-action="optional"][data-value="true"]'); // already a sector
+    expect(map.setAnalysisParams).not.toHaveBeenCalled();
+  });
+
+  it('a coat page whose scrubs span the visible elevations follows them', async () => {
+    const map = fakeMap({ stack: [fakeAnalysis('analysis-6', 'water')] });
+    const { proot } = mountPanel(map);
+    openCoat(proot, 'analysis-6');
+    const level = () => proot.querySelector<HTMLElement>('.scrub[data-param="level"]')!;
+    const before = Number(level().dataset.max);
+    map.visibleRange = [2000, 3600];
+    map.emit('rangechange', { min: 2000, max: 3600 });
+    await frame();
+    expect(Number(level().dataset.max)).toBeGreaterThan(before);
+  });
+
+  it("another finger's cancel leaves a scrub's drag going", () => {
+    const map = fakeMap();
+    const { proot } = mountPanel(map);
+    openCoat(proot, 'analysis-1');
+    const el = proot.querySelector<HTMLElement>('.scrub[data-action="opacity"]')!;
+    el.getBoundingClientRect = () => ({ left: 0, top: 0, right: 100, bottom: 24, width: 100, height: 24, x: 0, y: 0, toJSON: () => ({}) });
+    const ev = (type: string, id: number, x: number) => el.dispatchEvent(new PointerEvent(type, { pointerType: 'mouse', pointerId: id, clientX: x, bubbles: true, composed: true }));
+    ev('pointerdown', 1, 20);
+    ev('pointercancel', 2, 0);
+    map.setLayerOpacity.mockClear();
+    ev('pointermove', 1, 80);
+    expect(map.setLayerOpacity).toHaveBeenCalledWith('analysis-1', 0.8);
+  });
+});
+
+describe('panel terrain and keys', () => {
+  it('exaggeration and mesh set from code show on the layers, in place', async () => {
+    const map = fakeMap();
+    let exag = 1.3;
+    let wire = false;
+    (map as { getExaggeration: () => number }).getExaggeration = () => exag;
+    (map as { getWireframe: () => boolean }).getWireframe = () => wire;
+    const { proot } = mountPanel(map);
+    const scrub = proot.querySelector<HTMLElement>('.scrub[data-action="exaggeration"]')!;
+    exag = 2.5;
+    map.emit('layerupdate', { id: 'base-0' });
+    wire = true;
+    map.emit('meshchange', { wireframe: true, white: false });
+    await frame();
+    expect(proot.querySelector('.scrub[data-action="exaggeration"]')).toBe(scrub);
+    expect(scrub.dataset.value).toBe('2.5');
+    expect(proot.querySelector('[data-action="wireframe"][data-value="wire"]')!.getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('Escape in the day field stays on the Light page (and in the column)', () => {
+    const map = fakeMap();
+    map.sunTime = new Date(2024, 11, 21, 9, 0);
+    const { proot } = mountPanel(map);
+    click(proot, '[data-view="light"]');
+    const day = proot.querySelector<HTMLInputElement>('input[data-action="sunday"]')!;
+    const outside = vi.fn();
+    document.body.addEventListener('keydown', outside);
+    key(day, 'Escape');
+    document.body.removeEventListener('keydown', outside);
+    expect(proot.querySelector('.row.back')).not.toBeNull();
+    expect(outside).not.toHaveBeenCalled();
+  });
+
+  it('moving a coat to the top keeps the focus on its page (Move down)', () => {
+    const map = fakeMap();
+    const { proot } = mountPanel(map);
+    openCoat(proot, 'analysis-0'); // hillshade, below elevation
+    const up = proot.querySelector<HTMLElement>('[data-action="up"]')!;
+    up.focus();
+    // The map moves it to the top: the page comes back with Move up disabled
+    map.moveLayer.mockImplementation(() => { (map.getLayerStack() as unknown[]).reverse(); map.emit('layerchange', {}); });
+    up.click();
+    expect((proot.activeElement as HTMLElement | null)?.dataset.action).toBe('down');
+  });
+
+  it('a key never moves a scrub the other way (a value set from code past its end)', () => {
+    const map = fakeMap();
+    map.sunTime = new Date(2024, 11, 21, 23, 50);
+    const { proot } = mountPanel(map);
+    click(proot, '[data-view="light"]');
+    const hour = proot.querySelector<HTMLElement>('.scrub[data-action="sunhour"]')!;
+    key(hour, 'ArrowRight');
+    expect(map.setSunTime).not.toHaveBeenCalled();
+  });
+});
+
 describe('panel updates from elsewhere', () => {
   it('a moving sun updates the rows in place (the Light row, the time, the day being edited)', async () => {
     const map = fakeMap();
@@ -692,53 +778,6 @@ describe('hub', () => {
     expect(root.querySelector('#page-layers')!.hasAttribute('role')).toBe(false);
   });
 
-  it('shows the Themes page while the map has themes; a row applies its theme', () => {
-    const { map, hub, root } = mountHub();
-    expect(railLabels(root)).not.toContain('Themes');
-    hub.open('themes');
-    expect(hub.page).toBe('layers');
-    map.setThemes([
-      { id: 'relief', name: 'Relief', description: 'Elevation colors' },
-      { id: 'flood', name: 'Flood' },
-    ]);
-    // Between Measure and Layers
-    expect(railLabels(root)).toEqual(['Close layers and measuring', 'Measure', 'Themes', 'Layers']);
-    click(root, '#tab-themes');
-    expect(hub.page).toBe('themes');
-    const rows = [...root.querySelectorAll<HTMLElement>('#page-themes [data-theme]')];
-    expect(rows.map((r) => r.textContent)).toEqual(['Relief', 'Flood']);
-    expect(rows[0].title).toBe('Elevation colors');
-    expect(root.querySelector('#page-themes .row.sel')).toBeNull();
-    rows[1].focus();
-    rows[1].click();
-    expect(map.applyTheme).toHaveBeenCalledWith('flood');
-    const sel = root.querySelector<HTMLElement>('#page-themes .row.sel')!;
-    expect(sel.dataset.theme).toBe('flood');
-    expect(sel.getAttribute('aria-pressed')).toBe('true');
-    // The row keeps focus through the rebuild
-    expect((root.activeElement as HTMLElement).dataset.theme).toBe('flood');
-  });
-
-  it('without themes left the open Themes page turns to Layers', () => {
-    const { map, hub, root } = mountHub();
-    map.setThemes([{ id: 'relief', name: 'Relief' }]);
-    hub.open('themes');
-    expect(hub.page).toBe('themes');
-    map.setThemes([]);
-    expect(hub.page).toBe('layers');
-    expect((root.querySelector('#page-layers') as HTMLElement).hidden).toBe(false);
-    expect(railLabels(root)).toEqual(['Close layers and measuring', 'Measure', 'Layers']);
-  });
-
-  it('without tools the themes still get their page (and the rail its page buttons)', () => {
-    const map = fakeMap();
-    map.themes = [{ id: 'relief', name: 'Relief' }];
-    const { hub, root } = mountHub(map, { tools: false });
-    hub.open();
-    expect(railLabels(root)).toEqual(['Close layers and measuring', 'Themes', 'Layers']);
-    expect(root.querySelector('#page-themes')!.getAttribute('role')).toBe('tabpanel');
-  });
-
   it('shows running jobs on the box at rest', () => {
     const map = fakeMap();
     const jobs = [{ id: 'job-1', label: 'Sky view', stage: 'computing', progress: 0.5 }];
@@ -781,6 +820,66 @@ describe('hub', () => {
     expect(labels()).toEqual([]);
   });
 
+  it('in a top corner the arrow keys follow the page buttons as shown (bottom to top)', () => {
+    const map = fakeMap();
+    const hub = document.createElement('treelet-hub') as TreeletHub;
+    document.body.appendChild(hub);
+    hub.attach(asMap(map), { corner: 'top-right' });
+    const root = hub.shadowRoot!;
+    hub.open('layers'); // shown at the top, by the corner
+    key(root.querySelector('#tab-layers')!, 'ArrowDown');
+    expect(hub.page).toBe('measure');
+    key(root.querySelector('#tab-measure')!, 'Home');
+    expect(hub.page).toBe('layers');
+  });
+
+  it('moved in the page, it catches up with a tool started meanwhile', () => {
+    const map = fakeMap();
+    const { hub } = mountHub(map);
+    hub.remove();
+    (map as { getTool: () => unknown }).getTool = () => ({ mode: 'distance', drawing: true, result: null });
+    document.body.appendChild(hub);
+    expect(hub.hasAttribute('tool-active')).toBe(true);
+  });
+
+  it('at rest the jobs show beside the box (a pick prompt, progress, failures)', () => {
+    const map = fakeMap();
+    const { hub, root } = mountHub(map);
+    const jobs = () => root.querySelector('treelet-jobs')!;
+    expect(jobs().classList.contains('peek')).toBe(true);
+    expect(jobs().parentNode).toBe(root);
+    map.emit('pickstart', { prompt: 'Place a marker' });
+    expect(jobs().hasAttribute('busy')).toBe(true);
+    expect(jobs().shadowRoot!.textContent).toContain('Place a marker');
+    hub.open('measure');
+    expect(jobs().parentNode).toBe(root.querySelector('.foot'));
+    expect(jobs().classList.contains('peek')).toBe(false);
+    hub.close();
+    expect(jobs().classList.contains('peek')).toBe(true);
+  });
+
+  it('the page buttons come before the page in the tab order', () => {
+    const { root } = mountHub();
+    const pane = root.querySelector('.pane')!;
+    expect(pane.firstElementChild!.classList.contains('rail')).toBe(true);
+  });
+
+  it('attached again, it follows the new options and drops another map\'s profile', () => {
+    const map = fakeMap();
+    const { hub, root } = mountHub(map);
+    const onClose = vi.fn();
+    const points = Array.from({ length: 5 }, (_, i) => ({ distance: i * 100, elevation: 1000, lngLat: { lng: 11, lat: 47 } }));
+    hub.showProfile({ title: 'Profile', points, stats: [] }, { onHover: vi.fn(), onClose });
+    const other = fakeMap();
+    hub.attach(asMap(other), { corner: 'bottom-right' });
+    expect((root.querySelector('treelet-profile') as HTMLElement).hidden).toBe(true);
+    hub.attach(asMap(other), { corner: 'bottom-right', tools: false });
+    expect(hub.hasTools).toBe(false);
+    expect(root.querySelector('#page-measure')).toBeNull();
+    hub.attach(asMap(other), { corner: 'bottom-right', tools: true });
+    expect(hub.hasTools).toBe(true);
+  });
+
   it('opened from the keyboard with one page, focus goes to the close button', () => {
     const { root } = mountHub(fakeMap(), { tools: false });
     (root.querySelector('.box') as HTMLElement).click(); // a keyboard click (detail 0)
@@ -794,6 +893,31 @@ describe('hub', () => {
 });
 
 describe('info box', () => {
+  it('shows a bearing just left of north as 0.0°, not 360.0°', () => {
+    const { info, root } = mountInfo();
+    info.open('map');
+    info.updateCamera({ zoom: 10, pitch: 30, rotation: -0.03, distance: 1 });
+    expect(root.querySelector('[data-stat="bearing"]')!.textContent).toBe('0.0°');
+  });
+
+  it('attached again without the readout, the Legend page drops it (and takes it back)', () => {
+    const map = fakeMap();
+    const { info, root } = mountInfo(map);
+    expect(root.querySelector('treelet-readout')).not.toBeNull();
+    info.attach(asMap(map), { corner: 'bottom-left', readout: false });
+    expect(info.shadowRoot!.querySelector('treelet-readout')).toBeNull();
+    info.attach(asMap(map), { corner: 'bottom-left' });
+    expect(info.shadowRoot!.querySelector('treelet-readout')).not.toBeNull();
+  });
+
+  it('attached again while on the Legend page, the readout keeps sampling', () => {
+    const map = fakeMap();
+    const { info, root } = mountInfo(map);
+    info.open('legend');
+    info.attach(asMap(map), { corner: 'bottom-right' });
+    expect((root.querySelector('treelet-readout') as TreeletReadout).active).toBe(true);
+  });
+
   it('opens on the Legend page with the legend, the readout and the credits', () => {
     const map = fakeMap({ legends: [{ id: 'a', title: 'Elevation', unit: 'm', type: 'continuous', domain: [0, 4000], stops: [[0, [0, 0, 0]], [1, [1, 1, 1]]] }] });
     const { info, root } = mountInfo(map);
@@ -894,6 +1018,23 @@ describe('legend', () => {
     return { map, el, root: el.shadowRoot! };
   }
 
+  it('follows the zoom (coats with a zoom range) and waits while hidden', async () => {
+    const legends: unknown[] = [];
+    const { map, el, root } = mountLegend(legends);
+    const titles = () => [...root.querySelectorAll('.grp .t')].map((t) => t.textContent);
+    legends.push({ id: 'a', title: 'Slope', type: 'classes', domain: [0, 60], classes: [{ color: [1, 0, 0], label: '≥ 30°' }] });
+    map.emit('zoom', { zoom: 12 });
+    await frame();
+    expect(titles()).toEqual(['Slope']);
+    el.active = false;
+    legends.length = 0;
+    map.emit('zoom', { zoom: 10 });
+    await frame();
+    expect(titles()).toEqual(['Slope']); // not rendered while hidden…
+    el.active = true;
+    expect(titles()).toEqual([]); // …but at once when shown
+  });
+
   it('renders bars with their range and classes highest first', () => {
     const { el, root } = mountLegend([
       { id: 'a', title: 'Elevation', unit: 'm', type: 'continuous', domain: [100, 3000], stops: [[0, [0, 0, 0]], [1, [1, 1, 1]]] },
@@ -964,6 +1105,16 @@ describe('readout', () => {
     expect(map.pick).toHaveBeenCalledTimes(1);
   });
 
+  it('a tap while the readout is hidden samples nothing (and pins nothing)', () => {
+    const { map, el, title } = mountReadout();
+    el.active = false;
+    document.body.dispatchEvent(new PointerEvent('pointerdown', { pointerType: 'touch', pointerId: 3, clientX: 20, clientY: 20, bubbles: true }));
+    document.body.dispatchEvent(new PointerEvent('pointerup', { pointerType: 'touch', pointerId: 3, clientX: 21, clientY: 20, bubbles: true }));
+    expect(map.pick).not.toHaveBeenCalled();
+    el.active = true;
+    expect(title()).not.toBe('Tapped point');
+  });
+
   it('the extra row shows the topmost coat with a value at the pointer', () => {
     const map = fakeMap({ stack: [fakeAnalysis('analysis-2', 'curvature'), fakeAnalysis('analysis-3', 'skyview')] });
     map.getAnalysisValue.mockImplementation(((id: string) => (id === 'analysis-2' ? 0.5 : null)) as never);
@@ -991,6 +1142,24 @@ describe('readout', () => {
     canvas.dispatchEvent(new PointerEvent('pointermove', { pointerType: 'mouse', bubbles: true, composed: true }));
     await frame();
     expect(map.pick).toHaveBeenCalled();
+  });
+
+  it('over the controls the dashes are drawn once, not on every move', () => {
+    const container = document.createElement('div');
+    const control = document.createElement('div');
+    control.attachShadow({ mode: 'open' }).innerHTML = '<button>Zoom</button>';
+    container.append(control);
+    document.body.appendChild(container);
+    const map = fakeMap();
+    (map as { getContainer: () => HTMLElement }).getContainer = () => container;
+    const readout = document.createElement('treelet-readout') as TreeletReadout;
+    container.appendChild(readout);
+    readout.attach(asMap(map));
+    const row = readout.shadowRoot!.querySelector('.row');
+    const move = () => control.shadowRoot!.querySelector('button')!.dispatchEvent(new PointerEvent('pointermove', { pointerType: 'mouse', bubbles: true, composed: true }));
+    move();
+    move();
+    expect(readout.shadowRoot!.querySelector('.row')).toBe(row);
   });
 
   it('ignores pointers over the controls', async () => {

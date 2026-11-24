@@ -74,7 +74,7 @@ export class TreeletAttribution extends BaseElement {
     this.toggleAttribute('glass', options.glass === true);
     if (!this.attrEl) {
       this.shadow.innerHTML = `<style>${attributionStyles}</style>
-        <div class="credit" role="contentinfo" aria-label="Credits">
+        <div class="credit" role="group" aria-label="Map credits">
           <span class="mark">${TREE_SVG}<b>Treelet</b></span><span class="attr"></span>
         </div>`;
       this.attrEl = this.shadow.querySelector('.attr');

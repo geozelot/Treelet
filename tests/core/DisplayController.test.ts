@@ -19,6 +19,7 @@ function setup() {
   const registry = new LayerRegistry();
   const renderer = {
     setCoats: vi.fn(),
+    drawnCoatIds: vi.fn((): string[] => []),
     setDrapeShown: vi.fn(),
     setSunDirection: vi.fn(),
     rasterSlot: () => -1,
@@ -45,6 +46,16 @@ describe('DisplayController', () => {
     registry.setActiveDrape(h);
     expect(dc.getLayerOpacity(h)).toBe(0.3);
     expect(dc.getLayerBlendMode(h)).toBe('multiply');
+  });
+
+  it('legends are only of the coats drawn (not those outside their zoom range or at opacity 0)', () => {
+    const { dc, registry, renderer } = setup();
+    const a = registry.addAnalysisLayer({ analysis: 'elevation' });
+    const b = registry.addAnalysisLayer({ analysis: 'slope', minZoom: 12 });
+    renderer.drawnCoatIds.mockReturnValue([a.id]);
+    expect(dc.getLegends().map((l) => l.id)).toEqual([a.id]);
+    renderer.drawnCoatIds.mockReturnValue([a.id, b.id]);
+    expect(dc.getLegends().map((l) => l.id)).toEqual([b.id, a.id]);
   });
 
   it('getAnalysisParams hands out a copy', () => {

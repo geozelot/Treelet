@@ -186,12 +186,15 @@ export class LayerController {
   /**
    * Add a coat of a raster-backed kind (`raster`, `image`, `viewshed`…)
    * drawing `raster`. With `fitRange`, a value raster's `range` parameter
-   * becomes the range of its data. Throws when all raster slots are taken.
+   * becomes the range of its data. `owner`: the overlay whose fills the
+   * coat draws (set before the coat is drawn or announced). Throws when all
+   * raster slots are taken.
    */
-  addRasterLayer<P extends object>(options: AnalysisLayerOptions<P>, raster: RasterInput, fitRange = false): LayerHandle {
+  addRasterLayer<P extends object>(options: AnalysisLayerOptions<P>, raster: RasterInput, fitRange = false, owner: string | null = null): LayerHandle {
     const descriptor = getAnalysis(options.analysis);
     if (!descriptor?.raster) throw new Error(`treelet: "${options.analysis}" is not a raster analysis`);
     const handle = this.layerRegistry.addAnalysisLayer(options);
+    if (owner !== null) this.layerRegistry.getAnalysisLayer(handle)!.owner = owner;
     try {
       const entry = this.terrainRenderer.bindRaster(handle.id, raster);
       if (fitRange) {

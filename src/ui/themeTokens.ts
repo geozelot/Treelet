@@ -24,7 +24,6 @@ export const themeTokens = /* css */ `
     /* The logo's leaf green; darker on light backgrounds for 3:1 contrast */
     --accent: light-dark(#7a9400, #a5c500);
     /* Text on the accent */
-    --on-accent: light-dark(#ffffff, #111111);
     /* Fills: hover, selected, and the resting fill of buttons and scrubs */
     --hover-bg: light-dark(rgba(0, 0, 0, 0.05), rgba(255, 255, 255, 0.06));
     --active-bg: light-dark(rgba(0, 0, 0, 0.10), rgba(255, 255, 255, 0.14));
